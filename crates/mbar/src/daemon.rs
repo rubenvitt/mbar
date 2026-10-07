@@ -108,8 +108,11 @@ pub fn run(bar_name: String, opts: DaemonOptions) -> ! {
 
     // Running from mbar.app: scripts (and Lua's io.popen) find `sketchybar`/`mbar` in the
     // bundle first, whatever PATH launchd gave the agent. Set before any thread exists.
+    // Canonicalized: on macOS `current_exe` is the path that was exec'd, so a start via
+    // `Resources/bin/sketchybar` (or a symlink elsewhere) would otherwise not be found.
     let bundle = std::env::current_exe()
         .ok()
+        .map(|exe| std::fs::canonicalize(&exe).unwrap_or(exe))
         .and_then(|exe| mbar_app::bundle::bundle_root_from_exe(&exe))
         .and_then(|root| mbar_app::bundle::read_bundle(&root));
     if let Some(b) = &bundle {

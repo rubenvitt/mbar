@@ -86,10 +86,10 @@ pub fn script_path(bin_dir: &Path, current: &str) -> String {
     } else {
         current
     };
-    if base.split(':').next() == Some(&*bin) {
-        return base.to_string();
-    }
-    format!("{bin}:{base}")
+    std::iter::once(&*bin)
+        .chain(base.split(':').filter(|p| *p != bin))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 #[cfg(test)]
@@ -137,6 +137,61 @@ mod tests {
     }
 
     #[test]
+    fn plist_values_real_world_layout() {
+        // Similar key prefixes, a comment, `<false/>`, line breaks between key and value.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- generated -->
+  <key>CFBundleVersionExtra</key>
+  <string>9</string>
+  <key>SUFeedURLs</key>
+  <string>wrong</string>
+  <key>CFBundleVersion</key>
+
+    <string>2000</string>
+  <key>SUFeedURL</key>
+  <string></string>
+  <key>SUEnableAutomaticChecksX</key>
+  <true/>
+  <key>SUEnableAutomaticChecks</key>
+  <false/>
+</dict>
+</plist>"#;
+        assert_eq!(
+            plist_string(xml, "CFBundleVersion").as_deref(),
+            Some("2000")
+        );
+        assert_eq!(plist_string(xml, "SUFeedURL").as_deref(), Some(""));
+        assert_eq!(plist_bool(xml, "SUEnableAutomaticChecks"), Some(false));
+        assert_eq!(plist_bool(xml, "SUEnableAutomaticChecksX"), Some(true));
+        assert_eq!(plist_string(xml, "SUEnableAutomaticChecks"), None);
+    }
+
+    /// `Resources/bin/sketchybar -> ../../MacOS/mbar`: the symlink path itself is not
+    /// inside `Contents/MacOS`, so the daemon canonicalizes `current_exe()` first
+    /// (`_NSGetExecutablePath` on macOS returns the path that was exec'd, unresolved).
+    #[cfg(unix)]
+    #[test]
+    fn root_from_resources_bin_symlink_after_canonicalize() {
+        let tmp = std::env::temp_dir().join(format!("mbar-link-{}", std::process::id()));
+        let root = tmp.join("mbar.app");
+        std::fs::create_dir_all(root.join("Contents/MacOS")).unwrap();
+        std::fs::create_dir_all(root.join("Contents/Resources/bin")).unwrap();
+        std::fs::write(root.join("Contents/MacOS/mbar"), b"").unwrap();
+        let link = root.join("Contents/Resources/bin/sketchybar");
+        std::os::unix::fs::symlink("../../MacOS/mbar", &link).unwrap();
+        assert_eq!(bundle_root_from_exe(&link), None);
+        let resolved = std::fs::canonicalize(&link).unwrap();
+        assert_eq!(
+            bundle_root_from_exe(&resolved),
+            Some(std::fs::canonicalize(&root).unwrap())
+        );
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
     fn read_bundle_from_disk() {
         let root = std::env::temp_dir().join(format!("mbar-bundle-{}.app", std::process::id()));
         std::fs::create_dir_all(root.join("Contents")).unwrap();
@@ -167,6 +222,14 @@ mod tests {
         assert_eq!(
             script_path(bin, ""),
             format!("/Applications/mbar.app/Contents/Resources/bin:{DEFAULT_SCRIPT_PATH}")
+        );
+        // Already on PATH further back (e.g. via /etc/paths.d): moved to the front once.
+        assert_eq!(
+            script_path(
+                bin,
+                "/usr/bin:/Applications/mbar.app/Contents/Resources/bin:/bin"
+            ),
+            "/Applications/mbar.app/Contents/Resources/bin:/usr/bin:/bin"
         );
     }
 }
