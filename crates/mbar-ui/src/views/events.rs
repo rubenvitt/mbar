@@ -2,6 +2,8 @@
 
 use std::ops::Range;
 
+use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::StyledExt as _;
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -10,8 +12,6 @@ use gpui_kit::component::{
     v_flex, ActiveTheme as _, IconName, Sizable as _, WindowExt as _,
 };
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::StyledExt as _;
 use gpui_kit::*;
 use mbar_ui_model::ipc::{spawn_monitor, MonitorHandle, MonitorUpdate};
 use mbar_ui_model::model::{trigger_args, EventLog, EventRecord, MonitorMessage};
@@ -86,7 +86,10 @@ impl EventsView {
                 while let Ok(more) = rx.try_recv() {
                     batch.push(more);
                 }
-                if this.update(cx, |this, cx| this.on_updates(batch, cx)).is_err() {
+                if this
+                    .update(cx, |this, cx| this.on_updates(batch, cx))
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -358,7 +361,11 @@ impl Render for EventsView {
         let trigger_form = section("Trigger an event", cx).child(
             h_flex()
                 .gap_2()
-                .child(div().w(px(200.)).child(Input::new(&self.trigger_event).small()))
+                .child(
+                    div()
+                        .w(px(200.))
+                        .child(Input::new(&self.trigger_event).small()),
+                )
                 .child(div().flex_1().child(Input::new(&self.trigger_vars).small()))
                 .child(
                     Button::new("events-trigger")
@@ -391,4 +398,3 @@ impl Render for EventsView {
             .child(trigger_form)
     }
 }
-

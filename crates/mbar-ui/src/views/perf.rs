@@ -40,16 +40,16 @@ fn uptime(secs: f64) -> String {
 }
 
 fn table_of(headers: &[&'static str], rows: Vec<Vec<String>>) -> Table {
-    let header = TableHeader::new().child(TableRow::new().children(headers.iter().enumerate().map(
-        |(i, h)| {
+    let header = TableHeader::new().child(TableRow::new().children(
+        headers.iter().enumerate().map(|(i, h)| {
             let head = TableHead::new().child(*h);
             if i == 0 {
                 head
             } else {
                 head.text_right()
             }
-        },
-    )));
+        }),
+    ));
     let body = TableBody::new().children(rows.into_iter().map(|cols| {
         TableRow::new().children(cols.into_iter().enumerate().map(|(i, c)| {
             let cell = TableCell::new().child(c);
@@ -65,7 +65,9 @@ fn table_of(headers: &[&'static str], rows: Vec<Vec<String>>) -> Table {
 
 impl PerfView {
     pub fn new(shared: Shared, _window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let poll = interval(cx, Duration::from_secs(1), |this: &mut Self, cx| this.poll(cx));
+        let poll = interval(cx, Duration::from_secs(1), |this: &mut Self, cx| {
+            this.poll(cx)
+        });
         let mut view = PerfView {
             shared,
             stats: None,
@@ -134,11 +136,7 @@ impl PerfView {
 
 impl Render for PerfView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let header = page_header(
-            "Performance",
-            "`--query stats`, sampled every second",
-            cx,
-        );
+        let header = page_header("Performance", "`--query stats`, sampled every second", cx);
         let Some(s) = self.stats.clone() else {
             return v_flex().size_full().gap_3().child(header).child(
                 div()
@@ -154,9 +152,21 @@ impl Render for PerfView {
             .child(stat_tile("Frame avg", ms_from_us(s.frame_time_us.avg), cx))
             .child(stat_tile("Frame p95", ms_from_us(s.frame_time_us.p95), cx))
             .child(stat_tile("Frame max", ms_from_us(s.frame_time_us.max), cx))
-            .child(stat_tile("Layout avg", ms_from_us(s.layout_time_us.avg), cx))
-            .child(stat_tile("Layout p95", ms_from_us(s.layout_time_us.p95), cx))
-            .child(stat_tile("Layout max", ms_from_us(s.layout_time_us.max), cx));
+            .child(stat_tile(
+                "Layout avg",
+                ms_from_us(s.layout_time_us.avg),
+                cx,
+            ))
+            .child(stat_tile(
+                "Layout p95",
+                ms_from_us(s.layout_time_us.p95),
+                cx,
+            ))
+            .child(stat_tile(
+                "Layout max",
+                ms_from_us(s.layout_time_us.max),
+                cx,
+            ));
         let counters = h_flex()
             .flex_wrap()
             .gap_2()

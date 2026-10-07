@@ -17,7 +17,8 @@ pub const SCREEN_RECORDING_SETTINGS_URL: &str =
 
 /// PATH given to the daemon started by launchd (which otherwise only has the system
 /// directories), so scripts find Homebrew tools like they do from a shell.
-const LAUNCH_AGENT_PATH: &str = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+const LAUNCH_AGENT_PATH: &str =
+    "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
@@ -299,7 +300,10 @@ mod tests {
 
     #[test]
     fn permission_classification() {
-        assert_eq!(classify_accessibility(&Ok("[]".into())), Permission::Granted);
+        assert_eq!(
+            classify_accessibility(&Ok("[]".into())),
+            Permission::Granted
+        );
         assert_eq!(
             classify_accessibility(&Err(IpcError::Daemon(
                 "Query (menus): Accessibility permission not given".into()

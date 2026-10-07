@@ -387,7 +387,9 @@ pub fn build_tree(order: &[String], items: &BTreeMap<String, ItemInfo>) -> Vec<T
     for pos in positions {
         let mut children = Vec::new();
         for &name in &ordered {
-            let Some(info) = items.get(name) else { continue };
+            let Some(info) = items.get(name) else {
+                continue;
+            };
             if info.kind == "bracket" || info.position != pos || hosted.contains(name) {
                 continue;
             }
@@ -404,7 +406,9 @@ pub fn build_tree(order: &[String], items: &BTreeMap<String, ItemInfo>) -> Vec<T
     // Brackets.
     let mut brackets = Vec::new();
     for &name in &ordered {
-        let Some(info) = items.get(name) else { continue };
+        let Some(info) = items.get(name) else {
+            continue;
+        };
         if info.kind != "bracket" {
             continue;
         }
@@ -565,7 +569,8 @@ pub fn item_set_key(path: &str) -> Option<String> {
 
 /// Maps a bar query path to its `--bar` key.
 pub fn bar_set_key(path: &str) -> Option<String> {
-    if path == "items" || path.starts_with("items.") {
+    // `clip` is serialized with the bar background but `--bar clip=` is always rejected.
+    if path == "items" || path.starts_with("items.") || path == "clip" {
         return None;
     }
     let key = path.strip_suffix(".value").unwrap_or(path);
@@ -594,7 +599,9 @@ pub fn filter_rows<'a>(rows: &'a [PropRow], filter: &str) -> Vec<&'a PropRow> {
     let f = filter.trim().to_lowercase();
     rows.iter()
         .filter(|r| {
-            f.is_empty() || r.path.to_lowercase().contains(&f) || r.value.to_lowercase().contains(&f)
+            f.is_empty()
+                || r.path.to_lowercase().contains(&f)
+                || r.value.to_lowercase().contains(&f)
         })
         .collect()
 }
@@ -619,7 +626,8 @@ pub fn set_args(target: &Target, pairs: &[(String, String)]) -> Vec<String> {
 pub fn shell_quote(s: &str) -> String {
     let safe = !s.is_empty()
         && s.chars().all(|c| {
-            c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '=' | ',' | '+' | '@' | '%')
+            c.is_ascii_alphanumeric()
+                || matches!(c, '_' | '-' | '.' | '/' | ':' | '=' | ',' | '+' | '@' | '%')
         });
     if safe {
         s.to_string()
@@ -658,7 +666,10 @@ fn lua_value(v: &str) -> String {
     let is_hex = t.len() > 2
         && (t.starts_with("0x") || t.starts_with("0X"))
         && t[2..].chars().all(|c| c.is_ascii_hexdigit());
-    let is_num = !t.is_empty() && t == v && t.parse::<f64>().is_ok() && !t.contains(['e', 'E', 'n', 'N', 'i', 'I']);
+    let is_num = !t.is_empty()
+        && t == v
+        && t.parse::<f64>().is_ok()
+        && !t.contains(['e', 'E', 'n', 'N', 'i', 'I']);
     if is_hex || is_num {
         t.to_string()
     } else {
@@ -752,6 +763,26 @@ pub fn editable_pairs(rows: &[PropRow]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Pairs for "copy everything": the editable pairs minus values that do not round-trip
+/// through `--set`. Unset strings print as `(null)`; text `width` prints the last fixed
+/// width even while the width is dynamic; an unset popup `height` prints `-1`; and
+/// `position=popup` without a host would detach a popup item.
+pub fn export_pairs(rows: &[PropRow]) -> Vec<(String, String)> {
+    editable_pairs(rows)
+        .into_iter()
+        .filter(|(k, v)| {
+            let text_width = matches!(
+                k.as_str(),
+                "icon.width" | "label.width" | "slider.knob.width"
+            );
+            !(v == "(null)"
+                || text_width
+                || (k == "popup.height" && v == "-1")
+                || (k == "position" && v == "popup"))
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Stats
 // ---------------------------------------------------------------------------
@@ -837,18 +868,19 @@ impl Stats {
             return Err("stats is not an object".into());
         }
         let u = |path: &[&str]| get_f64(v, path).max(0.0) as u64;
-        let mut by_item: Vec<ScriptItemStats> = match v.get("scripts").and_then(|s| s.get("by_item")) {
-            Some(Value::Object(m)) => m
-                .iter()
-                .map(|(name, s)| ScriptItemStats {
-                    name: name.clone(),
-                    runs: get_f64(s, &["runs"]).max(0.0) as u64,
-                    avg_ms: get_f64(s, &["avg_ms"]),
-                    max_ms: get_f64(s, &["max_ms"]),
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
+        let mut by_item: Vec<ScriptItemStats> =
+            match v.get("scripts").and_then(|s| s.get("by_item")) {
+                Some(Value::Object(m)) => m
+                    .iter()
+                    .map(|(name, s)| ScriptItemStats {
+                        name: name.clone(),
+                        runs: get_f64(s, &["runs"]).max(0.0) as u64,
+                        avg_ms: get_f64(s, &["avg_ms"]),
+                        max_ms: get_f64(s, &["max_ms"]),
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
         by_item.sort_by(|a, b| {
             b.total_ms()
                 .partial_cmp(&a.total_ms())
@@ -1239,8 +1271,17 @@ mod tests {
             items.insert(i.name.clone(), i);
         }
         let order: Vec<String> = [
-            "apple", "apple.prefs", "apple.lock", "title", "cpu", "clock", "notch_l", "notch_r",
-            "status", "orphan", "ghost",
+            "apple",
+            "apple.prefs",
+            "apple.lock",
+            "title",
+            "cpu",
+            "clock",
+            "notch_l",
+            "notch_r",
+            "status",
+            "orphan",
+            "ghost",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -1311,7 +1352,10 @@ mod tests {
             Some("icon.background.shadow.angle")
         );
         assert_eq!(item_set_key("scripting.script").as_deref(), Some("script"));
-        assert_eq!(item_set_key("slider.knob.value").as_deref(), Some("slider.knob"));
+        assert_eq!(
+            item_set_key("slider.knob.value").as_deref(),
+            Some("slider.knob")
+        );
         assert_eq!(item_set_key("popup.align").as_deref(), Some("popup.align"));
         for ro in [
             "name",
@@ -1348,6 +1392,34 @@ mod tests {
         let pairs = editable_pairs(&rows);
         assert!(pairs.iter().all(|(k, _)| k != "name"));
         assert!(pairs.contains(&("icon.font".into(), "Hack Nerd Font:Bold:14.00".into())));
+        assert!(pairs.contains(&("script".into(), "echo \"x\"\nexit".into())));
+        assert!(pairs.contains(&("click_script".into(), "(null)".into())));
+        let export = export_pairs(&rows);
+        assert!(export.contains(&("width".into(), "-1".into())));
+        assert!(export.contains(&("script".into(), "echo \"x\"\nexit".into())));
+        assert!(!export
+            .iter()
+            .any(|(k, _)| k == "click_script" || k == "background.image"));
+        let popup_row = |k: &str, v: &str| PropRow {
+            path: k.into(),
+            value: v.into(),
+            set_key: item_set_key(k),
+        };
+        let rows2 = vec![
+            popup_row("icon.width", "0"),
+            popup_row("popup.height", "-1"),
+            popup_row("geometry.position", "popup"),
+            popup_row("popup.align", "left"),
+            popup_row("slider.width", "100"),
+        ];
+        assert_eq!(
+            export_pairs(&rows2),
+            vec![
+                ("popup.align".into(), "left".into()),
+                ("slider.width".into(), "100".into())
+            ]
+        );
+        assert_eq!(bar_set_key("clip"), None);
     }
 
     #[test]
@@ -1360,7 +1432,13 @@ mod tests {
         ];
         assert_eq!(
             set_args(&t, &pairs),
-            vec!["--set", "clock", "label=it's 5", "icon.color=0xffff0000", "width=-1"]
+            vec![
+                "--set",
+                "clock",
+                "label=it's 5",
+                "icon.color=0xffff0000",
+                "width=-1"
+            ]
         );
         assert_eq!(
             cli_command("mbar", &t, &pairs),
@@ -1462,7 +1540,10 @@ mod tests {
             parse_monitor_line(r#"{"type":"stats","frames":3}"#),
             Some(MonitorMessage::Stats(s)) if s.frames == 3
         ));
-        assert!(matches!(parse_monitor_line("garbage"), Some(MonitorMessage::Other(_))));
+        assert!(matches!(
+            parse_monitor_line("garbage"),
+            Some(MonitorMessage::Other(_))
+        ));
         assert_eq!(parse_monitor_line("  "), None);
 
         let mut log = EventLog::new(3);

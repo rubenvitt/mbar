@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
+use gpui_kit::component::StyledExt as _;
 use gpui_kit::component::{
     button::Button,
     h_flex,
@@ -15,7 +16,6 @@ use gpui_kit::component::{
     v_flex, ActiveTheme as _, Icon, IconName, Sizable as _,
 };
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::component::StyledExt as _;
 use gpui_kit::*;
 use mbar_ui_model::ipc::IpcError;
 use mbar_ui_model::model::{build_tree, NodeKind, Snapshot, Target, TreeNode};
@@ -121,9 +121,12 @@ impl InspectorView {
                     this.collapsed.remove(id.as_ref());
                 }
             }),
-            cx.subscribe(&editor, |this, _, event: &PropertyEditorEvent, cx| match event {
-                PropertyEditorEvent::Applied => this.refresh(cx),
-            }),
+            cx.subscribe(
+                &editor,
+                |this, _, event: &PropertyEditorEvent, cx| match event {
+                    PropertyEditorEvent::Applied => this.refresh(cx),
+                },
+            ),
         ];
         let mut view = InspectorView {
             shared,
@@ -227,7 +230,8 @@ impl InspectorView {
 
     fn set_auto_refresh(&mut self, on: bool, cx: &mut Context<Self>) {
         self.auto_refresh = on;
-        self._auto_task = on.then(|| interval(cx, Duration::from_secs(1), |this, cx| this.refresh(cx)));
+        self._auto_task =
+            on.then(|| interval(cx, Duration::from_secs(1), |this, cx| this.refresh(cx)));
         cx.notify();
     }
 
@@ -274,7 +278,9 @@ impl InspectorView {
                         .when_some(type_tag, |row, t| {
                             row.child(Tag::secondary().small().child(t))
                         })
-                        .when(!m.drawing, |row| row.child(Icon::new(IconName::EyeOff).small())),
+                        .when(!m.drawing, |row| {
+                            row.child(Icon::new(IconName::EyeOff).small())
+                        }),
                 )
         })
     }
@@ -291,7 +297,11 @@ impl Render for InspectorView {
                 } else {
                     format!(" · {} could not be queried", s.errors.len())
                 },
-                if self.loading { " · refreshing…" } else { "" }
+                if self.loading {
+                    " · refreshing…"
+                } else {
+                    ""
+                }
             ),
             None => "Live tree of bars, items, popups and brackets".to_string(),
         };
@@ -301,7 +311,9 @@ impl Render for InspectorView {
                 Switch::new("inspector-auto")
                     .label("Auto-refresh (1 s)")
                     .checked(self.auto_refresh)
-                    .on_change(cx.listener(|this, on: &bool, _, cx| this.set_auto_refresh(*on, cx))),
+                    .on_change(
+                        cx.listener(|this, on: &bool, _, cx| this.set_auto_refresh(*on, cx)),
+                    ),
             )
             .child(
                 Button::new("inspector-refresh")
@@ -326,7 +338,11 @@ impl Render for InspectorView {
                 .p_3()
                 .text_sm()
                 .text_color(theme.muted_foreground)
-                .child(if self.loading { "Loading…" } else { "The bar has no items." })
+                .child(if self.loading {
+                    "Loading…"
+                } else {
+                    "The bar has no items."
+                })
                 .into_any_element()
         } else {
             self.render_tree(cx).into_any_element()
@@ -354,13 +370,7 @@ impl Render for InspectorView {
                             .rounded(theme.radius)
                             .child(left),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .child(self.editor.clone()),
-                    ),
+                    .child(div().flex_1().min_w_0().h_full().child(self.editor.clone())),
             )
     }
 }

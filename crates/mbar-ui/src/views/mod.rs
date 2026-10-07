@@ -9,13 +9,13 @@ mod system;
 
 use std::time::Duration;
 
+use gpui_kit::component::StyledExt as _;
 use gpui_kit::component::{
     h_flex,
     notification::Notification,
     sidebar::{Sidebar, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuItem},
     v_flex, ActiveTheme as _, Icon, IconName, Sizable as _, Theme, WindowExt as _,
 };
-use gpui_kit::component::StyledExt as _;
 use gpui_kit::*;
 use mbar_ui_model::ipc::{Client, DaemonStatus};
 
@@ -318,13 +318,6 @@ impl Render for AppView {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(self.render_sidebar(cx))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .p_4()
-                    .child(content),
-            )
+            .child(v_flex().flex_1().min_w_0().h_full().p_4().child(content))
     }
 }

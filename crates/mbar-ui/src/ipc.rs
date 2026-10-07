@@ -12,8 +12,8 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::model::{
-    parse_monitor_line, set_args, trigger_args, BarInfo, ItemInfo, MonitorMessage, Snapshot,
-    Stats, Target,
+    parse_monitor_line, set_args, trigger_args, BarInfo, ItemInfo, MonitorMessage, Snapshot, Stats,
+    Target,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -196,8 +196,8 @@ impl StreamDecoder {
             if self.buf.len() < 4 {
                 return Ok(Vec::new());
             }
-            let len = u32::from_le_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]])
-                as usize;
+            let len =
+                u32::from_le_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
             let textual = matches!(self.buf[0], b'{' | b'[') && self.buf[1] != 0;
             self.mode = if textual || len > mbar_ipc::socket::MAX_FRAME {
                 StreamMode::Lines
@@ -382,7 +382,9 @@ fn run_monitor_connection(
             Err(e)
                 if matches!(
                     e.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
                 ) => {}
             Err(e) => return ConnectionEnd::Lost(e.to_string()),
         }
@@ -477,11 +479,13 @@ mod tests {
     #[test]
     fn snapshot_over_socket() {
         with_fake_daemon(
-            |args| match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+            |args| {
+                match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
                 ["--query", "bar"] => "{\n\t\"position\": \"top\",\n\t\"items\": [\n\t\t \"a\",\n\t\t \"b\"\n\t]\n}\n".into(),
                 ["--query", "item", "a"] => "{\"name\":\"a\",\"type\":\"item\",\"geometry\":{\"position\":\"left\",\"drawing\":\"on\"}}".into(),
                 ["--query", "item", n] => format!("[!] Query: Item '{n}' not found\n"),
                 _ => String::new(),
+            }
             },
             |path| {
                 let send = |args: &[&str]| {

@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use gpui_kit::component::StyledExt as _;
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -10,12 +11,10 @@ use gpui_kit::component::{
     switch::Switch,
     v_flex, ActiveTheme as _, Disableable as _, IconName, Sizable as _, WindowExt as _,
 };
-use gpui_kit::component::StyledExt as _;
 use gpui_kit::*;
 use mbar_ui_model::ipc::DaemonStatus;
 use mbar_ui_model::system::{
-    self as sys, Permission, Permissions, ACCESSIBILITY_SETTINGS_URL,
-    SCREEN_RECORDING_SETTINGS_URL,
+    self as sys, Permission, Permissions, ACCESSIBILITY_SETTINGS_URL, SCREEN_RECORDING_SETTINGS_URL,
 };
 
 use super::{interval, page_header, section, status_color, status_text, Shared};
@@ -233,7 +232,10 @@ impl SystemView {
             Some(Permission::Granted) => ("Granted".to_string(), theme.green),
             Some(Permission::Missing) => ("Not granted".to_string(), theme.red),
             Some(Permission::Unknown(why)) => (format!("Unknown ({why})"), theme.muted_foreground),
-            None => ("Unknown (mbar not running)".to_string(), theme.muted_foreground),
+            None => (
+                "Unknown (mbar not running)".to_string(),
+                theme.muted_foreground,
+            ),
         };
         h_flex()
             .w_full()

@@ -4,6 +4,7 @@
 //! `--set <item> key=value` / `--bar key=value`. Read-only values (geometry masks,
 //! bounding rects, popup item lists, ...) are shown but cannot be selected for editing.
 
+use gpui_kit::component::StyledExt as _;
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -12,10 +13,9 @@ use gpui_kit::component::{
     v_flex, ActiveTheme as _, Disableable as _, IconName, Sizable as _, WindowExt as _,
 };
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::component::StyledExt as _;
 use gpui_kit::*;
 use mbar_ui_model::model::{
-    cli_command, editable_pairs, filter_rows, lua_snippet, property_rows, PropRow, Target,
+    cli_command, export_pairs, filter_rows, lua_snippet, property_rows, PropRow, Target,
 };
 use serde_json::Value;
 
@@ -60,9 +60,9 @@ impl PropertyEditor {
                     cx.notify();
                 }
             }),
-            cx.subscribe_in(&edit, window, |this, _, event, window, cx| match event {
+            cx.subscribe_in(&edit, window, |this, _, event, _, cx| match event {
                 InputEvent::Change => this.edit_dirty = true,
-                InputEvent::PressEnter { .. } => this.apply(window, cx),
+                InputEvent::PressEnter { .. } => this.apply(cx),
                 _ => {}
             }),
         ];
@@ -83,7 +83,12 @@ impl PropertyEditor {
 
     /// Replaces the shown data. Keeps the selection (and an in-progress edit) while the
     /// target stays the same.
-    pub fn set_data(&mut self, target: Option<Target>, json: Option<&Value>, cx: &mut Context<Self>) {
+    pub fn set_data(
+        &mut self,
+        target: Option<Target>,
+        json: Option<&Value>,
+        cx: &mut Context<Self>,
+    ) {
         let same_target = target == self.target;
         self.rows = match (&target, json) {
             (Some(t), Some(j)) => property_rows(t, j),
@@ -136,7 +141,7 @@ impl PropertyEditor {
         }
     }
 
-    fn apply(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn apply(&mut self, cx: &mut Context<Self>) {
         let (Some(target), Some(row)) = (self.target.clone(), self.selected_row()) else {
             return;
         };
@@ -170,7 +175,6 @@ impl PropertyEditor {
                 }
             },
         );
-        let _ = window;
     }
 
     /// The selected property with the value currently in the editor, or every editable
@@ -178,7 +182,7 @@ impl PropertyEditor {
     fn copy_pairs(&self, cx: &App) -> Vec<(String, String)> {
         match self.selected_row().and_then(|r| r.set_key.clone()) {
             Some(key) => vec![(key, self.edit.read(cx).value().to_string())],
-            None => editable_pairs(&self.rows),
+            None => export_pairs(&self.rows),
         }
     }
 
@@ -227,14 +231,19 @@ impl PropertyEditor {
                 .flex_1()
                 .min_w_0()
                 .gap_1()
-                .child(div().flex_1().min_w_0().child(Input::new(&self.edit).small()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Input::new(&self.edit).small()),
+                )
                 .child(
                     Button::new("apply")
                         .small()
                         .primary()
                         .label("Apply")
                         .loading(self.applying)
-                        .on_click(cx.listener(|this, _, window, cx| this.apply(window, cx))),
+                        .on_click(cx.listener(|this, _, _, cx| this.apply(cx))),
                 )
                 .child(
                     Button::new("revert")
@@ -282,9 +291,9 @@ impl PropertyEditor {
             .child(key_cell)
             .child(value_cell)
             .when(editable && !selected, |this| {
-                this.on_click(cx.listener(move |this, _, window, cx| {
-                    this.select(path.clone(), window, cx)
-                }))
+                this.on_click(
+                    cx.listener(move |this, _, window, cx| this.select(path.clone(), window, cx)),
+                )
             })
             .into_any_element()
     }
@@ -315,7 +324,11 @@ impl Render for PropertyEditor {
         let toolbar = h_flex()
             .w_full()
             .gap_2()
-            .child(div().flex_1().child(Input::new(&self.filter).small().cleanable(true)))
+            .child(
+                div()
+                    .flex_1()
+                    .child(Input::new(&self.filter).small().cleanable(true)),
+            )
             .child(
                 Button::new("copy-cli")
                     .small()

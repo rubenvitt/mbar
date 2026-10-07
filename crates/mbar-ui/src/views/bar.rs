@@ -3,10 +3,7 @@
 use std::time::Duration;
 
 use gpui_kit::component::{
-    button::Button,
-    h_flex,
-    switch::Switch,
-    v_flex, ActiveTheme as _, IconName, Sizable as _,
+    button::Button, h_flex, switch::Switch, v_flex, ActiveTheme as _, IconName, Sizable as _,
 };
 use gpui_kit::*;
 use mbar_ui_model::ipc::IpcError;
@@ -29,13 +26,19 @@ pub struct BarView {
 impl BarView {
     pub fn new(shared: Shared, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let editor = cx.new(|cx| {
-            PropertyEditor::new(shared.clone(), "Bar properties are not available.", window, cx)
+            PropertyEditor::new(
+                shared.clone(),
+                "Bar properties are not available.",
+                window,
+                cx,
+            )
         });
-        let subs = vec![cx.subscribe(&editor, |this, _, event: &PropertyEditorEvent, cx| {
-            match event {
+        let subs = vec![cx.subscribe(
+            &editor,
+            |this, _, event: &PropertyEditorEvent, cx| match event {
                 PropertyEditorEvent::Applied => this.refresh(cx),
-            }
-        })];
+            },
+        )];
         let mut view = BarView {
             shared,
             editor,
@@ -87,7 +90,8 @@ impl BarView {
 
     fn set_auto_refresh(&mut self, on: bool, cx: &mut Context<Self>) {
         self.auto_refresh = on;
-        self._auto_task = on.then(|| interval(cx, Duration::from_secs(1), |this, cx| this.refresh(cx)));
+        self._auto_task =
+            on.then(|| interval(cx, Duration::from_secs(1), |this, cx| this.refresh(cx)));
         cx.notify();
     }
 }
@@ -104,7 +108,9 @@ impl Render for BarView {
                 Switch::new("bar-auto")
                     .label("Auto-refresh (1 s)")
                     .checked(self.auto_refresh)
-                    .on_change(cx.listener(|this, on: &bool, _, cx| this.set_auto_refresh(*on, cx))),
+                    .on_change(
+                        cx.listener(|this, on: &bool, _, cx| this.set_auto_refresh(*on, cx)),
+                    ),
             )
             .child(
                 Button::new("bar-refresh")
@@ -119,12 +125,11 @@ impl Render for BarView {
             .size_full()
             .gap_3()
             .child(page_header("Bar", subtitle, cx).child(controls))
-            .children(self.error.clone().map(|e| {
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().danger)
-                    .child(e)
-            }))
+            .children(
+                self.error
+                    .clone()
+                    .map(|e| div().text_sm().text_color(cx.theme().danger).child(e)),
+            )
             .child(div().flex_1().min_h_0().child(self.editor.clone()))
     }
 }
