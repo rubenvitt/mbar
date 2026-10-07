@@ -34,3 +34,26 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace --release
       - run: cargo test --workspace
+      - name: Upload release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: mbar-macos-${{ runner.arch }}
+          path: target/release/mbar
+          if-no-files-found: error
+          retention-days: 14
+
+  macos-ui:
+    name: macOS (mbar-ui)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: crates/mbar-ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # mbar-ui is its own workspace with its own target directory.
+          workspaces: crates/mbar-ui -> target
+      - run: cargo build --release
+      - run: cargo test --no-default-features

@@ -1,17 +1,22 @@
 # Installing mbar
 
 mbar runs on macOS. On Linux it only builds a headless daemon, which the tests
-use. There are no prebuilt releases yet, so you build it from source. CI uploads
-an unsigned macOS `mbar` binary as a workflow artifact on every run, which is
-useful for testing but is not a release.
+use. There are no prebuilt releases yet, so you build it from source.
+
+CI uploads the macOS release binary as a workflow artifact (`mbar-macos-ARM64`)
+on every run. It is unsigned and meant for testing. Artifacts do not keep file
+modes, so after downloading run `chmod +x mbar` and
+`xattr -d com.apple.quarantine mbar`.
 
 ## Requirements
 
 - macOS on Apple silicon or Intel
-- Xcode Command Line Tools (`xcode-select --install`). Neither mbar nor mbar-ui
-  needs the full Xcode: the Metal shaders are compiled at runtime.
-- Rust 1.80 or newer ([rustup](https://rustup.rs)). The management UI follows
-  GPUI and may need a more recent stable toolchain.
+- Xcode Command Line Tools (`xcode-select --install`). The full Xcode is not
+  needed for mbar, because its Metal shaders are compiled at runtime. mbar-ui's
+  GPUI build uses runtime shaders too.
+- A current stable Rust toolchain ([rustup](https://rustup.rs)). The workspace
+  declares 1.80 as its minimum. The management UI follows GPUI and may need a
+  newer one.
 
 Lua 5.4 is vendored and compiled into the binary. Nothing else needs to be
 installed.
@@ -43,12 +48,14 @@ selects a bar other than the default `mbar`. The UI is a plain executable, not a
 
 ## Install
 
-`make install` copies the binary and creates the `sketchybar` symlink:
+`make install` copies the binary from `make release` and creates the
+`sketchybar` symlink. It does not build anything, so it can run under `sudo`:
 
 ```sh
-make install PREFIX=$HOME/.local   # -> ~/.local/bin/mbar, ~/.local/bin/sketchybar
-sudo make install                  # PREFIX defaults to /usr/local
-make install-ui PREFIX=$HOME/.local  # also installs mbar-ui, if built
+make release
+make install PREFIX=$HOME/.local     # -> ~/.local/bin/mbar, ~/.local/bin/sketchybar
+sudo make install                    # PREFIX defaults to /usr/local
+make ui && make install-ui PREFIX=$HOME/.local   # optional: mbar-ui
 ```
 
 It also installs the LuaLS definitions to `$PREFIX/share/mbar/mbar.d.lua`.
@@ -66,14 +73,14 @@ Make sure the directory is on your `PATH`.
 
 SketchyBar plugins call `sketchybar --set ...`. With a `sketchybar -> mbar`
 symlink on the `PATH`, those calls reach mbar unchanged. Invoked as `sketchybar`,
-the binary talks to the default bar `mbar`, sets `BAR_NAME=sketchybar` for
-scripts, and prints SketchyBar's own `--help` and `--version` text.
+the binary talks to the default bar `mbar` and prints SketchyBar's own `--help`
+and `--version` text. A daemon started through the symlink also runs as bar
+`mbar`, but its scripts see `BAR_NAME=sketchybar`.
 
 - Plugins run with the **daemon's** environment, so the symlink must be on the
-  daemon's `PATH`. The LaunchAgent below sets
-  `PATH=/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`.
-  If you install to `~/.local/bin`, `make install-agent` puts that directory
-  first.
+  daemon's `PATH`. `make install-agent` sets the agent's `PATH` to the install
+  directory followed by
+  `/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`.
 - If SketchyBar is also installed (for example via Homebrew), whichever
   `sketchybar` comes first on the `PATH` wins. Uninstall SketchyBar, or make sure
   the symlink comes first. Skip the symlink with `make install SKETCHYBAR_LINK=0`.
@@ -93,8 +100,8 @@ The daemon uses the first regular file it finds:
 5. `~/.config/sketchybar/init.lua`, `sketchybarrc`
 6. `~/.sketchybarrc`
 
-`init.lua` wins over a shell config in the same directory. Steps 4 to 6 apply
-only to the default bar name `mbar`. As in SketchyBar, the daemon sets the
+`init.lua` wins over a shell config in the same directory. For another bar name,
+steps 2 and 3 use that name instead of `mbar`, and steps 4 and 5 are skipped. As in SketchyBar, the daemon sets the
 owner's execute bit on a shell config and runs it with `CONFIG_DIR` set to its
 directory.
 
@@ -109,8 +116,9 @@ This fills in `packaging/dev.rubeen.mbar.plist`, writes it to
 `~/Library/LaunchAgents/dev.rubeen.mbar.plist`, and loads it with
 `launchctl bootstrap`. The agent:
 
-- uses the label `dev.rubeen.mbar`, the same label the management UI's
-  "launch at login" switch uses, so the two do not conflict.
+- uses the label `dev.rubeen.mbar`, the same label as the management UI's
+  "launch at login" switch, so the two never start two daemons. Turning the
+  switch on in the UI rewrites the file without the log settings.
 - starts at login (`RunAtLoad`) and restarts mbar if it crashes
   (`KeepAlive` → `SuccessfulExit=false`). `mbar --exit` exits with status 0, so
   it stays stopped.
@@ -144,12 +152,19 @@ running `mbar` in a terminal.
 
 ### Homebrew (draft)
 
-`packaging/homebrew/mbar.rb` is a draft formula that builds from git `HEAD`:
+`packaging/homebrew/mbar.rb` is a draft formula that builds from git `HEAD`.
+Recent Homebrew versions only install formulae from a tap, so put it in a local
+tap:
 
 ```sh
-brew install --HEAD ./packaging/homebrew/mbar.rb
+brew tap-new "$USER/local"
+cp packaging/homebrew/mbar.rb "$(brew --repository "$USER/local")/Formula/"
+brew install --HEAD "$USER/local/mbar"
 brew services start mbar
 ```
+
+The formula does not create the `sketchybar` symlink, because that would
+conflict with the `sketchybar` formula. Its caveats show the command for it.
 
 `brew services` uses its own launchd label (`homebrew.mxcl.mbar`). Use either
 `brew services` or `make install-agent`, not both.
@@ -233,6 +248,14 @@ reserves the gap around the notch for `q`/`e` items, as in SketchyBar.
 
 ```sh
 make uninstall PREFIX=$HOME/.local   # stops and removes the LaunchAgent and the installed files
+```
+
+For a system-wide install, remove the agent as your own user first, then the
+files as root:
+
+```sh
+make uninstall-agent
+sudo make uninstall
 ```
 
 or by hand:

@@ -54,7 +54,7 @@ corruption and undefined behaviour replaced by defined behaviour) are in
 
 ## Quick start
 
-Requirements: macOS, the Xcode Command Line Tools, and Rust 1.80 or newer.
+Requirements: macOS, the Xcode Command Line Tools, and a stable Rust toolchain.
 
 ```sh
 git clone https://github.com/rubenvitt/mbar.git
@@ -85,7 +85,7 @@ mbar --menubar hide     # from another shell: auto-hide the native menu bar
 
 A shell `sketchybarrc` works too. If no mbar config exists, mbar reads
 `~/.config/sketchybar/sketchybarrc`. To start mbar at login, run
-`make install-agent`. See [`docs/INSTALL.md`](docs/INSTALL.md) for the details:
+`make install-agent PREFIX=$HOME/.local`. See [`docs/INSTALL.md`](docs/INSTALL.md) for the details:
 permissions, the LaunchAgent and uninstalling.
 
 ## Coming from SketchyBar
@@ -146,7 +146,6 @@ use it.
 
 ## License
 
-mbar is licensed under **GPL-3.0-only** (see `license` in
-[`Cargo.toml`](Cargo.toml)). It is an independent reimplementation, but its
+mbar is licensed under **GPL-3.0-only** (see [`LICENSE`](LICENSE)). It is an independent reimplementation, but its
 behaviour is derived from SketchyBar, which is GPL-3.0 licensed, by Felix Kratz.
 mbar is not affiliated with the SketchyBar project.
