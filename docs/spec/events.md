@@ -977,3 +977,319 @@ On add/remove with brightness events active, DisplayServices registration is add
   distributed-notification observers of earlier custom events (Bug B6), power/media/volume dedup state, scroll
   throttle, `g_hotload` itself.
 
+---
+
+## 10. Animation system
+
+### 10.1 `--animate <curve> <duration>` (`message.c:handle_message_mach`)
+
+- At the **start of every mach batch** (one client invocation): `animator.interp_function = '\0'`,
+  `animator.duration = 0`.
+- `--animate c d`: `interp_function = first byte of token c` (empty/missing token → `'\0'`);
+  `duration = strtoul(d, NULL, 0)` as u32 (`0x..` hex and leading-`0` octal accepted; garbage → 0; negative →
+  wraps to a huge value, Quirk Q9).
+- The setting applies to every animatable property assignment that follows **in the same batch** (`--set`,
+  `--default`, `--bar`, including regex `--set`), until another `--animate` in the same batch overrides it.
+  `--animate <c> 0` turns animation off for the following commands.
+- Quirk Q8: `text_animate_scroll` (marquee, §10.9) writes `animator.duration`/`interp_function` and resets them to
+  `0`/`'\0'` when it runs; if it runs synchronously inside a batch (e.g. via `--trigger` → item update), it cancels the
+  batch's `--animate` for all following commands.
+
+### 10.2 Curves (`animation.c:animation_setup`, formulas in `misc/helpers.h`)
+
+Selection is by the **first character only**:
+
+| First char | Documented name | Function | Formula `f(x)`, x ∈ [0,1] |
+|---|---|---|---|
+| `l` | linear | `function_linear` | `x` |
+| `q` | quadratic | `function_square` | `x*x` |
+| `t` | tanh | `function_tanh` | `a = 0.52; a*tanh(2*atanh(1/(2a))*(x-0.5)) + 0.5` (f(0)=0, f(1)=1 exactly in exact arithmetic) |
+| `s` | sin | `function_sin` | `sin(π/2 * x)` |
+| `e` | exp | `function_exp` | `x * exp(x - 1)` |
+| `c` | circ | `function_circ` | `sqrt(1 - powf(x - 1, 2))` — the square is computed in **f32** (`powf`, `1.f`), the sqrt in f64 |
+| `b` | bounce | — | **falls back to linear** (`INTERP_FUNCTION_BOUNCE` is defined but not mapped) |
+| `o` | overshoot | — | **falls back to linear** (`INTERP_FUNCTION_OVERSHOOT` defined but not mapped) |
+| anything else, `'\0'` | — | `function_linear` | `x` |
+
+So `--animate smooth 20` = sin, `--animate elastic 20` = exp, `--animate bounce 20` = linear. Computation is f64.
+On the final frame the curve is bypassed (`slider = 1.0`), so every animation lands exactly on its target.
+
+### 10.3 Duration units and time base
+
+- Duration unit: **frames at 60 Hz**. `animation.duration_seconds = duration / 60.0` (`animation_setup`). E.g. 30 →
+  0.5 s. Wall-clock based, independent of the actual display refresh rate.
+- Time base: `CVDisplayLink` output callback's `output_time->hostTime` (mach absolute ticks of the *upcoming* vsync),
+  scaled by `animator.clock = CVGetHostClockFrequency()` (ticks/s; 24 MHz on Apple Silicon, 1e9 on Intel).
+  mbar may use any monotonic ns clock with `clock = 1e9`.
+- Progress of one animation at frame time `T`:
+
+```
+if initial_time == 0: initial_time = T                  // first frame it is actually stepped
+t = duration_seconds > 0 ? (T - initial_time) / (duration_seconds * clock) : 1.0
+final = t >= 1.0
+t = clamp(t, 0, 1)
+s = final ? 1.0 : curve(t)
+```
+
+  The first stepped frame has `t = 0` (value = initial value, usually no visible change); a 0-duration animation
+  completes on its first stepped frame.
+
+### 10.4 The three value kinds (`ANIMATE`, `ANIMATE_FLOAT`, `ANIMATE_BYTES` in `animation.h`; `animation_update`)
+
+Initial/final values are stored as 32-bit `int` (floats bit-cast; u32 colors reinterpreted).
+
+| Kind | Interpolation per frame | Final frame |
+|---|---|---|
+| int (`ANIMATE`) | `value = (int)((1-s)*i + s*f + 0.5)` — C double→int **truncates toward zero**, so for negative intermediates this is not round-half-up (e.g. −2.7 → −2). In Rust `((1.0-s)*i as f64 + s*f as f64 + 0.5) as i32` matches. | `value = f` exactly |
+| float (`ANIMATE_FLOAT`, `as_float`) | `value = (float)((1-s)*i + s*f)` computed in f64 | same formula with s=1 (= f) |
+| bytes (`ANIMATE_BYTES`, `separate_bytes`) | for each of the 4 bytes in **memory (little-endian) order** of the 32-bit value (byte0 = bits 0–7 = blue of `0xAARRGGBB`, …, byte3 = alpha): `b = (uint8)((1-s)*bi + s*bf)` (truncation, no +0.5) | same formula with s=1 (= f) |
+
+The setter is called every frame with the computed value; its boolean return ("changed") drives redraw (§10.7).
+
+### 10.5 Creating, queueing, locking, cancelling
+
+Animation identity key = **(target object, setter function)**. Two different syntaxes that reach different
+(target, setter) pairs for the same visual field are independent animations and can fight (Quirk Q10), e.g.
+`icon.color` (target `text`, `text_set_color`) vs `icon.color.hex` (target `text.color`, `color_set_hex`);
+`background.color` vs `background.color.hex` vs `background.color.alpha`.
+
+Macro behavior for a property assignment `prop = new` whose current value is `cur`:
+
+```
+if animator.duration > 0:                                     // animated path
+    cancel_locked(key)                     // remove all LOCKED animations with this key; final values NOT applied
+    a = new Animation(key, initial=cur, final=new, duration, curve, kind)
+    // animator_add → calculate_offset:
+    prev = last animation in the list (searching from the end) with the same key
+    if prev:                               // necessarily unlocked = created earlier in this same batch
+        a.initial = prev.final; prev.next = a; a.previous = prev; a.waiting = true
+    append a; ensure display link running
+    // the assignment itself reports "no refresh needed"; frames will mark the owner dirty
+else:                                                         // immediate path
+    needs_refresh = cancel(key)            // remove ALL animations with this key (locked or not), calling
+                                           // setter(final) for each in list order (snap to their targets)
+    needs_refresh |= setter(new)
+```
+
+At the very end of each batch (`handle_message_mach`): `animator_lock()` marks **every** existing animation
+`locked = true` (before the final refresh).
+
+Resulting semantics:
+
+| Situation | Behavior |
+|---|---|
+| Same key assigned twice in one batch with animation (`--animate l 30 --set a y_offset=10 y_offset=0`) | sequential chain: 0→10 then 10→0 (second starts when first finishes) |
+| Same key assigned animated in a later batch while an animation (or chain) is in flight | in-flight chain removed without snapping; new animation starts from the **current intermediate value** |
+| Same key assigned without animation while animations are in flight | in-flight snaps to its final value(s), then the new value is set immediately |
+| Different keys | run concurrently |
+| Animation with `cur == new` | still created; runs its duration doing nothing |
+
+Bug B4 (do not replicate the mechanism, replicate the effect): for float animations the immediate-path snap calls
+the float setter through an int-typed pointer (garbage float argument); the effect is overwritten by the following
+`setter(new)`, so the observable result is "snap then set".
+
+### 10.6 Display link and frame stepping
+
+- `animator_init` creates and starts a `CVDisplayLinkCreateWithActiveCGDisplays` link (even with no animations).
+  `animator_add` re-creates it if it was destroyed. `animator_renew_display_link` (display rebuild, wake) stops,
+  releases and re-creates it. `bar_manager_handle_system_will_sleep` destroys it.
+- Output callback (display-link thread): `dispatch_async(main, post ANIMATOR_REFRESH(hostTime))`. Frames are never
+  dropped/coalesced by SketchyBar; each queued frame is processed in order.
+- `ANIMATOR_REFRESH` → `bar_manager_animator_refresh(T)`:
+
+```
+freeze()
+if animator_update(T):                    // any setter reported a change
+    unfreeze()
+    if bar_needs_resize: bar_manager_resize()
+    bar_manager_refresh(false)
+unfreeze()
+```
+
+- `animator_update(T)`:
+
+```
+changed = false; finished = []
+for a in animations (array = insertion order):
+    if a.waiting or !a.target or !a.setter: continue (contributes false)
+    step a as in §10.3/10.4; call setter; mark owner dirty if setter returned true (§10.7)
+    a.finished = final
+    if final and a.next:                  // release the successor
+        a.next.previous = NULL; a.next.waiting = false; a.next = NULL
+    if a.finished: finished.push(a)
+for a in finished: remove(a)
+if animations empty: destroy display link
+return changed
+```
+
+  Because a successor is always later in the array, it is stepped **in the same frame** its predecessor finished
+  (with `initial_time = T`, i.e. t=0; a 0-duration successor completes in that same frame).
+- Event processing of every frame also runs the per-event active-display poll (§1.1) and `windows_unfreeze`.
+- Sleep: link destroyed, animations kept; on wake the link is renewed and because progress is wall-clock based, all
+  animations jump to (or near) completion.
+
+### 10.7 Redraw propagation (`animation_update`)
+
+If the setter returns true: if the target address lies inside any `struct bar_item` in `bar_items`
+(`[item, item + sizeof(bar_item))`, which covers embedded text/background/image/shadow/font/color/slider/popup
+structs) → that item `needs_update = true`; otherwise (bar-level targets, `defaults` item) →
+`bar_needs_update = true` (full bar redraw). mbar: tag each animation with its owner (item id or Bar).
+
+Bug B7: removing an item (`--remove`) does not cancel its animations (dangling target → use-after-free). mbar must
+cancel all animations owned by a removed item (and on hotload, drop all animations — SketchyBar does that).
+
+### 10.8 Animatable properties
+
+"Initial" = value read at parse time as `cur`. Setters return "changed"; side effects listed. All others
+properties are never animated (applied immediately even inside `--animate`).
+
+**Item (`--set <item>` / `--default`)** — `bar_item.c:bar_item_parse_set_message`
+
+| Property | Kind | Key (target, setter) | Initial `cur` | Notes |
+|---|---|---|---|---|
+| `y_offset` | int | (item, `bar_item_set_yoffset`) | `y_offset` | |
+| `padding_left` | int | (item.background, `background_set_padding_left`) | `background.padding_left` | same key as `background.padding_left` |
+| `padding_right` | int | (item.background, `background_set_padding_right`) | `background.padding_right` | |
+| `blur_radius` | int | (item, `bar_item_set_blur_radius`) | `blur_radius` | applies to item windows |
+| `width=<n>` | int | (item, `bar_item_set_width`) | current effective width: `bar_item_get_length(item,false) + (has_const_width ? 0 : pad_l + pad_r)` | setter: `n<0` → `has_const_width=false`; else const width n |
+| `width=dynamic` | int ×2 | same | `custom_width` (stale if no const width!) | §10.9 |
+
+**Text** (`icon.*`, `label.*`, `slider.knob.*` via `text_parse_sub_domain`; `icon=`/`label=` = `.string`)
+
+| Property | Kind | Key | Notes |
+|---|---|---|---|
+| `color` | bytes | (text, `text_set_color`) | |
+| `highlight_color` | bytes | (text, `text_set_highlight_color`) | |
+| `highlight` | bytes (composite) | see §10.9 | boolean toggle animated as a color cross-fade |
+| `padding_left`, `padding_right`, `y_offset` | int | (text, `text_set_*`) | |
+| `width=<n>` | int | (text, `text_set_width`) | initial `text_get_length(text,false)`; `n<0` clears const width |
+| `width=dynamic` | int ×2 | (text, `text_set_width`) | §10.9 |
+| `string` | int (width) | (text, `text_set_width`) | §10.9 auto width animation |
+| `font.size` | float | (text.font, `font_set_size`) | marks font changed (re-layout) |
+| `color.hex` / `.alpha` / `.red` / `.green` / `.blue` | bytes / float ×4 | (text.color, `color_set_hex` / `color_set_alpha|r|g|b`) | float channels clamped 0..1; hex recomputed as `(u32)(a*255)<<24 | …` (truncation) |
+| `highlight_color.*` | as above | (text.highlight_color, …) | |
+| `background.*`, `shadow.*` | see below | | |
+
+**Background** (`background.*`, `icon.background.*`, `label.background.*`, `popup.background.*`, `slider.background.*`,
+and `--bar <prop>` for the bar background) — `background.c:background_parse_sub_domain`
+
+| Property | Kind | Setter side effects |
+|---|---|---|
+| `clip` | float | sets `bar_needs_update`, `might_need_clipping`; `clip > 0` enables background |
+| `height` | int | `overrides_height = (h != 0)` |
+| `corner_radius`, `border_width` | int | |
+| `color` | bytes | also enables the background (`drawing=on`) |
+| `border_color` | bytes | |
+| `padding_left`, `padding_right`, `x_offset`, `y_offset` | int | |
+| `color.*`, `border_color.*` | color sub-domain (bytes/float) | |
+| `image.scale` | float | recomputes image bounds |
+| `image.corner_radius` | int (u32 parse) | |
+| `image.padding_left`, `image.padding_right`, `image.y_offset` | int | |
+| `image.border_width` | float | |
+| `image.border_color` | bytes | (`image.border_color.*` color sub-domain) |
+| `shadow.distance`, `shadow.angle` | int | recompute offset `(d·cos(angle°), −d·sin(angle°))` |
+| `shadow.color` | bytes | also enables shadow |
+| `shadow.color.*` | color sub-domain | |
+
+`slider.background.<prop>` is parsed **twice**: first into the slider *foreground* background, then
+`background_set_color(foreground, foreground_color)` is applied immediately (cancels nothing, just restores the fill
+color), then into the slider track background — so an animated `slider.background.height=…` creates two independent
+animations (keys `(slider.foreground, …)` and `(slider.background, …)`). `slider.knob=<s>` is the knob string,
+`slider.knob.<prop>` the knob text sub-domain (all text animations apply).
+
+**Slider** (`slider.*`, `slider.c:slider_parse_sub_domain`)
+
+| Property | Kind | Notes |
+|---|---|---|
+| `slider.percentage` | int (u32 parse) | clamped 0..100; ignored entirely while dragging |
+| `slider.width` | int (u32 parse) | ignored while dragging |
+| `slider.highlight_color` | bytes | key (slider, `slider_set_foreground_color`); also sets foreground background color |
+
+**Popup** (`popup.*`, `popup.c:popup_parse_sub_domain`)
+
+| Property | Kind | Notes |
+|---|---|---|
+| `popup.y_offset` | int | |
+| `popup.height` | int | key (popup, `popup_set_cell_size`); sets `overrides_cell_size` |
+| `popup.blur_radius` | int | setter applies blur directly and returns false (never triggers redraw) |
+
+**Graph**: only `graph.color.*` / `graph.fill_color.*` color sub-domains are animatable; `graph.color=`,
+`graph.fill_color=`, `graph.line_width=` are immediate.
+
+**Bar** (`--bar`, `message.c:handle_domain_bar`; owner = bar → `bar_needs_update`)
+
+| Property | Kind | Key | Notes |
+|---|---|---|---|
+| `margin` | int | (bar_manager, `bar_manager_set_margin`) | sets `bar_needs_resize` |
+| `y_offset` | int | (bar_manager, `bar_manager_set_y_offset`) | bar background y_offset; `bar_needs_resize` |
+| `blur_radius` | int | (bar_manager, `bar_manager_set_background_blur`) | applies to bar windows; returns false |
+| `notch_width` | int | (bar_manager, `bar_manager_set_notch_width`) | no resize flag |
+| `notch_offset`, `notch_display_height` | int | (bar_manager, …) | `bar_needs_resize` |
+| `height` | int | (bar_manager, `bar_manager_set_bar_height`) | sets background height; `bar_needs_resize` |
+| any other key | → bar background table above | (bar_manager.background, …) | e.g. `color`, `border_color`, `corner_radius`, `x_offset`, `padding_*`, `clip` |
+
+Non-animatable (always immediate): `drawing`, `position`, `align`, `font=` (full font string), `font.family/style/
+features/typographical_width`, `max_chars`, `scroll_texts`, `scroll_duration`, `updates`, `update_freq`, scripts,
+`associated_*`, `shadow` (item), `ignore_association`, `image=`/`image.string`, `popup.drawing/horizontal/align/
+topmost`, all non-numeric bar settings.
+
+### 10.9 Composite / implicit animations
+
+**Text `string` change** (`text.c:text_parse_sub_domain`, PROPERTY_STRING), only when `animator.duration > 0`:
+
+```
+pre = text_get_length(text, false)       // == custom_width if text has a const width
+changed = text_set_string(new)           // false if identical string
+if changed:
+    post = text_get_length(text, false)
+    if post != pre:                       // never true for const-width texts
+        text_set_width(pre)              // immediately pin current width (const)
+        ANIMATE int (text, text_set_width): pre → post
+        add chained 0-duration animation (text, text_set_width): → -1   // unpin at the end
+```
+
+i.e. labels/icons animate their width to the new natural width, then return to dynamic width.
+
+**`width=dynamic`** (item and text): `ANIMATE(width: custom_width → natural)` followed by a chained 0-duration
+`→ -1` animation (always created, also when not animating: then the width is set immediately to the natural length
+and the `-1` animation runs on the next display-link frame).
+Natural length: item `bar_item_get_length(item, true) + pad_l + pad_r`; text `text_get_length(text, true)`.
+
+**`highlight=<bool>`** (text), only when `animator.duration > 0` (otherwise just a flag flip):
+- on → off: `cancel(text, text_set_color)` (snap), `target = color`; `color := highlight_color` (immediate);
+  animate `color` bytes from highlight_color → target. (Drawing uses `color` when not highlighted.)
+- off → on: `cancel(text, text_set_highlight_color)`; `target = highlight_color`;
+  `highlight_color := color`; animate `highlight_color` bytes color → target.
+- The flag changes immediately; returns "changed" iff the flag changed.
+
+**Marquee scroll** (`text.c:text_animate_scroll`, called from `bar_item_update`, §4.2, for icon/label/knob of items
+with `scroll_texts=on` while shown and `counter % 15 == 0`):
+
+```
+preconditions: max_chars > 0; scroll == 0 (not already scrolling);
+               not (has_const_width && custom_width < width);
+               width != 0 and width != bounds.width            // text is actually truncated
+// width = truncated (visible) width; bounds.width = full text width; scroll is subtracted from the draw x
+animator.curve = linear
+animator.duration = (u32)(scroll_duration * (bounds.width / width))      // frames
+ANIMATE_FLOAT scroll: 0 → bounds.width                                   // scroll fully out to the left
+add chained 0-duration float animation scroll → -width                   // jump to the right edge
+animator.duration = scroll_duration
+ANIMATE_FLOAT scroll: (chained, from -width) → 0                          // scroll back in
+animator.duration = 0; animator.curve = '\0'                              // Quirk Q8
+```
+
+Speed is constant: `width` px per `scroll_duration` frames (default `scroll_duration = 100` → 100/60 s).
+These animations are created outside a batch and stay unlocked until the next batch ends.
+
+### 10.10 Lifecycle summary
+
+| Trigger | Effect on animations |
+|---|---|
+| end of each mach batch | all animations locked |
+| `--remove` item | not cancelled (Bug B7; mbar: cancel) |
+| hotload / `--reload` / `--exit` | `animator_destroy`: all dropped without applying finals |
+| system_will_sleep | display link destroyed; animations retained |
+| wake / display reconfiguration | display link renewed; animations resume (wall-clock → usually complete at once) |
+| no animations left after a frame | display link destroyed |
+

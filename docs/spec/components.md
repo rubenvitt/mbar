@@ -517,6 +517,12 @@ Other owners override defaults after `background_init`: bar background (`bar_man
 | other `x.y` | | | `[!] Background: Invalid subdomain '<x>'\n` |
 | other | | | `[!] Background: Invalid property '<p>'\n` |
 
+Bar reuse (`message.c:handle_domain_bar`): any `--bar <prop>` not handled by the bar itself
+falls through to `background_parse_sub_domain(bar.background)` (so `--bar color=`,
+`border_color`, `border_width`, `corner_radius`, `padding_left/right`, `x_offset`, `drawing`,
+`image`, `shadow.*`, … work); `--bar clip=` is rejected with `[!] Bar: Invalid property 'clip'\n`;
+`--bar height` and `y_offset` have bar-specific setters. Popups: `popup.background.<p>`.
+
 `background_set_enabled(e)`: unchanged → false. If the background currently clips the bar
 (`enabled && clip > 0`), drop all cached clip copies and set `bar_needs_update`. Then set.
 
@@ -1235,4 +1241,20 @@ if it changed, every item whose `background.image`, `icon.background.image` or
 item is shown. Media events are only processed after something called
 `begin_receiving_media_events` (`media.artwork` image or a `media_change` subscription).
 (MediaRemote is locked down since macOS 15.3; artwork may never arrive.)
+
+## 11. Open questions (need verification on macOS hardware)
+
+| # | question | where | proposed mbar behaviour |
+|---|---|---|---|
+| Q1 | Quartz stroke with `CGContextSetLineWidth(0)` + `kCGPathFillStroke`: hairline or nothing? Matters for backgrounds with `border_width=0` but opaque `border_color`, and for every image (`border_color` default `0xcccccccc`, `border_width` 0). | `draw_rect`, `image_draw` | draw no stroke for width 0 (default SketchyBar images show no grey hairline) |
+| Q2 | `CGPathAddRoundedRect` with a radius larger than half the rect (image **shadow** path is not clamped): CG error + nothing, or clamp? | `image_draw` | skip the shadow path when `2r > w` or `2r > h` |
+| Q3 | Pixel size returned by `-[NSImage CGImageForProposedRect:]` with nil context for the `32·s` rect (decides whether app icons are 32 pt or 16 pt on Retina). | `workspace_icon_for_app`, `image_load` | 32×32 pt |
+| Q4 | `CGContextClipToMask` with a non-grayscale RGBA window capture (alias tint): luminance or alpha mask? | `alias_draw` | alpha mask (tint opaque pixels) |
+| Q5 | Slider hit-testing mixes top-left event coordinates with bottom-left CG rects. | `event_mouse_up/dragged`, `bar_item_on_click` | reproduce (no flip) behind a compat flag; correct flip as extension |
+| Q6 | `--load-font /abs/path.ttf`: does `CFURLCreateWithString` + `CTFontManagerRegisterFontsForURL` accept a scheme-less path? | `font_register` | accept both plain paths and `file://` URLs |
+| Q7 | Glyph-path bounds of an empty `CTLine` (zero rect vs `CGRectNull`) → assumed empty text width 1 / height 1. | `text_prepare_line` | width 1, height 1 |
+| Q8 | Owner name of WindowServer status windows on current macOS (`"Window Server"` filter). | `get_menu_item_list` | filter `"Window Server"` exactly |
+| Q9 | `SLSCaptureWindowsContentsToRectWithOptions` / `SLSHWCaptureSpace` are private SkyLight APIs; ScreenCaptureKit may be required on newer macOS. | alias, `space.<n>` images | private API first, SCK fallback |
+| Q10 | MediaRemote now-playing is locked for third parties since macOS 15.3 (`media.m` comment). | `media.artwork` | keep the link mechanism; provider may never deliver |
+| Q11 | `clip_rect` strokes with inherited bar stroke state; exact visual impact when the bar has a border. | `helpers.h:clip_rect` | reproduce: stroke the hole outline with bar border width, alpha = bar border alpha |
 

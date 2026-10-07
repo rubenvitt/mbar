@@ -195,8 +195,8 @@ windows is stale until the next resize (`bar_needs_resize` is not set). Always r
 
 `token_split(value, ',')`; pattern starts at 0; for each element in order:
 `all` → pattern = `UINT32_MAX`; `main` → pattern = 0; else pattern |= `1 << (strtoul(elem, NULL, 0) - 1)`.
-Consequences: `main,2` = display 2 only; `2,main` = main; `0` or non-numeric → shift by `0xFFFFFFFF`
-(undefined; on x86-64/arm64 the shift count is masked to 31 → bit 31). Empty value → pattern 0 = main.
+Consequences: `main,2` = display 2 only; `2,main` = main; `0` or non-numeric → `strtoul` gives 0, shift count `0 - 1` (unsigned long)
+(undefined; on x86-64/arm64 the 32-bit shift count is masked to 31 → bit 31). Empty value → pattern 0 = main.
 If pattern differs from current → `bar_manager_reset`.
 
 ### 2.6 Background passthrough (`background.c:background_parse_sub_domain`)
@@ -208,7 +208,7 @@ Applies to `g_bar_manager.background`; same parser as item backgrounds.
 | `drawing` | bool | no | `background_set_enabled`. **No visual effect** for the bar (bar_draw forces enabled). Changes query `drawing`. |
 | `color` | int (ARGB hex, e.g. `0xff1e1e2e`) | yes (per-byte) | `background_set_color`: also sets `enabled = true`. Fill colour. |
 | `border_color` | int ARGB | yes (per-byte) | Stroke colour. |
-| `border_width` | int → uint32 | yes | Stroke width; also reduces default item background height (§4.2). |
+| `border_width` | int → uint32 | yes | Stroke width; also reduces default item background height (§4.4). |
 | `corner_radius` | int → uint32 | yes | Rounded-rect radius (clamped, §5.1). |
 | `padding_left` / `padding_right` | int | yes | Layout start/end insets (§4). |
 | `x_offset` | int | yes | Shifts the drawn background rect inside the bar window (window does not move). |
@@ -665,6 +665,7 @@ So a space switch causes a redraw of a bar only if some item's visibility on it 
 | End of every client message | `bar_manager_refresh(false)` (after optional resize + `bar_needs_update`, §2.1). |
 | `--update` | `bar_manager_update(true)` → forced events + `bar_manager_refresh(true)`; also sets `bar_needs_refresh`. |
 | `--remove` | sets `bar_needs_refresh`. `--reorder` calls `bar_manager_refresh(false)` directly. |
+| `--trigger space_change` / `--trigger display_change` | `bar_manager_handle_space_change(true)` / `bar_manager_handle_display_change()` (real handlers, not just the custom event; extra `KEY=VALUE` args are ignored for these). |
 | 1 s clock (`SHELL_REFRESH`) | `bar_manager_update(false)`: routine script updates; refresh only if an alias changed. |
 | Animation frame | `bar_manager_animator_refresh` (§8.5). |
 | Space change | `bar_manager_handle_space_change` → `bar_manager_refresh(force_refresh)` (§6.4). |
@@ -733,8 +734,8 @@ on the active display's bar), `hidden=current`.
 ### 6.4 Space tracking (`bar_manager.c:bar_manager_handle_space_change(forced)`)
 
 Triggered by `SPACE_CHANGED` (from `NSWorkspaceActiveSpaceDidChangeNotification` and SkyLight notifications
-1327/1328 on macOS ≥ 13, `sketchybar.c:space_events`), by `--update`/`bar_manager_update(true)` and by
-`bar_manager_display_changed` (both with `forced = true`). Steps:
+1327/1328 on macOS ≥ 13, `sketchybar.c:space_events`), by `--update`/`bar_manager_update(true)`, by `--trigger space_change` and by
+`bar_manager_display_changed` (all with `forced = true`). Steps:
 ```
 freeze manager
 force_refresh = false

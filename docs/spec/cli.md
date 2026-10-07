@@ -1673,3 +1673,125 @@ Notes:
 - `HOTLOAD` from the watcher does the same thing outside a request.
 
 ---
+## 12. Script execution and environment
+
+### 12.1 How a script runs (`bar_item_update`, `helpers.h:fork_exec`)
+When an item update fires (§7.5) and the item has a non-empty `script` or a
+`mach_helper`:
+
+1. **Pick the env set.**
+   - If the caller passed no env (routine/forced update, `mouse.entered`,
+     `mouse.exited`, `*.global` enter/exit, `system_woke`, `system_will_sleep`),
+     use **the item's own persistent env set**.
+   - Otherwise use the caller's env. All of the item's persistent vars are
+     copied into it, then `NAME=<item name>` is set.
+2. **SENDER.** Set `SENDER` to the event name, or to `forced`/`routine` when
+   there is no sender.
+   - **Quirk:** in the no-env case this writes `SENDER` *into the item's
+     persistent set*, so it later shows up in that item's `click_script` env.
+3. **Run.** `fork_exec(script, env)`:
+   - `vfork()`. In the child: `alarm(60)`, then `setenv(k, v, 1)` for every var,
+     then `execvp("/usr/bin/env", ["/usr/bin/env", "sh", "-c", script])`.
+   - The parent does not wait; `SIGCHLD` is ignored.
+   - The child inherits the daemon env (including `BAR_NAME` and `CONFIG_DIR`)
+     and cwd (the config dir).
+   - The script string is interpreted by `sh`, so it may be any shell command
+     line, for example `"$CONFIG_DIR/plugins/clock.sh"` or `echo hi`.
+   - **Quirk (Darwin vfork):** the child's `setenv` calls run in the parent's
+     address space. So every var set for any script (`NAME`, `SENDER`, `INFO`,
+     custom trigger vars, …) **stays in the daemon's environment** and is
+     inherited by every later child, including scripts of other items and
+     events that don't set that var.
+     - Example: a script fired by `mouse.entered` sees the `INFO` from the last
+       event that set one.
+     - mbar should give each child an env built from the daemon's *startup*
+       environment plus the event vars. Scripts must not rely on stale vars.
+4. **mach_helper.** If set, send the env as `k\0v\0k\0v\0…\0` (one extra
+   trailing NUL) to the `mach_helper` port, one-way. On bar destruction (exit
+   or reload) the helper gets the 2-byte message `"k\0"`.
+
+### 12.2 Variables
+| Variable | Set for | Value |
+|---|---|---|
+| `BAR_NAME` | everything (process env) | `g_name` (basename of argv[0]) |
+| `CONFIG_DIR` | everything (process env, after the config runs) | directory of the config file |
+| `NAME` | every item script, click_script, mach_helper | item name |
+| `SENDER` | item scripts | event name, `routine` (update_freq tick), or `forced` (`--update`) |
+| `INFO` | see the table below | event payload |
+| `SELECTED` | space items | `true` / `false` |
+| `SID` | space items | Mission Control index n from `space=n` (initially `0`) |
+| `DID` | space items | display index from `display=n`, else `0`. Not updated by automatic display association. |
+| `DID` | `mouse.scrolled.global` | arrangement index of the bar or popup that was scrolled |
+| `BUTTON` | `mouse.clicked`, click_script | `left`, `right` or `other` (from the mouse-up event type) |
+| `MODIFIER` | `mouse.clicked`, `mouse.scrolled[.global]`, click_script | Comma-joined subset of `shift,ctrl,alt,cmd,fn`, in that order, or `none` |
+| `SCROLL_DELTA` | `mouse.scrolled[.global]` | Integer vertical delta (accumulated, see below) |
+| `PERCENTAGE` | slider items, after a click or drag release | `0`–`100`. Persists in the item's env. |
+| *custom* | `--trigger <ev> K=V…` | as given |
+
+`INFO` per event:
+
+| Event | INFO |
+|---|---|
+| `front_app_switched` | Localized name of the newly active app (unset if unknown). |
+| `space_change` | `{\n\t"display-<adid>": <space index>,\n …}`. One line per bar, `,` after every line except the last, no trailing newline after `}`. Index 0 means unknown. |
+| `display_change` | Arrangement index of the active display as decimal (at most 2 chars). |
+| `volume_change` | `(int)(volume*100+0.5)`. Muted reads as 0. Fires on a change > 1%. |
+| `brightness_change` | `(int)(brightness*100+0.5)` |
+| `wifi_change` | SSID string (empty if none) |
+| `power_source_change` | `AC` or `BATTERY` (fires only on a change) |
+| `media_change` | `{\n\t"state": "playing\|paused",\n\t"title": "…",\n\t"album": "…",\n\t"artist": "…",\n\t"app": "…"\n}`. Title, album and artist are escaped as `"`→`\"` and newline→`\n`. Fires only when the info changes. |
+| `space_windows_change` | `{\n\t"space": <index>,\n\t"apps": {\n\t\t"<App>": <window count>,\n …\n\t}\n}\n` |
+| `mouse.clicked` / click_script | `{\n\t"button": "<left\|right\|other>",\n\t"button_code": <n>,\n\t"modifier": "<MODIFIER>",\n\t"modfier_code": <flags>\n}\n`. The key really is misspelled `modfier_code`. |
+| `mouse.scrolled`, `mouse.scrolled.global` | `{\n\t"delta": <d>,\n\t"modifier": "<MODIFIER>",\n\t"modfier_code": <flags>\n}\n` |
+| custom with notification | Pretty-printed JSON of the notification's userInfo (if JSON-serializable) |
+| `--trigger` | Whatever `INFO=` the caller passed |
+| `mouse.entered`/`exited`(`.global`), `system_woke`, `system_will_sleep` | not set (stale, see the 12.1 quirk) |
+
+### 12.3 Mouse event semantics that affect scripts
+- **Click.** On mouse-up over an item window, or over the item under the cursor
+  if the window belongs to a bracket:
+  1. Build `INFO`, `BUTTON` and `MODIFIER`.
+  2. Slider items: only clicks inside the track (or ending a drag) count. They
+     update `PERCENTAGE`. Clicks elsewhere on the slider item do nothing at all.
+  3. Run `click_script` (if non-empty) with those vars plus the item's
+     persistent vars (`NAME`, …). There is no explicit `SENDER`.
+  4. If subscribed to `mouse.clicked`, also run `script` with `SENDER=mouse.clicked`,
+     **forced** (ignores `updates=off`).
+- **Scroll.** Events within 150 ms of the last delivered one are accumulated and
+  not delivered. `SCROLL_DELTA` is the sum.
+  - Over an item subscribed to `mouse.scrolled`, the script runs forced.
+  - Over bar or popup background (no item), every subscriber of
+    `mouse.scrolled.global` runs, with `DID`.
+- **Enter/exit.**
+  - `mouse.entered` fires once per entry (tracked by `mouse_over`). `mouse.exited`
+    fires on exit. Both are forced and use no env (item vars only).
+  - `mouse.entered.global` and `mouse.exited.global` fire when the pointer enters
+    or leaves the union of bars and popups. Each runs subscribers non-forced.
+  - Exiting globally also sends `mouse.exited` to every item subscribed to it.
+
+### 12.4 Space items
+On every `space_change`:
+- **Display association.** Each space item that has no `display` override gets
+  `associated_display = 1 << arrangement(display of space SID)`, or `1<<30` if
+  that display is unknown.
+- **Selection.** For each bar whose display bit is in the item's display mask,
+  with `sid` = that bar's current space index:
+  - If `space mask & (1<<sid)` and (not selected yet, or forced): `SELECTED=true`,
+    `updates=on`.
+  - Else if the space bit is not set and (selected, or forced): `SELECTED=false`,
+    `updates=on`.
+  - Else `updates=off`.
+- Then `space_change` subscribers run. Space items run only if `updates` is on,
+  so in practice only items whose selection changed, or all of them when forced.
+- The default script `sketchybar -m --set $NAME icon.highlight=$SELECTED` sets
+  the highlight.
+
+### 12.5 `mach_helper` (event provider protocol)
+- `mach_helper=<bootstrap name>` makes the daemon push the item's update env,
+  serialized as `KEY\0VALUE\0…\0`, to that Mach service on every update. It does
+  this whether or not there is a script.
+- Exit and reload send `"k"`.
+- mbar may replace this with a Unix-socket push using the same payload, or drop
+  it. Either way it must accept the key.
+
+---

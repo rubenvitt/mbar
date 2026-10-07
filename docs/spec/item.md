@@ -1465,3 +1465,291 @@ handling runs.
 - While dragging, `slider.percentage=` and `slider.width=` from scripts are
   ignored.
 
+
+---
+
+## 10. Clone, rename, reorder, move, remove, push
+
+### 10.1 `--clone <name> <parent> [before|after]` (message.c:handle_domain_clone, bar_item.c:bar_item_inherit_from_item)
+
+1. If the parent is not found, respond
+   `[!] Clone: Parent Item '<parent>' not found\n`. If the name already
+   exists, respond `[?] Clone: Item '<name>' already exists\n`.
+2. `bar_manager_create_item`: the new item is initialized from the
+   **defaults** and appended at the end.
+3. `inherit_from_item(clone, parent)` copies the whole struct (`memcpy`),
+   then patches it:
+
+   | Aspect | Result |
+   |---|---|
+   | Scalars | All copied, including `type`, `position`, `align`, `drawing`, `updates*`, `update_freq`, `counter`, `selected`, `mouse_over`, `associated_*` (including the `associated_bar` shown bits), `y_offset`, `width`, `blur`, `shadow`, `update_mask` (**subscriptions are copied**), `event_port`, popup scalars (**including `popup.drawing`**), `parent`, the `has_*` flags, slider percentage and width. |
+   | name/script/click_script | `name` is set afterwards; `script`/`click_script` are deep-copied. |
+   | Env vars | Cleared. `NAME` is re-added by `set_name`. Space clones get `SELECTED=false`, **`SID=<parent's DID>`** (bug: copies DID into SID) and `DID=<parent's DID>`. `PERCENTAGE` etc. are lost. |
+   | Windows | None; recreated lazily. |
+   | icon/label/knob text | Deep copy. The font copies family, style, size and typographical_width. **`font.features` is lost.** The string is copied. Text backgrounds: clips reset, image reduced to `image_ref` (CGImage copy); `path` is lost and `data_ref` dropped. |
+   | Item background image | `image_ref` copied; **`path` lost**, so `--query` shows `"value": "(null)"`. |
+   | Popup | `items`, `num_items` and `host` are cleared; the window is cleared; `host = clone`. Popup scalars and background are copied shallowly (the popup background image pointer is shared). A clone of a host with `popup.drawing=on` has drawing on but no items. |
+   | Bracket | `group = NULL`. **Cloning a bracket yields a bracket without a group**, which C dereferences in layout (crash). Treat it as unsupported or reject it. |
+   | Graph | The sample buffer pointer is **shared** with the parent (aliasing, double free). Implement as a deep copy. |
+   | Alias | Owner/name pointers and window id are shared (shallow). |
+   | Popup member clone | `position='p'` and `parent` are copied, but the clone is **not** inserted into the host's popup list. It passes rule P but is never laid out (window stays 1×1 at nirvana). Re-set `position=popup.<host>` to make it appear. |
+
+4. `set_name(name)`.
+5. `before` → place directly before the parent; `after` → directly after;
+   anything else leaves it at the end.
+6. `needs_update`.
+
+### 10.2 `--rename <old> <new>` (message.c:handle_domain_rename)
+
+- Fails with `[!] Rename: Failed to rename item: <old> -> <new>\n` if `old`
+  is missing or `new` exists.
+- Otherwise `set_name(new)`, which updates env `NAME`. An empty new name is
+  silently ignored.
+- No refresh is forced. Scripts referencing the old name break.
+
+### 10.3 `--reorder a b c ...` (bar_manager.c:bar_manager_sort)
+
+- Unknown names respond `[!] Order: Item '<n>' not found\n` and are skipped.
+- Algorithm: walk the global list. Every slot that currently holds one of the
+  listed items gets the next listed item, in argument order. Items not listed
+  keep their slots.
+- Changed slots are marked dirty. `needs_ordering` is set, followed by an
+  immediate `bar_manager_refresh(false)`.
+- Duplicate names in the list corrupt the list (one item duplicated, another
+  lost).
+
+### 10.4 `--move <name> before|after <reference>` (bar_manager.c:bar_manager_move_item)
+
+- If either item is missing, respond
+  `[!] Move: Item '<name>' or '<reference>' not found\n`.
+- Any direction word other than exactly `before` means **after**.
+- The item is removed from the list and reinserted adjacent to the reference.
+  `needs_ordering` is set and the item is marked dirty.
+- Moving an item relative to itself corrupts the list in C: it drops the item
+  and leaves a garbage last slot. mbar should treat this as a no-op.
+
+### 10.5 `--remove <name|/regex/>` (message.c:handle_domain_remove)
+
+- A missing name responds `[!] Remove: Item '<name>' not found\n`. A regex
+  uses the usual messages.
+- Each matched item goes through `bar_manager_remove_item`:
+  - If `position=='p'`, remove it from all popups.
+  - Remove it from the list, then `bar_item_destroy`. This:
+    - frees the name and scripts;
+    - destroys components;
+    - for a bracket: destroys its group and sets every member's `group=NULL`;
+    - for a member: removes it from its (last) group;
+    - destroys the popup, which **removes all popup children**;
+    - destroys all windows.
+- Afterwards the bar is redrawn (`bar_needs_update`).
+
+### 10.6 `--push <graph> v1 v2 ...` (message.c:handle_domain_push)
+
+- Errors: `[!] Push: Item '<n>' not found\n`, `[!] Push: Item '<n>' not a graph\n`.
+- Each value (`strtof`) is written at `cursor`, then
+  `cursor = (cursor+1) % width`. The item is then marked dirty.
+- Drawing reads samples in order from oldest to newest. Values are fractions
+  of the graph height (0..1).
+
+---
+
+## 11. `--query` JSON output (bar_item.c:bar_item_serialize)
+
+Supported forms:
+
+- `--query <name>`;
+- `--query item <name>`;
+- `--query defaults` (serializes the default item).
+
+Errors:
+
+- `--query item <name>` with an unknown name:
+  `[!] Query: Item '<name>' not found\n`.
+- `--query <name>` with an unknown name:
+  `[!] Query: Invalid query, or item '<name>' not found \n`.
+
+The keywords `bar`, `defaults`, `events`, `displays` and
+`default_menu_items` shadow items with the same name.
+
+The output is **not** guaranteed valid JSON:
+
+- Text values and names are printed raw, without escaping.
+- `script` and `click_script` escape only `"` and newline.
+- NULL strings print as `(null)`.
+
+Formats:
+
+- Booleans are `"on"`/`"off"` strings.
+- Colors are `"0x%x"`: lowercase, no zero padding (for example
+  `"0x0"`, `"0xffffffff"`).
+- Floats use `%f` (6 decimals).
+- The indentation uses **tabs**.
+
+Exact template (`⇥` = TAB; `{…}` = substitution). Line breaks are `\n`.
+
+```
+{
+⇥"name": "{name}",
+⇥"type": "{item|alias|bracket|slider|graph|space}",
+⇥"geometry": {
+⇥⇥"drawing": "{on|off}",
+⇥⇥"position": "{left|right|center|q|e|popup}",
+⇥⇥"associated_space_mask": {u32},
+⇥⇥"associated_display_mask": {u32},
+⇥⇥"ignore_association": "{on|off}",
+⇥⇥"y_offset": {int},
+⇥⇥"padding_left": {int},
+⇥⇥"padding_right": {int},
+⇥⇥"scroll_texts": "{on|off}",
+⇥⇥"width": {custom_width if const else -1},
+⇥⇥"background": {
+{BACKGROUND(indent="⇥⇥⇥", detailed)}
+⇥⇥}
+⇥},
+⇥"icon": {
+{TEXT(indent="⇥⇥")}
+⇥},
+⇥"label": {
+{TEXT(indent="⇥⇥")}
+⇥},
+⇥"scripting": {
+⇥⇥"script": "{escaped script or (null)}",
+⇥⇥"click_script": "{escaped or (null)}",
+⇥⇥"update_freq": {u32},
+⇥⇥"update_mask": {u64},
+⇥⇥"updates": "{when_shown|on|off}"
+⇥},
+⇥"bounding_rects": {
+{for each existing window i (1-based ADID), joined by ",\n":}
+⇥⇥"display-{i}": {
+⇥⇥⇥"origin": [ {x:%f}, {y:%f} ],
+⇥⇥⇥"size": [ {w:%f}, {h:%f} ]
+⇥⇥}
+⇥}{OPTIONAL_TAIL}
+}
+```
+
+- `bounding_rects` has an empty body (`{\n\n⇥}`) when there are no windows.
+- Origins are global screen coordinates. Hidden windows show
+  `-9999.000000`.
+- An item has windows only for the ADIDs it was ever drawn or laid out on.
+- `associated_display_mask` and `associated_space_mask` are the raw bit masks
+  (bit n = display/space n).
+- `updates` is `when_shown` if `updates_only_when_shown`, regardless of
+  `updates`.
+
+`{OPTIONAL_TAIL}` is each of the following that applies, in this order:
+
+- If `popup.num_items > 0`: `,\n⇥"popup": {\n{POPUP("⇥⇥")}\n⇥}`
+- Then one of:
+  - bracket with a group: `,\n⇥"bracket": [\n{GROUP("⇥⇥")}\n⇥]`
+  - graph: `,\n⇥"graph": {\n{GRAPH("⇥⇥")}\n⇥}`
+  - slider: `,\n⇥"slider": {\n{SLIDER("⇥⇥")}\n⇥}`
+
+The output ends with `\n}\n`.
+
+BACKGROUND(I, detailed) (background.c:background_serialize). Each field line
+is `I` followed by the content shown:
+
+```
+I"drawing": "{on|off}",
+I"color": "0x{hex}",
+I"border_color": "0x{hex}",
+I"border_width": {u32},
+I"height": {overrides_height ? (int)height : 0},
+I"corner_radius": {u32},
+I"padding_left": {int},
+I"padding_right": {int},
+I"x_offset": {int},
+I"y_offset": {int},
+I"clip": {%f},
+I"image": {
+I⇥"value": "{path or (null)}",
+I⇥"drawing": "{on|off}",
+I⇥"scale": {%f}
+I}
+```
+
+When `detailed`, append `,\nI"shadow": {\n{SHADOW(I⇥)}\nI}`. The block has no
+trailing newline; the caller adds it.
+
+SHADOW(I):
+
+```
+I"drawing": "{on|off}",
+I"color": "0x{hex}",
+I"angle": {u32},
+I"distance": {u32}
+```
+
+TEXT(I) (text.c:text_serialize):
+
+```
+I"value": "{string, raw}",
+I"drawing": "{on|off}",
+I"highlight": "{on|off}",
+I"color": "0x{hex}",
+I"highlight_color": "0x{hex}",
+I"padding_left": {int},
+I"padding_right": {int},
+I"y_offset": {int},
+I"font": "{family}:{style}:{size %.2f}",
+I"width": {custom_width as %d — 0 when dynamic and never set; NOT -1},
+I"scroll_duration": {int},
+I"align": "{left|right|center|bottom|top|invalid}",
+I"background": {
+{BACKGROUND(I⇥, detailed)}
+I},
+I"shadow": {
+{SHADOW(I⇥)}
+I}
+```
+
+POPUP(I) (popup.c:popup_serialize). `topmost` is **not** serialized.
+
+```
+I"drawing": "{on|off}",
+I"horizontal": "{on|off}",
+I"height": {overrides ? cell_size : -1},
+I"blur_radius": {u32},
+I"y_offset": {int},
+I"align": "{left|right|center|bottom|top|invalid}",
+I"background": {
+{BACKGROUND(I⇥, detailed)}
+I},
+I"items": [
+I⇥ "{name}",            // note: TAB + SPACE before the quote; entries joined by ",\n"
+I⇥ "{name}"
+I]
+```
+
+GROUP(I): member names (`members[1..]`), each line `I"{name}"`, joined by
+`,\n`. There is no space before the quote here.
+
+GRAPH(I):
+
+```
+I"color": "0x{line hex}",
+I"fill_color": "0x{fill hex}",
+I"line_width": "{%f}",          // quoted float
+I"data": [
+I⇥"{%f}",                       // raw ring-buffer order (index 0..width-1), quoted, joined ",\n"
+I]
+```
+
+SLIDER(I):
+
+```
+I"highlight_color": "0x{hex}",
+I"percentage": "{%d}",          // quoted
+I"width": "{%d}",               // quoted
+I"background": {
+{BACKGROUND(I⇥, NOT detailed: no shadow block)}
+I},
+I"knob": {
+{TEXT(I⇥)}
+I}
+```
+
+Note that the slider's foreground (fill) background is not serialized.
+
