@@ -1,14 +1,71 @@
 # Installing mbar
 
-mbar runs on macOS. On Linux it only builds a headless daemon, which the tests
-use. There are no prebuilt releases yet, so you build it from source.
+mbar runs on macOS. The usual way to install it is the app, `mbar.app`,
+from a DMG. It contains the bar daemon, the management UI and the `mbar` and
+`sketchybar` commands, and it updates itself. You can also build mbar from
+source (below). On Linux mbar only builds a headless daemon, which the tests
+use.
+
+## Install the app
+
+1. Download `mbar-<version>.dmg` from the [latest release](https://github.com/rubenvitt/mbar/releases/latest).
+2. Open it and drag **mbar** to **Applications**.
+3. Open mbar. The setup page walks through:
+   - moving the app to Applications, if you opened it from the DMG or
+     Downloads,
+   - removing Homebrew SketchyBar and older mbar installs (it lists everything first),
+   - using your existing `~/.config/sketchybar` config (a SbarLua `sketchybarrc` gets an `init.lua`),
+   - installing the `mbar` and `sketchybar` commands (`/etc/paths.d/mbar`, one admin prompt),
+   - starting mbar at login (System Settings → General → Login Items shows "mbar"),
+   - Accessibility and Screen Recording.
+
+Updates: mbar checks for new versions once a day and opens the update dialog by itself.
+Turn this off on the System page. Open terminals after setup see the new commands;
+tools started without a login shell (AeroSpace, skhd, …) need the full path
+`/Applications/mbar.app/Contents/Resources/bin/sketchybar`.
+
+The app needs macOS 13 or later. More about it:
+
+- Every setup step shows whether it is done, open or failed (with the
+  command's output), and can be skipped and retried. Setup never deletes or
+  edits your configs. It only creates an `init.lua`, either next to a SbarLua
+  `sketchybarrc` or, when no config exists at all, a starter config in
+  `~/.config/mbar/`. A `sketchybar` that is not an mbar symlink (for example a
+  script of your own in `~/.local/bin`) is reported, never removed. Helpers
+  that talk to SketchyBar's mach port (`git.felix.*`) are reported with a hint
+  (see [`MIGRATING.md`](MIGRATING.md)).
+- The System page reopens the setup at any time. If you move or rename the
+  app after setup, `/etc/paths.d/mbar` points to the old place. The System page
+  shows the entry as stale and fixes it with the same admin prompt.
+- The daemon runs as the login item `dev.rubeen.mbar`, from
+  `mbar.app/Contents/MacOS/mbar`. It logs to `~/Library/Logs/mbar.log`. Its
+  scripts find `mbar` and `sketchybar` first on their `PATH`, followed by
+  `/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`.
+- Update checks start two minutes after the daemon starts and repeat every
+  24 hours. A new version is offered at most once a day; "Skip This Version"
+  and "Remind Me Later" in the dialog are respected. "Check for Updates…" is in
+  the app menu and on the System page. After an update the app restarts the
+  daemon. Updates are signed (Developer ID and an EdDSA signature on the update
+  archive) and checked before they are installed. The switch on the System page
+  is the same as `defaults write dev.rubeen.mbar SUEnableAutomaticChecks -bool false`.
+- The feed is
+  `https://github.com/rubenvitt/mbar/releases/latest/download/appcast.xml`. To
+  test against another feed, run `defaults write dev.rubeen.mbar SUFeedURL <url>`
+  and `defaults delete dev.rubeen.mbar SUFeedURL` afterwards.
+
+## Build from source
+
+Building from source gives you a plain `mbar` binary, or with `make app` an
+app bundle like the released one. This section and the LaunchAgent and
+Homebrew sections below are for source builds; the app does all of this in its
+setup.
 
 CI uploads the macOS release binary as a workflow artifact (`mbar-macos-ARM64`)
 on every run. It is unsigned and meant for testing. Artifacts do not keep file
 modes, so after downloading run `chmod +x mbar` and
 `xattr -d com.apple.quarantine mbar`.
 
-## Requirements
+### Requirements
 
 - macOS on Apple silicon or Intel
 - Xcode Command Line Tools (`xcode-select --install`). The full Xcode is not
@@ -21,7 +78,7 @@ modes, so after downloading run `chmod +x mbar` and
 Lua 5.4 is vendored and compiled into the binary. Nothing else needs to be
 installed.
 
-## Build from source
+### Build
 
 ```sh
 git clone https://github.com/rubenvitt/mbar.git
@@ -29,7 +86,10 @@ cd mbar
 cargo build --release -p mbar     # or: make release
 ```
 
-The binary is `target/release/mbar`. It is both the daemon (`mbar` with no
+The binary is `target/release/mbar` (cargo's target directory: if you set
+`CARGO_TARGET_DIR` or `build.target-dir` in `~/.cargo/config.toml`, it is
+there instead; the Makefile's install targets look it up with `cargo metadata`).
+It is both the daemon (`mbar` with no
 arguments, or with `--config <file>`) and the client (`mbar --set ...`).
 
 ### Management UI (optional)
@@ -42,11 +102,33 @@ cd crates/mbar-ui
 cargo build --release             # or, from the repository root: make ui
 ```
 
-The binary is `crates/mbar-ui/target/release/mbar-ui`. `mbar-ui --bar-name <name>`
-selects a bar other than the default `mbar`. The UI is a plain executable, not an
-`.app` bundle.
+The binary is `crates/mbar-ui/target/release/mbar-ui` (or `release/mbar-ui`
+in your configured target directory). `mbar-ui --bar-name <name>` selects a bar
+other than the default `mbar`. Built this way the UI is a plain executable;
+setup, auto-updates and the login item need the app bundle.
 
-## Install
+### Build the app bundle
+
+```sh
+make app          # -> dist/mbar.app
+make verify-app   # structural checks of the bundle
+```
+
+`make app` builds universal (`arm64` + `x86_64`) release binaries of `mbar` and
+`mbar-ui`, downloads the pinned Sparkle framework and assembles and signs
+`dist/mbar.app`. Both Rust targets must be installed
+(`rustup target add aarch64-apple-darwin x86_64-apple-darwin`), or build for the
+host only with `MBAR_UNIVERSAL=0`. Without `MBAR_SIGN_IDENTITY` the bundle is
+signed ad hoc, which is enough to run it on your own Mac. A locally built
+bundle checks the official feed like the released app, so it may offer to update
+itself to the latest release; turn automatic checks off on the System page to
+keep your build.
+`make dmg` (needs a Developer ID identity in `MBAR_SIGN_IDENTITY`, the Sparkle
+EdDSA private key in the login keychain or in `SPARKLE_KEY_FILE`, and
+notarization credentials unless `NOTARIZE=0`) builds the DMG, the update zip and
+`appcast.xml` in `dist/`, as the release workflow does.
+
+### Install
 
 `make install` copies the binary from `make release` and creates the
 `sketchybar` symlink. It does not build anything, so it can run under `sudo`:
@@ -63,13 +145,13 @@ To install by hand:
 
 ```sh
 install -d ~/.local/bin
-install -m 755 target/release/mbar ~/.local/bin/mbar
+install -m 755 target/release/mbar ~/.local/bin/mbar   # or your configured target directory
 ln -sf mbar ~/.local/bin/sketchybar
 ```
 
 Make sure the directory is on your `PATH`.
 
-### The `sketchybar` symlink
+#### The `sketchybar` symlink
 
 SketchyBar plugins call `sketchybar --set ...`. With a `sketchybar -> mbar`
 symlink on the `PATH`, those calls reach mbar unchanged. Invoked as `sketchybar`,
@@ -91,6 +173,8 @@ lock file and socket.
 
 ## Configuration location
 
+This applies to the app and to source builds.
+
 The daemon uses the first regular file it finds:
 
 1. `--config <file>` / `-c <file>`
@@ -105,7 +189,12 @@ steps 2 and 3 use that name instead of `mbar`, and steps 4 and 5 are skipped. As
 owner's execute bit on a shell config and runs it with `CONFIG_DIR` set to its
 directory.
 
-## Start at login (LaunchAgent)
+## Start at login (LaunchAgent, for source builds)
+
+The app starts mbar at login by itself (its own login item). Use this
+LaunchAgent only for a source build. Both use the label `dev.rubeen.mbar`, so
+only one of them can be loaded: the app's setup boots out and removes
+`~/Library/LaunchAgents/dev.rubeen.mbar.plist` when it finds one.
 
 ```sh
 make install-agent            # uses $(PREFIX)/bin/mbar; PREFIX defaults to /usr/local
@@ -116,9 +205,8 @@ This fills in `packaging/dev.rubeen.mbar.plist`, writes it to
 `~/Library/LaunchAgents/dev.rubeen.mbar.plist`, and loads it with
 `launchctl bootstrap`. The agent:
 
-- uses the label `dev.rubeen.mbar`, the same label as the management UI's
-  "launch at login" switch, so the two never start two daemons. Turning the
-  switch on in the UI rewrites the file without the log settings.
+- uses the label `dev.rubeen.mbar`, the same label as the app's login item,
+  so the two never start two daemons.
 - starts at login (`RunAtLoad`) and restarts mbar if it crashes
   (`KeepAlive` → `SuccessfulExit=false`). `mbar --exit` exits with status 0, so
   it stays stopped.
@@ -150,7 +238,7 @@ Only one daemon per user and bar name can run. A second one exits with
 `mbar: could not acquire lock-file... already running?`. Stop the agent before
 running `mbar` in a terminal.
 
-### Homebrew (draft)
+### Homebrew (draft, for source builds)
 
 `packaging/homebrew/mbar.rb` is a draft formula that builds from git `HEAD`.
 Recent Homebrew versions only install formulae from a tap, so put it in a local
@@ -167,9 +255,16 @@ The formula does not create the `sketchybar` symlink, because that would
 conflict with the `sketchybar` formula. Its caveats show the command for it.
 
 `brew services` uses its own launchd label (`homebrew.mxcl.mbar`). Use either
-`brew services` or `make install-agent`, not both.
+`brew services` or `make install-agent`, not both. The app's setup stops the
+`homebrew.mxcl.mbar` service and uninstalls the formula.
 
 ## Permissions
+
+With the app, the setup page and the System page show the live state of
+Accessibility and Screen Recording and open the right Settings pane. The setup
+page restarts the daemon after a grant. The released app is signed with a
+Developer ID, so the grants survive updates. The rest of this section matters
+mostly for source builds.
 
 macOS grants privacy permissions to the **responsible process**. When launchd
 starts mbar, that is the `mbar` binary itself. When you start mbar from a
@@ -189,7 +284,7 @@ press <kbd>⌘</kbd><kbd>⇧</kbd><kbd>G</kbd> and enter its path (for example
 `~/.local/bin/mbar`; add the real file, not the `sketchybar` symlink). Then
 restart mbar (`launchctl kickstart -k gui/$(id -u)/dev.rubeen.mbar`).
 
-The binary has only an ad-hoc code signature. After you rebuild or reinstall it,
+A source build has only an ad-hoc code signature. After you rebuild or reinstall it,
 macOS may treat it as a different program and keep showing the permission as
 missing. If that happens, remove the entry with **−** and add it again.
 
@@ -245,6 +340,26 @@ screen. On displays with a notch, the bar property `notch_width` (default 200)
 reserves the gap around the notch for `q`/`e` items, as in SketchyBar.
 
 ## Uninstall
+
+### The app
+
+1. On the System page, turn off "Launch at login" and quit mbar. If the bar
+   is still running, stop it with `mbar --exit`.
+2. Remove the command-line entry: `sudo rm /etc/paths.d/mbar`.
+3. Drag `mbar.app` from Applications to the Trash.
+4. Optionally remove its state and settings:
+
+   ```sh
+   rm -rf ~/Library/Application\ Support/mbar
+   rm -f ~/Library/Logs/mbar.log
+   defaults delete dev.rubeen.mbar
+   ```
+
+Then remove mbar from System Settings → Privacy & Security → Accessibility and
+Screen Recording. Your config in `~/.config/mbar/` (or `~/.config/sketchybar/`)
+is left in place.
+
+### Source builds
 
 ```sh
 make uninstall PREFIX=$HOME/.local   # stops and removes the LaunchAgent and the installed files
