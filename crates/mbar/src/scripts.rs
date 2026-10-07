@@ -6,11 +6,13 @@
 //! stdin `/dev/null`, stdout/stderr inherited (they end up in the daemon log) unless the
 //! output is captured.
 //!
-//! Timeout: like SketchyBar's `alarm(60)` in the `vfork` child, the timer is armed in the
-//! child itself (`setitimer(ITIMER_REAL)` between `fork` and `exec`, `SIGALRM` reset to its
-//! default action). A pending timer survives `exec` and is not inherited by the shell's own
-//! children, so after 60 s only the direct `sh` gets `SIGALRM`: it terminates unless it
-//! handles or ignores the signal (`item.md` §8.5), and nothing escalates to `SIGKILL`.
+//! Timeout: like SketchyBar's `alarm(60)`, only the direct `sh` gets `SIGALRM` after 60 s:
+//! it terminates unless it handles or ignores the signal (`item.md` §8.5), and nothing
+//! escalates to `SIGKILL`. The alarm is sent by a watchdog thread in the daemon instead of
+//! being armed in the child, so `std::process` can use `posix_spawn` (no `pre_exec`): on
+//! macOS a `fork` of the large, multi-threaded daemon costs tens of milliseconds per script.
+//! The reaper first waits with `WNOWAIT`, removes the watchdog entry and only then reaps,
+//! so the pid cannot be reused while the watchdog may still signal it.
 //!
 //! A reaper thread blocks in `waitpid` (no polling) and reports the exit. Captured output
 //! (Lua `mbar.exec` with a callback) is read by a second thread and ends with the shell:
@@ -130,12 +132,6 @@ pub fn spawn(
         cmd.stdout(Stdio::piped());
     }
     cmd.process_group(0);
-    let timer = itimer(timeout);
-    // SAFETY: the closure runs in the forked child before `exec` and only makes
-    // async-signal-safe system calls (`sigaction`, `sigprocmask`, `setitimer`).
-    unsafe {
-        cmd.pre_exec(move || arm_alarm(&timer));
-    }
     // Wakes the capture thread once the shell has been reaped.
     let wake = if spec.capture {
         Some(UnixStream::pair()?)
@@ -145,6 +141,7 @@ pub fn spawn(
     let mut child = cmd.spawn()?;
     let pid = child.id();
     track_group(pid);
+    watchdog::watch(pid, std::time::Instant::now() + timeout);
     let (reader, mut notify) = match (child.stdout.take(), wake) {
         (Some(out), Some((tx, rx))) => {
             let reader = std::thread::Builder::new()
@@ -164,6 +161,10 @@ pub fn spawn(
     std::thread::Builder::new()
         .name("mbar-reaper".into())
         .spawn(move || {
+            // Wait without reaping, stop the watchdog, then reap: the pid stays a zombie
+            // (not reusable) until the watchdog can no longer signal it.
+            wait_exited_no_reap(pid);
+            watchdog::unwatch(pid);
             let _ = child.wait();
             forget_group_if_empty(pid);
             if let Some(tx) = notify.as_mut() {
@@ -175,37 +176,94 @@ pub fn spawn(
     Ok(pid)
 }
 
-fn itimer(timeout: Duration) -> libc::itimerval {
-    // A zero `it_value` would disarm the timer: fire after 1 µs instead.
-    let timeout = timeout.max(Duration::from_micros(1));
-    libc::itimerval {
-        it_interval: libc::timeval {
-            tv_sec: 0,
-            tv_usec: 0,
-        },
-        it_value: libc::timeval {
-            tv_sec: timeout.as_secs().min(i32::MAX as u64) as libc::time_t,
-            tv_usec: timeout.subsec_micros() as libc::suseconds_t,
-        },
+/// Blocks until `pid` has exited without reaping it (`waitid(WEXITED | WNOWAIT)`).
+fn wait_exited_no_reap(pid: u32) {
+    loop {
+        // SAFETY: `info` is a valid out-pointer; `pid` is our own child.
+        let r = unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if r == 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return;
+        }
     }
 }
 
-/// Runs in the child between `fork` and `exec`: the `alarm(60)` of SketchyBar's `fork_exec`
-/// (with sub-second precision for tests). `SIGALRM` gets its default action and is unblocked
-/// so the timer terminates the shell unless the script itself traps or ignores it.
-fn arm_alarm(timer: &libc::itimerval) -> std::io::Result<()> {
-    // SAFETY: plain system calls on valid, initialised arguments.
-    unsafe {
-        libc::signal(libc::SIGALRM, libc::SIG_DFL);
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, libc::SIGALRM);
-        libc::sigprocmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
-        if libc::setitimer(libc::ITIMER_REAL, timer, std::ptr::null_mut()) != 0 {
-            return Err(std::io::Error::last_os_error());
+/// Sends `SIGALRM` to scripts that outlive their timeout (SketchyBar's `alarm(60)`).
+mod watchdog {
+    use std::sync::{Condvar, Mutex, OnceLock};
+    use std::time::Instant;
+
+    struct State {
+        entries: Mutex<Vec<(Instant, u32)>>,
+        changed: Condvar,
+    }
+
+    fn state() -> &'static State {
+        static STATE: OnceLock<State> = OnceLock::new();
+        STATE.get_or_init(|| {
+            let _ = std::thread::Builder::new()
+                .name("mbar-script-watchdog".into())
+                .spawn(run);
+            State {
+                entries: Mutex::new(Vec::new()),
+                changed: Condvar::new(),
+            }
+        })
+    }
+
+    /// Arms the alarm of `pid` at `deadline`.
+    pub fn watch(pid: u32, deadline: Instant) {
+        let s = state();
+        s.entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((deadline, pid));
+        s.changed.notify_one();
+    }
+
+    /// Disarms the alarm of `pid` (it has exited).
+    pub fn unwatch(pid: u32) {
+        let s = state();
+        s.entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(_, p)| *p != pid);
+        s.changed.notify_one();
+    }
+
+    fn run() {
+        let s = state();
+        let mut entries = s.entries.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            let now = Instant::now();
+            entries.retain(|&(deadline, pid)| {
+                if deadline > now {
+                    return true;
+                }
+                // SAFETY: plain syscall. The pid is still ours: the reaper removes the
+                // entry (under this lock) before it reaps the child.
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGALRM) };
+                false
+            });
+            entries = match entries.iter().map(|(d, _)| *d).min() {
+                None => s.changed.wait(entries).unwrap_or_else(|e| e.into_inner()),
+                Some(next) => {
+                    let wait = next.saturating_duration_since(Instant::now());
+                    s.changed
+                        .wait_timeout(entries, wait)
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0
+                }
+            };
         }
     }
-    Ok(())
 }
 
 /// Reads `out` until EOF, until `limit` bytes are kept, or until `wake` becomes readable
