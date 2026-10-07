@@ -117,11 +117,9 @@ fn move_reorder_rename_clone() {
         h.msg(&["--rename", "a", "b"]),
         "[!] Rename: Failed to rename item: a -> b\n"
     );
-    assert_eq!(
-        h.msg(&["--rename", "a", "z", "--query", "z"])
-            .contains("\"name\": \"z\""),
-        true
-    );
+    assert!(h
+        .msg(&["--rename", "a", "z", "--query", "z"])
+        .contains("\"name\": \"z\""));
     h.msg(&[
         "--set",
         "z",

@@ -26,7 +26,11 @@ fn linear_animation_and_lock() {
     // The first stepped frame (in msg) has t = 0.
     assert_eq!(y_offset(&mut h, "a"), 0);
     step(&mut h, 250);
-    assert!(h.last_frame.windows.iter().any(|w| w.key == WindowKey::Bar(1)));
+    assert!(h
+        .last_frame
+        .windows
+        .iter()
+        .any(|w| w.key == WindowKey::Bar(1)));
     assert_eq!(y_offset(&mut h, "a"), 5);
     // A later animated set of the same property cancels the locked animation and starts
     // from the current intermediate value.
@@ -46,7 +50,15 @@ fn linear_animation_and_lock() {
 fn chained_bounce_and_snap() {
     let mut h = H::new();
     h.msg(&["--add", "item", "a", "left"]);
-    h.msg(&["--animate", "sin", "30", "--set", "a", "y_offset=10", "y_offset=0"]);
+    h.msg(&[
+        "--animate",
+        "sin",
+        "30",
+        "--set",
+        "a",
+        "y_offset=10",
+        "y_offset=0",
+    ]);
     step(&mut h, 500);
     assert_eq!(y_offset(&mut h, "a"), 10);
     step(&mut h, 250);
@@ -70,8 +82,16 @@ fn bar_animation_resizes_window() {
     h.msg(&["--animate", "linear", "60", "--bar", "height=45"]);
     step(&mut h, 500);
     let mid = h.rt.model.bars[0].frame;
-    assert!(mid.height > f0.height && mid.height < f0.height + 20.0, "{mid:?}");
-    let w = h.last_frame.windows.iter().find(|w| w.key == WindowKey::Bar(1)).unwrap();
+    assert!(
+        mid.height > f0.height && mid.height < f0.height + 20.0,
+        "{mid:?}"
+    );
+    let w = h
+        .last_frame
+        .windows
+        .iter()
+        .find(|w| w.key == WindowKey::Bar(1))
+        .unwrap();
     assert_eq!(w.frame, mid);
     step(&mut h, 600);
     assert_eq!(h.query(&["bar"])["height"], 45);
@@ -81,7 +101,17 @@ fn bar_animation_resizes_window() {
 fn remove_cancels_animations() {
     let mut h = H::new();
     h.msg(&["--add", "item", "a", "left", "--add", "item", "b", "left"]);
-    h.msg(&["--animate", "linear", "60", "--set", "a", "y_offset=10", "--set", "b", "y_offset=10"]);
+    h.msg(&[
+        "--animate",
+        "linear",
+        "60",
+        "--set",
+        "a",
+        "y_offset=10",
+        "--set",
+        "b",
+        "y_offset=10",
+    ]);
     assert_eq!(h.rt.animator.len(), 2);
     h.msg(&["--remove", "a"]);
     assert_eq!(h.rt.animator.len(), 1);
@@ -91,14 +121,28 @@ fn remove_cancels_animations() {
 fn width_animation_on_string_change() {
     let mut h = H::new();
     h.msg(&["--add", "item", "a", "left", "--set", "a", "label=ab"]);
-    let w0 = h.query(&["a"])["bounding_rects"]["display-1"]["size"][0].as_f64().unwrap();
-    h.msg(&["--animate", "linear", "30", "--set", "a", "label=abcdefghij"]);
+    let w0 = h.query(&["a"])["bounding_rects"]["display-1"]["size"][0]
+        .as_f64()
+        .unwrap();
+    h.msg(&[
+        "--animate",
+        "linear",
+        "30",
+        "--set",
+        "a",
+        "label=abcdefghij",
+    ]);
     step(&mut h, 250);
-    let w1 = h.query(&["a"])["bounding_rects"]["display-1"]["size"][0].as_f64().unwrap();
+    let w1 = h.query(&["a"])["bounding_rects"]["display-1"]["size"][0]
+        .as_f64()
+        .unwrap();
     step(&mut h, 400);
-    let w2 = h.query(&["a"])["bounding_rects"]["display-1"]["size"][0].as_f64().unwrap();
+    let w2 = h.query(&["a"])["bounding_rects"]["display-1"]["size"][0]
+        .as_f64()
+        .unwrap();
     assert!(w0 < w1 && w1 < w2, "{w0} {w1} {w2}");
-    assert_eq!(h.query(&["a"])["label"]["width"].to_string().trim_matches('"') == "0", false);
+    // The width is dynamic again after the chained 0-frame step.
+    assert_eq!(h.query(&["a"])["geometry"]["width"], -1);
 }
 
 #[test]
@@ -111,8 +155,22 @@ fn batching_one_layout_and_dirty_windows() {
     h.res.displays.push(d2);
     h.input(mbar_core::platform::Input::DisplaysChanged);
     h.frame();
-    h.msg(&["--add", "item", "a", "left", "--set", "a", "display=1", "--add", "item", "b",
-        "left", "--set", "b", "display=2"]);
+    h.msg(&[
+        "--add",
+        "item",
+        "a",
+        "left",
+        "--set",
+        "a",
+        "display=1",
+        "--add",
+        "item",
+        "b",
+        "left",
+        "--set",
+        "b",
+        "display=2",
+    ]);
     // Changing an item on display 2 only redraws bar 2.
     h.msg(&["--set", "b", "label=x"]);
     let keys: Vec<_> = h.last_frame.windows.iter().map(|w| w.key).collect();

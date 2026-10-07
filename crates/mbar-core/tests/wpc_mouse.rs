@@ -9,12 +9,44 @@ use wpc_common::*;
 fn setup() -> H {
     let mut h = H::new();
     h.msg(&[
-        "--add", "item", "btn", "left", "--set", "btn", "label=Button", "script=btn.sh",
-        "click_script=click.sh", "--subscribe", "btn", "mouse.clicked", "mouse.entered",
-        "mouse.exited", "mouse.scrolled", "--add", "item", "other", "left", "--set", "other",
-        "label=Other", "script=other.sh", "--subscribe", "other", "mouse.exited",
-        "--add", "item", "g", "right", "--set", "g", "script=g.sh", "--subscribe", "g",
-        "mouse.entered.global", "mouse.exited.global", "mouse.scrolled.global",
+        "--add",
+        "item",
+        "btn",
+        "left",
+        "--set",
+        "btn",
+        "label=Button",
+        "script=btn.sh",
+        "click_script=click.sh",
+        "--subscribe",
+        "btn",
+        "mouse.clicked",
+        "mouse.entered",
+        "mouse.exited",
+        "mouse.scrolled",
+        "--add",
+        "item",
+        "other",
+        "left",
+        "--set",
+        "other",
+        "label=Other",
+        "script=other.sh",
+        "--subscribe",
+        "other",
+        "mouse.exited",
+        "--add",
+        "item",
+        "g",
+        "right",
+        "--set",
+        "g",
+        "script=g.sh",
+        "--subscribe",
+        "g",
+        "mouse.entered.global",
+        "mouse.exited.global",
+        "mouse.scrolled.global",
     ]);
     h
 }
@@ -24,7 +56,10 @@ fn click_runs_click_script_then_script() {
     let mut h = setup();
     let (x, y) = h.center("btn");
     let fx = h.mouse(
-        MouseKind::Up { button: MouseButton::Right, button_code: 1 },
+        MouseKind::Up {
+            button: MouseButton::Right,
+            button_code: 1,
+        },
         x,
         y,
         Some(WindowKey::Bar(1)),
@@ -93,19 +128,39 @@ fn scroll_throttle_and_global() {
     let mut h = setup();
     let (bx, by) = h.center("btn");
     h.mouse(MouseKind::Entered, 1000.0, by, Some(WindowKey::Bar(1)));
-    let fx = h.mouse(MouseKind::Scrolled { delta: 2 }, bx, by, Some(WindowKey::Bar(1)));
+    let fx = h.mouse(
+        MouseKind::Scrolled { delta: 2 },
+        bx,
+        by,
+        Some(WindowKey::Bar(1)),
+    );
     let r = runs(&fx);
     assert_eq!(r[0].sender(), Some("mouse.scrolled"));
     assert_eq!(r[0].get("SCROLL_DELTA"), Some("2"));
     h.res.now += Duration::from_millis(50);
-    let fx = h.mouse(MouseKind::Scrolled { delta: 3 }, bx, by, Some(WindowKey::Bar(1)));
+    let fx = h.mouse(
+        MouseKind::Scrolled { delta: 3 },
+        bx,
+        by,
+        Some(WindowKey::Bar(1)),
+    );
     assert!(runs(&fx).is_empty(), "throttled");
     h.res.now += Duration::from_millis(150);
-    let fx = h.mouse(MouseKind::Scrolled { delta: 1 }, bx, by, Some(WindowKey::Bar(1)));
+    let fx = h.mouse(
+        MouseKind::Scrolled { delta: 1 },
+        bx,
+        by,
+        Some(WindowKey::Bar(1)),
+    );
     assert_eq!(runs(&fx)[0].get("SCROLL_DELTA"), Some("4"));
     // empty bar area: global scroll with DID
     h.res.now += Duration::from_millis(400);
-    let fx = h.mouse(MouseKind::Scrolled { delta: -1 }, 1000.0, by, Some(WindowKey::Bar(1)));
+    let fx = h.mouse(
+        MouseKind::Scrolled { delta: -1 },
+        1000.0,
+        by,
+        Some(WindowKey::Bar(1)),
+    );
     let r = runs(&fx);
     assert_eq!(r.len(), 1);
     assert_eq!(r[0].item.as_deref(), Some("g"));
@@ -118,8 +173,19 @@ fn scroll_throttle_and_global() {
 fn slider_click_sets_percentage() {
     let mut h = H::new();
     h.msg(&[
-        "--add", "slider", "s", "left", "100", "--set", "s", "script=s.sh", "slider.background.height=10",
-        "click_script=c.sh", "--subscribe", "s", "mouse.clicked",
+        "--add",
+        "slider",
+        "s",
+        "left",
+        "100",
+        "--set",
+        "s",
+        "script=s.sh",
+        "slider.background.height=10",
+        "click_script=c.sh",
+        "--subscribe",
+        "s",
+        "mouse.clicked",
     ]);
     let q = h.query(&["s"]);
     let r = &q["bounding_rects"]["display-1"];
@@ -131,7 +197,12 @@ fn slider_click_sets_percentage() {
     assert_eq!(r.len(), 2, "{r:?}");
     let pct: u32 = r[1].get("PERCENTAGE").unwrap().parse().unwrap();
     assert!(pct > 0 && pct <= 100);
-    assert_eq!(h.query(&["s"])["slider"]["percentage"].to_string().trim_matches('"'), pct.to_string());
+    assert_eq!(
+        h.query(&["s"])["slider"]["percentage"]
+            .to_string()
+            .trim_matches('"'),
+        pct.to_string()
+    );
     // Dragging updates without scripts.
     let fx = h.mouse(MouseKind::Dragged, x0 + 10.0, y, Some(WindowKey::Bar(1)));
     assert!(runs(&fx).is_empty());
