@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/mbar-core"]
+members = ["crates/mbar-core", "crates/mbar-ipc"]
 
 [workspace.package]
 version = "0.1.0"
