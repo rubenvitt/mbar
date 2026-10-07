@@ -9,7 +9,8 @@
 //! regex errors) are produced by the runtime when executing the command.
 //!
 //! Regex selectors (`/…/` for `--set`, `--remove` and bracket members) are POSIX **basic**
-//! regular expressions, unanchored: [`bre_to_regex`] translates them for the `regex` crate.
+//! regular expressions, unanchored: [`bre_to_regex`] translates them for the `regex` crate and
+//! [`compile_bre`] compiles them (with back-reference support).
 
 use crate::animation::Curve;
 
@@ -462,48 +463,185 @@ impl std::error::Error for RegexError {}
 /// `RE_DUP_MAX`: largest bound accepted in `\{m,n\}`.
 const RE_DUP_MAX: u32 = 255;
 
+/// Backtracking budget per item name for patterns with back-references; exceeding it is a
+/// match error (`[!] Regex: Regex match failed …`, see `docs/DEVIATIONS.md` D20).
+const BACKTRACK_LIMIT: usize = 1_000_000;
+
+/// A repetition count range `{min, max}` (`None` = unbounded).
+type Quant = (u32, Option<u32>);
+
+/// `regex` syntax of a repetition.
+fn quant_str(q: Quant) -> String {
+    match q {
+        (0, None) => "*".into(),
+        (1, None) => "+".into(),
+        (0, Some(1)) => "?".into(),
+        (m, None) => format!("{{{m},}}"),
+        (m, Some(n)) if m == n => format!("{{{m}}}"),
+        (m, Some(n)) => format!("{{{m},{n}}}"),
+    }
+}
+
+/// `(X{inner}){outer}` as a single `X{…}` when the repetition counts it allows form one
+/// contiguous range (`a**` = `a*`, `a*\?` = `a*`, `a\{2\}\{3\}` = `a\{6\}`); `None`
+/// otherwise (`a\{3\}\?` allows 0 or 3).
+fn compose(inner: Quant, outer: Quant) -> Option<Quant> {
+    let ((a, b), (c, d)) = (inner, outer);
+    // k repetitions of X{a,b} match X exactly ka..=kb times; the ranges for consecutive
+    // k ∈ c..=d touch iff (k+1)a ≤ kb + 1, which is tightest at k = c.
+    if d != Some(c) {
+        let contiguous = match b {
+            None => c >= 1 || a <= 1,
+            Some(b) => u64::from(c + 1) * u64::from(a) <= u64::from(c) * u64::from(b) + 1,
+        };
+        if !contiguous {
+            return None;
+        }
+    }
+    let max = match (b, d) {
+        (Some(0), _) => Some(0),
+        (_, Some(0)) => Some(0),
+        (Some(b), Some(d)) => Some(b.saturating_mul(d)),
+        _ => None,
+    };
+    Some((c.saturating_mul(a), max))
+}
+
+/// Alternation bookkeeping of one RE level (pattern or `\(…\)`) for back-reference
+/// validation, as glibc `regcomp` does it: a group is referable once it is closed, but
+/// only within the branch it was closed in (`\(a\)\|\1` is `REG_ESUBREG`).
+struct AltFrame {
+    /// Groups closed before this level started.
+    initial: u16,
+    /// Groups closed in the finished branches of this level.
+    acc: u16,
+}
+
 /// Output builder of [`bre_to_regex`]: tracks the last atom so quantifiers can be applied
-/// (and stacked quantifiers wrapped, since `a*\?` must not become the lazy `a*?`).
+/// (and stacked quantifiers merged or wrapped, since `a*\?` must not become the lazy
+/// `a*?`).
 struct BreOut {
     out: String,
-    /// Byte offsets of the `(` of every open group.
-    groups: Vec<usize>,
+    /// Byte offset of the `(` and the number of every open group.
+    groups: Vec<(usize, usize)>,
     /// Start of the last atom in `out`; `None` at the start of an RE (pattern start, after
     /// `\(`, `\|` or a `^` anchor), where `*` is literal.
     atom: Option<usize>,
-    /// The last atom already carries a quantifier.
-    quantified: bool,
+    /// End of the last atom's text in `out` (where its quantifier begins).
+    atom_end: usize,
+    /// The combined quantifier of the last atom, if it has one.
+    quant: Option<Quant>,
+    /// `(?:` still to be inserted at `atom` for stacked quantifiers that could not be
+    /// merged. They are inserted once when the atom is finished: inserting each one
+    /// immediately shifts the growing atom every time (quadratic in the pattern length).
+    wraps: usize,
+    /// Number of `\(` so far.
+    nsub: usize,
+    /// One frame per open RE level (the pattern itself and every open group).
+    alts: Vec<AltFrame>,
+    /// Bit `n` set: group `n` (1–9) may be back-referenced here.
+    completed: u16,
+    /// The pattern uses a back-reference.
+    backref: bool,
 }
 
 impl BreOut {
-    fn literal(&mut self, c: char) {
-        self.atom = Some(self.out.len());
-        self.quantified = false;
-        self.out
-            .push_str(&regex::escape(c.encode_utf8(&mut [0; 4])));
+    /// Emits the `(?:` owed by the last atom; called before anything else is appended.
+    fn finish(&mut self) {
+        if self.wraps > 0 {
+            if let Some(start) = self.atom {
+                self.out.insert_str(start, &"(?:".repeat(self.wraps));
+            }
+            self.wraps = 0;
+        }
     }
 
     fn atom(&mut self, s: &str) {
+        self.finish();
         self.atom = Some(self.out.len());
-        self.quantified = false;
+        self.quant = None;
         self.out.push_str(s);
+        self.atom_end = self.out.len();
     }
 
-    fn quantify(&mut self, q: &str) {
-        let Some(start) = self.atom else {
+    fn literal(&mut self, c: char) {
+        self.atom(&regex::escape(c.encode_utf8(&mut [0; 4])));
+    }
+
+    fn quantify(&mut self, q: Quant) {
+        if self.atom.is_none() {
             return;
-        };
-        if self.quantified {
-            self.out.insert_str(start, "(?:");
-            self.out.push(')');
         }
-        self.out.push_str(q);
-        self.quantified = true;
+        match self.quant {
+            None => {}
+            Some(inner) => match compose(inner, q) {
+                Some(merged) => {
+                    self.out.truncate(self.atom_end);
+                    self.out.push_str(&quant_str(merged));
+                    self.quant = Some(merged);
+                    return;
+                }
+                None => {
+                    self.out.push(')');
+                    self.wraps += 1;
+                    self.atom_end = self.out.len();
+                }
+            },
+        }
+        self.out.push_str(&quant_str(q));
+        self.quant = Some(q);
     }
 
+    /// Start of an RE: no atom to quantify.
     fn reset(&mut self) {
+        self.finish();
         self.atom = None;
-        self.quantified = false;
+        self.quant = None;
+    }
+
+    fn open_group(&mut self) {
+        self.reset();
+        self.nsub += 1;
+        self.groups.push((self.out.len(), self.nsub));
+        self.alts.push(AltFrame {
+            initial: self.completed,
+            acc: 0,
+        });
+        self.out.push('(');
+    }
+
+    fn close_group(&mut self) -> Result<(), RegexError> {
+        self.finish();
+        let (start, num) = self.groups.pop().ok_or(RegexError)?;
+        let frame = self.alts.pop().ok_or(RegexError)?;
+        self.completed |= frame.acc;
+        if num <= 9 {
+            self.completed |= 1 << num;
+        }
+        self.out.push(')');
+        self.atom = Some(start);
+        self.atom_end = self.out.len();
+        self.quant = None;
+        Ok(())
+    }
+
+    fn alternation(&mut self) {
+        self.reset();
+        if let Some(frame) = self.alts.last_mut() {
+            frame.acc |= self.completed;
+            self.completed = frame.initial;
+        }
+        self.out.push('|');
+    }
+
+    fn backref(&mut self, n: u32) -> Result<(), RegexError> {
+        if self.completed & (1 << n) == 0 {
+            return Err(RegexError);
+        }
+        self.backref = true;
+        // Wrapped so that a following digit is not read as part of the group number.
+        self.atom(&format!("(?:\\{n})"));
+        Ok(())
     }
 }
 
@@ -605,9 +743,9 @@ fn bracket(chars: &[char], mut i: usize) -> Result<(String, usize), RegexError> 
     }
 }
 
-/// Parses the body of `\{m,n\}` starting after `\{`; returns the `regex` quantifier and
-/// the index after `\}`.
-fn interval(chars: &[char], mut i: usize) -> Result<(String, usize), RegexError> {
+/// Parses the body of `\{m,n\}` starting after `\{`; returns the repetition range and the
+/// index after `\}`.
+fn interval(chars: &[char], mut i: usize) -> Result<(Quant, usize), RegexError> {
     let number = |i: &mut usize| -> Option<u32> {
         let start = *i;
         let mut v: u32 = 0;
@@ -618,37 +756,94 @@ fn interval(chars: &[char], mut i: usize) -> Result<(String, usize), RegexError>
         (*i > start).then_some(v)
     };
     let min = number(&mut i).ok_or(RegexError)?;
-    let mut q = format!("{{{min}");
+    let mut max = Some(min);
     if chars.get(i) == Some(&',') {
         i += 1;
-        q.push(',');
-        if let Some(max) = number(&mut i) {
-            if max < min || max > RE_DUP_MAX {
-                return Err(RegexError);
-            }
-            q.push_str(&max.to_string());
+        max = number(&mut i);
+        if max.is_some_and(|max| max < min || max > RE_DUP_MAX) {
+            return Err(RegexError);
         }
     }
     if min > RE_DUP_MAX || chars.get(i) != Some(&'\\') || chars.get(i + 1) != Some(&'}') {
         return Err(RegexError);
     }
-    q.push('}');
-    Ok((q, i + 2))
+    Ok(((min, max), i + 2))
 }
 
 /// Translates a POSIX **basic** regular expression (as compiled by `regcomp(&re, p, 0)`)
 /// into `regex` crate syntax, unanchored: `\(` `\)` `\{` `\}` `\|` `\+` `\?` are the
 /// operators while `(` `)` `{` `}` `|` `+` `?` are literals; `*` at the start of the pattern
 /// (or after `\(`/`^`) is literal; `^`/`$` anchor only at the pattern/group edges; bracket
-/// expressions incl. `[[:alpha:]]` classes are passed through; back-references `\1`–`\9`
-/// are unsupported (`Err`). An empty pattern is an error (macOS `REG_EMPTY`), as are
-/// malformed patterns: the caller responds `[!] Regex: Could not compile regex '<token>'\n`.
+/// expressions incl. `[[:alpha:]]` classes are passed through. Back-references `\1`–`\9`
+/// become `\1`–`\9` (only [`compile_bre`] can match those, the `regex` crate cannot); a
+/// reference to a group that is not closed yet in the current branch is an error
+/// (glibc `REG_ESUBREG`). An empty pattern is an error (macOS `REG_EMPTY`), as are
+/// malformed patterns: the caller responds `[!] Regex: Could not compile regex
+/// '<token>'\n`.
 ///
 /// Further details: the result starts with `(?s)` (POSIX `.` matches a newline without
 /// `REG_NEWLINE`); `\+`/`\?` at the start of an RE are literal like `*`; `\{` there is an
-/// error; stacked quantifiers (`a**`, `a*\?`) apply to the quantified atom; any other
-/// escaped character is that literal character (`\.`, `\*`, `\[`, `\a` → `a`).
+/// error; stacked quantifiers (`a**`, `a*\?`) apply to the quantified atom and are merged
+/// into one where possible (`a**` → `a*`); any other escaped character is that literal
+/// character (`\.`, `\*`, `\[`, `\a` → `a`). Runs in linear time.
 pub fn bre_to_regex(pattern: &str) -> Result<String, RegexError> {
+    translate_bre(pattern).map(|(re, _)| re)
+}
+
+/// A compiled selector regex (see [`compile_bre`]).
+#[derive(Debug)]
+pub struct BreRegex(BreEngine);
+
+#[derive(Debug)]
+enum BreEngine {
+    Plain(regex::Regex),
+    /// Patterns with back-references need a backtracking engine.
+    Backref(fancy_regex::Regex),
+}
+
+/// `regexec` failed for a reason other than no match (`[!] Regex: Regex match failed
+/// '<text>'\n`): the backtracking budget of a back-reference pattern ran out (the
+/// equivalent of `REG_ESPACE`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegexMatchError;
+
+impl std::fmt::Display for RegexMatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("out of memory")
+    }
+}
+
+impl std::error::Error for RegexMatchError {}
+
+impl BreRegex {
+    /// Unanchored search, like `regexec`.
+    pub fn is_match(&self, haystack: &str) -> Result<bool, RegexMatchError> {
+        match &self.0 {
+            BreEngine::Plain(re) => Ok(re.is_match(haystack)),
+            BreEngine::Backref(re) => re.is_match(haystack).map_err(|_| RegexMatchError),
+        }
+    }
+}
+
+/// Compiles a POSIX basic regular expression (`regcomp(&re, p, 0)`) via [`bre_to_regex`].
+pub fn compile_bre(pattern: &str) -> Result<BreRegex, RegexError> {
+    let (re, backref) = translate_bre(pattern)?;
+    let engine = if backref {
+        fancy_regex::RegexBuilder::new(&re)
+            .backtrack_limit(BACKTRACK_LIMIT)
+            .build()
+            .map(BreEngine::Backref)
+            .map_err(|_| RegexError)?
+    } else {
+        regex::Regex::new(&re)
+            .map(BreEngine::Plain)
+            .map_err(|_| RegexError)?
+    };
+    Ok(BreRegex(engine))
+}
+
+/// [`bre_to_regex`], plus whether the pattern uses a back-reference.
+fn translate_bre(pattern: &str) -> Result<(String, bool), RegexError> {
     if pattern.is_empty() {
         return Err(RegexError);
     }
@@ -657,7 +852,13 @@ pub fn bre_to_regex(pattern: &str) -> Result<String, RegexError> {
         out: String::from("(?s)"),
         groups: Vec::new(),
         atom: None,
-        quantified: false,
+        atom_end: 0,
+        quant: None,
+        wraps: 0,
+        nsub: 0,
+        alts: vec![AltFrame { initial: 0, acc: 0 }],
+        completed: 0,
+        backref: false,
     };
     // `^` is an anchor only as the first character of an RE.
     let mut re_start = true;
@@ -672,20 +873,12 @@ pub fn bre_to_regex(pattern: &str) -> Result<String, RegexError> {
                 i += 2;
                 match e {
                     '(' => {
-                        b.groups.push(b.out.len());
-                        b.out.push('(');
-                        b.reset();
+                        b.open_group();
                         re_start = true;
                     }
-                    ')' => {
-                        let start = b.groups.pop().ok_or(RegexError)?;
-                        b.out.push(')');
-                        b.atom = Some(start);
-                        b.quantified = false;
-                    }
+                    ')' => b.close_group()?,
                     '|' => {
-                        b.out.push('|');
-                        b.reset();
+                        b.alternation();
                         re_start = true;
                     }
                     '{' => {
@@ -693,17 +886,17 @@ pub fn bre_to_regex(pattern: &str) -> Result<String, RegexError> {
                             return Err(RegexError);
                         }
                         let (q, next) = interval(&chars, i)?;
-                        b.quantify(&q);
+                        b.quantify(q);
                         i = next;
                     }
                     '+' | '?' => {
                         if b.atom.is_some() {
-                            b.quantify(if e == '+' { "+" } else { "?" });
+                            b.quantify(if e == '+' { (1, None) } else { (0, Some(1)) });
                         } else {
                             b.literal(e);
                         }
                     }
-                    '1'..='9' => return Err(RegexError),
+                    '1'..='9' => b.backref(e.to_digit(10).unwrap_or(0))?,
                     other => b.literal(other),
                 }
                 continue;
@@ -717,20 +910,20 @@ pub fn bre_to_regex(pattern: &str) -> Result<String, RegexError> {
             '.' => b.atom("."),
             '*' => {
                 if b.atom.is_some() {
-                    b.quantify("*");
+                    b.quantify((0, None));
                 } else {
                     b.literal('*');
                 }
             }
             '^' if at_start => {
-                b.out.push('^');
                 b.reset();
+                b.out.push('^');
             }
             '$' if i + 1 == chars.len()
                 || (chars[i + 1] == '\\' && matches!(chars.get(i + 2), Some(')' | '|'))) =>
             {
-                b.out.push('$');
                 b.reset();
+                b.out.push('$');
             }
             other => b.literal(other),
         }
@@ -739,5 +932,6 @@ pub fn bre_to_regex(pattern: &str) -> Result<String, RegexError> {
     if !b.groups.is_empty() {
         return Err(RegexError);
     }
-    Ok(b.out)
+    b.finish();
+    Ok((b.out, b.backref))
 }

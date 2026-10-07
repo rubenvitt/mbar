@@ -9,10 +9,11 @@ existing configs behave exactly as documented in `docs/spec/`.
 |---|---|
 | `--query stats` | JSON with runtime statistics (see below). |
 | `--query menus` | JSON array of the front application's top-level menu titles. |
-| `--monitor [events\|stats\|all]` | Streaming: the connection stays open and the daemon writes one JSON object per line for every event dispatched (`{"type":"event","name":…,"sender":…,"info":…,"items":[…],"ts_ms":…}`) and/or a stats snapshot every second (`{"type":"stats",…}`). Unix-socket transport only. |
+| `--monitor [events\|stats\|all]` | Streaming: the connection stays open and the daemon writes one JSON object per line for every event dispatched (`{"type":"event","name":…,"sender":…,"info":…,"items":[…],"ts_ms":…}`) and/or a stats snapshot every second (`{"type":"stats",…}`). Unix-socket transport only. The first frame is the reply of the message (empty unless earlier commands in it printed something, e.g. `--query bar --monitor`); a `--monitor` the daemon does not execute (for example after an empty argument, which ends the message) gets a normal reply and the connection closes. Subscribers that stop reading never stall the daemon: they are dropped once 1024 lines behind or after 1 s without progress. |
 | `--menu <index\|title>` | Opens that top-level menu of the front app (index 0 = Apple menu). |
 | `--menubar hide\|show\|toggle` | Sets macOS "Automatically hide and show the menu bar" (`_HIHideMenuBar`) and notifies the system. |
 | `--reload` | Reloads the config (SketchyBar has this as `--hotload`-adjacent behaviour; mbar exposes it explicitly). |
+| `-h`, `--help` (as `mbar`) | Invoked under any name other than `sketchybar`, the help lists mbar's config locations, `--headless` and the extensions above (and `--clone` in the order the code reads it). Invoked as `sketchybar` (e.g. a `sketchybar -> mbar` symlink), it prints SketchyBar's `misc/help.h` verbatim (`cli.md` §1.3), just as `-v` prints `sketchybar-v2.24.0`. |
 
 ### `--query stats`
 

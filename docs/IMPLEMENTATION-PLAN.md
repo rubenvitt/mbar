@@ -213,7 +213,9 @@ Property-layer conventions every package relies on:
    was rounding and has been fixed.
 4. **D9 messages** (no SketchyBar text exists): `[!] Item (<name>): Invalid space '<e>'\n`,
    `[!] Item (<name>): Invalid display '<e>'\n` (entries ≥ 32 skipped, others applied),
-   `[!] Bar: Invalid display '<e>'\n` (`0`, non-numeric or > 32 skipped).
+   `[!] Bar: Invalid display '<e>'\n` (> 32 skipped). Bar `display` entries `0` or
+   non-numeric are skipped silently (`cli.md` §5: "mbar should ignore such entries"; review
+   CLI-4), so the client exits 0 like SketchyBar.
 5. **Popup parent on `position=` change** stays set like C (`item.md` §2.3); the `cli.md`
    suggestion to clear it is not adopted (not in DEVIATIONS).
 6. **Cloned popup members are not attached** to the host popup (C behaviour; DEVIATIONS does

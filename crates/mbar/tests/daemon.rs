@@ -64,6 +64,7 @@ impl Sandbox {
             .env("PATH", path)
             .env("HOME", &self.home)
             .env("TMPDIR", &self.tmp)
+            .env("MBAR_LOCK_DIR", &self.tmp)
             .env("USER", USER)
             .env("MBAR_ALLOW_ROOT", "1")
             .env("MBAR_TEST_BASE", "base");

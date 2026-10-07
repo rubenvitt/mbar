@@ -13,7 +13,11 @@
 
 use crate::color::Color;
 use crate::props::{AnimTarget, AnimValue, PendingAnim};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// One frame of the 60 Hz time base (D12): the pacing interval for platforms without a
+/// display link (headless), see [`Animator::next_deadline_paced`].
+pub const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
 
 /// Interpolation curve, selected by the **first character** of the `--animate` curve token
 /// (`events.md` §10.2).
@@ -165,6 +169,8 @@ pub struct AnimStep {
 pub struct Animator {
     animations: Vec<Animation>,
     next_id: u64,
+    /// Time of the last [`Animator::step`] (pacing base of [`Animator::next_deadline_paced`]).
+    last_step: Option<Instant>,
 }
 
 impl Animator {
@@ -296,6 +302,7 @@ impl Animator {
     ///
     /// Returns the steps in order; the runtime applies them (`Runtime::apply_anim_steps`).
     pub fn step(&mut self, now: Instant) -> Vec<AnimStep> {
+        self.last_step = Some(now);
         let mut steps = Vec::new();
         let mut finished: Vec<u64> = Vec::new();
         // Index loop: releasing a successor mutates a later element of the same vector.
@@ -342,13 +349,26 @@ impl Animator {
     /// Next instant a frame is needed: `Some(now)` while any animation exists (every frame
     /// may change a value; display-link pacing at the refresh rate is the platform's job,
     /// D12), `None` when idle (`animator_update` destroys the display link once the list is
-    /// empty).
+    /// empty). Platforms without a display link use [`Animator::next_deadline_paced`].
     pub fn next_deadline(&self, now: Instant) -> Option<Instant> {
         if self.animations.is_empty() {
             None
         } else {
             Some(now)
         }
+    }
+
+    /// [`Animator::next_deadline`] for platforms without a display link (headless): one
+    /// `interval` after the last stepped frame instead of "now", so a main loop that sleeps
+    /// until the deadline produces frames at `1 / interval` instead of busy-spinning for the
+    /// whole animation (or forever with `scroll_texts`). Durations are wall-clock (D12), so
+    /// pacing does not change the animated values, only how often they are sampled. "Now"
+    /// when nothing was stepped yet or the last step is more than `interval` ago.
+    pub fn next_deadline_paced(&self, now: Instant, interval: Duration) -> Option<Instant> {
+        self.next_deadline(now).map(|d| match self.last_step {
+            Some(last) => d.max(last + interval),
+            None => d,
+        })
     }
 
     /// True while any animation is in flight (alias of [`Animator::needs_frame`]).

@@ -10,7 +10,8 @@ parallel. Behaviour comes from `docs/spec/*.md`; this file decides *structure*.
   (events in), `Effect` + `FrameOutput` (actions out).
 * Rendering is **one window per bar per display** (not one window per item like
   SketchyBar) plus one window per visible popup. Items are drawn into their bar's
-  scene. Items with `blur_radius > 0` produce a `BlurRegion` in the scene; the platform
+  scene (parts of an item window outside its bar/popup window are clipped, deviation
+  D21). Items with `blur_radius > 0` produce a `BlurRegion` in the scene; the platform
   realises it with a child window behind the bar window.
 * Every SketchyBar quirk documented in the spec is reproduced unless
   `docs/EXTENSIONS.md` lists a deliberate deviation.

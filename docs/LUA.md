@@ -188,7 +188,7 @@ Names in the `name` parameter may also be item objects (anything with a `.name`)
 | `mbar.bar(props)` | `--bar ...` | |
 | `mbar.default(props)` | `--default ...` | |
 | `mbar.remove(name)` | `--remove <name>` | |
-| `mbar.subscribe(name, events, fn)` | `--set <name> script=lua:<id>` (first time) `--subscribe <name> <events...>` | `events`: a string (space separated) or a list. `mbar.subscribe(name, fn)` registers a catch-all. |
+| `mbar.subscribe(name, events, fn)` | `--set <name> script=lua:<id>` `--subscribe <name> <events...>` | `events`: a string (space separated) or a list. `mbar.subscribe(name, fn)` registers a catch-all. |
 | `mbar.animate(curve, duration, fn)` | `--animate <curve> <duration> <everything fn sent>` | One message. Duration in 60 Hz frames. Nests. |
 | `mbar.trigger(event, env?)` | `--trigger <event> K=V ...` | Table values are JSON encoded. |
 | `mbar.query(what, ...)` | `--query <what> ...` | Returns the decoded JSON, or `nil, response`. |
@@ -279,7 +279,19 @@ end)
 
 * The first `subscribe` (or a `script = function` property) sets the item's
   `script` to `lua:<id>`. `--query` shows that value. Further `subscribe` calls on
-  the same item reuse the id and add handlers for more events.
+  the same item reuse the id and add handlers for more events; each one sends
+  `--set <name> script=lua:<id>` again (a no-op when unchanged), so an item that
+  was removed and re-added elsewhere, or whose script a shell replaced, still
+  gets its handler.
+* `mbar.add` and `mbar.remove(name)` / `item:remove()` discard the Lua handlers
+  registered under that name, so a re-created item starts from a fresh handler.
+  `--remove` and `--rename` sent through `mbar.command` are tracked too (a
+  rename keeps the handlers with the renamed item). An item renamed by a shell
+  keeps working until Lua `mbar.add`s an item with its old name.
+* `script = function` and `click_script = function` reuse the item's (or the
+  `/regex/` selector's) handler id, so replacing them from a handler does not
+  grow memory. In `mbar.default` / `mbar.bar` every function gets a new id
+  (items created earlier keep their function).
 * When the item's script fires, the handler registered for `env.SENDER` runs;
   if there is none, the catch-all runs (`mbar.subscribe(name, fn)`,
   `item:subscribe("*", fn)` or `script = fn`). With neither, nothing happens.
@@ -347,7 +359,11 @@ mbar.delay(0.5, function() mbar.set("toast", { drawing = false }) end)
 `exec` runs `sh -c <cmd>` without blocking the bar. The callback gets
 `(result, output)`: `result` is the decoded JSON when the output is a JSON
 object or array, otherwise the output string itself; `output` is always the raw
-string.
+string. The callback runs as soon as the shell exits: output that background
+processes started by the command (`cmd &`) write after that is not captured
+(their stdout is closed). At most 4 MiB of output are kept; a command that
+writes more has its stdout closed at that point, like `cmd | head -c 4194304`.
+Like every child, the shell gets `SIGALRM` after 60 s.
 
 ### Graphs and providers
 
@@ -378,6 +394,21 @@ A provider fires the item's script with `SENDER=provider` and the sample in
   code as second argument.
 * Handlers run in-process on the daemon's main thread. A handler that blocks
   (e.g. `io.popen` of a slow command) blocks the bar: use `mbar.exec`.
+* Do not call the `mbar` / `sketchybar` client of the same bar through
+  `io.popen` or `os.execute` (a common SbarLua pattern, where Lua runs in a
+  separate process). The daemon answers messages on the thread that is
+  running the Lua code, so the client could only wait for its 5 s timeout and
+  print nothing, freezing the bar meanwhile. Instead, these two functions
+  export `MBAR_LUA_SYNC=<bar name>` into the shell they start, and a client
+  that sees its own bar name there fails at once (stderr message, exit code
+  1). Use `mbar.query(...)` for queries and `mbar.exec(cmd, fn)` (asynchronous,
+  not marked) for commands that talk to the bar. A process started in the
+  background from such a shell inherits the marker; it can `unset
+  MBAR_LUA_SYNC` before messaging the bar.
+  Handlers queued by other handlers (`mbar.trigger`, a `set` that fires a
+  subscribed event) run in bounded batches between IPC requests, timers and
+  frames, so a handler that re-triggers its own event burns CPU like the
+  equivalent shell script would, but the bar stays responsive.
 * New: `mbar.provider`, `mbar.menu`, `mbar.command`, `mbar.flush`,
   `mbar.json`, `script = function` / `click_script = function` properties,
   list values (`space = { 1, 2 }`) and the positional value convention

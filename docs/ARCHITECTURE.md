@@ -70,21 +70,34 @@ Pure logic. No Apple types, no threads, no I/O except what is injected.
             │                                      (RunScript, Respond, Exit, Reload,
             │                                       PlatformRequest, ...)
             ▼
-   Runtime::frame(now, &mut dyn Resources) ──► FrameOutput { windows: Vec<WindowUpdate> }
-                                               (only dirty windows; each carries a Scene)
+   Runtime::frame(now, &mut dyn Resources) ──► FrameOutput { windows, closed, space_moves }
+                                               (only dirty windows, each carrying a Scene;
+                                                non-sticky windows to send to a new space)
 ```
 
 * `Resources` (implemented by the platform) gives the core **text metrics** and
   **image sizes**; renderers later resolve the same `TextKey`/`ImageKey` to GPU textures.
 * The platform owns a single timer: `Runtime::next_deadline()` tells it when to call
   `frame()`/`tick()` next (update_freq timers, animations, scroll texts, alias refresh).
-  No polling when idle.
+  No polling when idle. While animations run the deadline is "now" and a display link
+  paces the frames; the headless platform has none and uses
+  `Runtime::next_deadline_paced(FRAME_INTERVAL)` (60 Hz) so it does not spin.
 * Everything is single-threaded on the main thread; background threads (IPC server,
   script reaper, providers) only post `Input`s through a `Waker`.
 
 ### mbar-ipc
 
-* Unix domain socket `$TMPDIR/mbar_<user>_<bar_name>.socket`, frames:
+* Unix domain socket `<dir>/mbar_<user>_<bar_name>.socket` (mode 0600), where `<dir>` is
+  `$TMPDIR` (else `/tmp`) if that directory is owned by the user and not group/world
+  writable, otherwise a private `mbar-<uid>` subdirectory (0700) of it, e.g.
+  `/tmp/mbar-1000/` on Linux. The single-instance lock file does not follow `$TMPDIR`
+  (SketchyBar: fixed `/tmp/<g_name>_<USER>.lock`, `cli.md` §1.1): it is always
+  `/tmp/mbar-<uid>/mbar_<user>_<bar_name>.lock`, so daemons started with different
+  `$TMPDIR`s (launchd/systemd vs. a shell) exclude each other. `MBAR_LOCK_DIR`
+  replaces `/tmp` as its base (test hook for running independent daemons side by
+  side). Both ends check
+  the peer's uid (`SO_PEERCRED`/`getpeereid`; same user or root), so a socket squatted
+  by another local user is never used. Frames:
   `u32 LE length` + payload. Request payload = argv joined by `\0`, terminated `\0\0`
   (same as SketchyBar's mach payload). Response = UTF-8 bytes (may be empty).
 * On macOS additionally a mach server registered as `dev.rubeen.<bar_name>`

@@ -24,6 +24,10 @@ or depends on undefined behaviour. Each one gets a defined, safe behaviour inste
 | D17 | Client waits 100 ms for a reply; slow daemon → empty `--query` | Client waits up to 5 s |
 | D18 | Removing an item leaves its animations pointing at freed memory | Animations of removed items are cancelled |
 | D19 | After hotload, distributed notifications may be registered twice | Each notification is delivered once |
-| D14 | Freeze flag is a plain bool (nested freeze/unfreeze cancel) | Kept as-is (no crash), documented |
+| D20 | Regex selectors with back-references (`\1`–`\9`) are matched by `regexec` without any limit; a pathological pattern such as `/^\(\(a*\)*\)*\1c$/` can stall the bar | Matching stops after 1,000,000 backtracking steps per item name and the selector fails like any other `regexec` error: `[!] Regex: Regex match failed 'out of memory'` (the `REG_ESPACE` text), empty selection |
+| D21 | Every item is drawn into its own window, so an item window larger than its bar or popup window (a popup member with `width=` wider than the popup, a shadow overhang left of the bar) stays fully visible | Items are painted into their bar's / popup's window (one window per bar and popup, `docs/DESIGN-CORE.md`); the parts of an item window outside it are clipped. Hit testing still uses the full item windows |
+| D22 | `--add graph` mallocs `width` (u32, unbounded) floats; a huge width fails the allocation or stalls the bar, and `--query` prints every sample | Width is clamped to 4096 samples/points (`MAX_GRAPH_WIDTH`) |
+| D23 | Lock file `/tmp/<g_name>_<USER>.lock` in the world-writable `/tmp`; another local user can pre-create it and keep the bar from starting | Same `$TMPDIR`-independent base, but inside the private (0700, owner-checked) `/tmp/mbar-<uid>/` directory: `/tmp/mbar-<uid>/mbar_<USER>_<bar>.lock`. Error messages and exit codes unchanged |
+| D14 | Freeze flag is a plain bool (nested freeze/unfreeze cancel) | Kept as-is (no crash), documented: `--update` / `--trigger space_change` end a message's freeze with a refresh, so later events in the message see items added before as shown (events.md Q7) |
 
 Extensions (new behaviour that does not exist in SketchyBar) are listed in `docs/EXTENSIONS.md`.

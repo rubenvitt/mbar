@@ -4,7 +4,8 @@
 //! anchors), `docs/spec/item.md` §4–6 (item internals, popups), `docs/spec/components.md`
 //! §4.8–§10 (component bounds and drawing). Deviations: D2 (consistent slider hit test),
 //! D3 (popups hidden with their host), D4 (nested popups anchored in the same pass),
-//! D10 (negative unsigned results clamp to 0), D11 (`get_height` uses the current pass).
+//! D10 (negative unsigned results clamp to 0), D11 (`get_height` uses the current pass),
+//! D21 (item windows are clipped to their bar/popup window).
 //!
 //! Coordinate conventions:
 //! * Screen: points, top-left origin (CG global). Bar/popup/item frames are screen rects.
@@ -27,12 +28,14 @@
 
 use crate::bar::{BarProps, BarState};
 use crate::color::Color;
+use crate::components::app_menu::{MeasuredTitle, TitleMeasure};
 use crate::components::{Background, Image, Slider, Text};
 use crate::geometry::{Point, Rect, Size};
 use crate::item::{BarItem, ItemId, ItemType, Position};
 use crate::model::Model;
 use crate::platform::{level, DisplayInfo, ImageInfo, Resources, TextKey};
 use crate::scene::{Primitive, Scene};
+use std::collections::HashMap;
 
 /// `g_nirvana`: where invisible windows are parked.
 pub const NIRVANA: Point = Point {
@@ -68,6 +71,138 @@ pub struct BarLayout {
     /// Measured `app_menu` title lines of the `app_menu` items in `items` (extension), so
     /// the pure scene builder can reference the platform's text handles.
     pub menu_lines: Vec<(ItemId, Vec<MenuLine>)>,
+    /// Component bounds of the items of this bar that differ from the ones left in the
+    /// model, in `items` order. Component bounds are per item, not per bar: SketchyBar lays
+    /// out and draws each bar back-to-back (`bar.md` §5.2), while [`layout`] lays out every
+    /// bar before anything is drawn, so the model keeps the last bar's bounds. Bars of
+    /// different heights (notch display height, …) keep theirs here.
+    pub geometry: Vec<(ItemId, ItemGeometry)>,
+}
+
+/// The component bounds `bar_item_calculate_bounds` / `group_calculate_bounds` compute for
+/// one bar: item, icon, label, slider and text backgrounds (incl. their images), text
+/// origins, alias image, graph, `app_menu` title cells.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ItemGeometry {
+    background: BgGeometry,
+    icon: TextGeometry,
+    label: TextGeometry,
+    knob: TextGeometry,
+    track: BgGeometry,
+    fill: BgGeometry,
+    alias: Rect,
+    graph: Rect,
+    graph_rtl: bool,
+    menu: Vec<Rect>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BgGeometry {
+    bounds: Rect,
+    height: u32,
+    image: Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TextGeometry {
+    bounds: Rect,
+    background: BgGeometry,
+}
+
+impl BgGeometry {
+    fn of(bg: &Background) -> Self {
+        BgGeometry {
+            bounds: bg.bounds,
+            height: bg.height,
+            image: bg.image.bounds,
+        }
+    }
+    fn apply(&self, bg: &mut Background) {
+        bg.bounds = self.bounds;
+        bg.height = self.height;
+        bg.image.bounds = self.image;
+    }
+}
+
+impl TextGeometry {
+    fn of(t: &Text) -> Self {
+        TextGeometry {
+            bounds: t.bounds,
+            background: BgGeometry::of(&t.background),
+        }
+    }
+    fn apply(&self, t: &mut Text) {
+        t.bounds = self.bounds;
+        self.background.apply(&mut t.background);
+    }
+}
+
+impl ItemGeometry {
+    /// The bounds currently stored in `item`.
+    pub fn of(item: &BarItem) -> Self {
+        ItemGeometry {
+            background: BgGeometry::of(&item.background),
+            icon: TextGeometry::of(&item.icon),
+            label: TextGeometry::of(&item.label),
+            knob: TextGeometry::of(&item.slider.knob),
+            track: BgGeometry::of(&item.slider.track),
+            fill: BgGeometry::of(&item.slider.fill),
+            alias: item.alias.image.bounds,
+            graph: item.graph.bounds,
+            graph_rtl: item.graph.rtl,
+            menu: item.app_menu.title_bounds.clone(),
+        }
+    }
+
+    /// Writes these bounds into `item`.
+    pub fn apply(&self, item: &mut BarItem) {
+        self.background.apply(&mut item.background);
+        self.icon.apply(&mut item.icon);
+        self.label.apply(&mut item.label);
+        self.knob.apply(&mut item.slider.knob);
+        self.track.apply(&mut item.slider.track);
+        self.fill.apply(&mut item.slider.fill);
+        item.alias.image.bounds = self.alias;
+        item.graph.bounds = self.graph;
+        item.graph.rtl = self.graph_rtl;
+        item.app_menu.title_bounds.clone_from(&self.menu);
+    }
+}
+
+impl BarLayout {
+    /// The bounds `id` has on this bar when they differ from the model's (see
+    /// [`BarLayout::geometry`]).
+    pub fn geometry_of(&self, id: ItemId) -> Option<&ItemGeometry> {
+        self.geometry.iter().find(|(i, _)| *i == id).map(|(_, g)| g)
+    }
+}
+
+impl Layout {
+    /// [`BarLayout::geometry_of`] for the bar `adid`.
+    pub fn geometry_of(&self, adid: u32, id: ItemId) -> Option<&ItemGeometry> {
+        self.bars
+            .iter()
+            .find(|b| b.adid == adid)
+            .and_then(|b| b.geometry_of(id))
+    }
+}
+
+/// Runs `f` on `item` with the component bounds it has on one bar (`geometry`, see
+/// [`Layout::geometry_of`]) and restores the model's bounds afterwards; hit tests (slider
+/// track, `app_menu` titles) then match what that bar shows.
+pub fn with_geometry<R>(
+    item: &mut BarItem,
+    geometry: Option<&ItemGeometry>,
+    f: impl FnOnce(&mut BarItem) -> R,
+) -> R {
+    let Some(g) = geometry else {
+        return f(item);
+    };
+    let saved = ItemGeometry::of(item);
+    g.apply(item);
+    let r = f(item);
+    saved.apply(item);
+    r
 }
 
 /// An item's placement in a window.
@@ -220,46 +355,98 @@ fn layout_height(item: &BarItem) -> u32 {
 
 /// The `app_menu` entries drawn by an item: `visible_titles()`; entry `1` (the
 /// application menu, whose title is the app name) is drawn with `app_font` and the
-/// `app_name` text (extension, `docs/EXTENSIONS.md`).
-fn app_menu_entries(item: &BarItem) -> Vec<(usize, String, bool)> {
+/// `app_name` text (extension, `docs/EXTENSIONS.md`). Returns `(text, bold)`.
+fn app_menu_entries(item: &BarItem) -> Vec<(String, bool)> {
     let am = &item.app_menu;
     am.visible_titles()
         .into_iter()
         .map(|(i, t)| {
             if i == 1 && !am.app_name.is_empty() {
-                (i, am.app_name.clone(), true)
+                (am.app_name.clone(), true)
             } else {
-                (i, t.to_string(), i == 1)
+                (t.to_string(), i == 1)
             }
         })
         .collect()
 }
 
 /// Measures the `app_menu` titles: one cell per entry, `typographic width + spacing` wide
-/// and `ascent + descent + 2·APP_MENU_PAD` tall (positions are set by
-/// [`item_calculate_bounds`]). Returns the measured lines.
-fn prepare_app_menu(item: &mut BarItem, res: &mut dyn Resources) -> Vec<MenuLine> {
-    if item.item_type != ItemType::AppMenu {
-        return Vec::new();
-    }
+/// and `ascent + descent + 2·APP_MENU_PAD` tall. The measurements are cached on the item
+/// (`AppMenu::measured`) until the drawn entries, the fonts or the spacing change (PERF-9).
+fn measure_app_menu(item: &mut BarItem, res: &mut dyn Resources) {
+    let entries = app_menu_entries(item);
     let title_font = item.app_menu.title_font(&item.label.font);
     let app_font = item.app_menu.app_name_font(&item.label.font);
-    let spacing = item.app_menu.spacing.max(0) as f32;
-    let mut rects = Vec::new();
-    let mut lines = Vec::new();
-    for (_, text, bold) in app_menu_entries(item) {
-        let font = if bold { &app_font } else { &title_font };
-        let m = res.text_metrics(font, &text);
-        let w = to_u32(m.typographic_width as f64 + 0.5) as f32 + spacing;
-        let h = m.ascent + m.descent + 2.0 * APP_MENU_PAD;
-        rects.push(Rect::new(0.0, 0.0, w, h));
-        lines.push(MenuLine {
-            key: m.key,
-            descent: m.descent,
-        });
+    let spacing = item.app_menu.spacing;
+    let cache = &item.app_menu.measured;
+    if cache.entries == entries
+        && cache.spacing == spacing
+        && cache
+            .fonts
+            .as_ref()
+            .is_some_and(|(t, a)| *t == title_font && *a == app_font)
+    {
+        return;
     }
-    item.app_menu.title_bounds = rects;
-    lines
+    let gap = spacing.max(0) as f32;
+    let cells = entries
+        .iter()
+        .map(|(text, bold)| {
+            let font = if *bold { &app_font } else { &title_font };
+            let m = res.text_metrics(font, text);
+            MeasuredTitle {
+                key: m.key,
+                width: to_u32(m.typographic_width as f64 + 0.5) as f32 + gap,
+                height: m.ascent + m.descent + 2.0 * APP_MENU_PAD,
+                descent: m.descent,
+            }
+        })
+        .collect();
+    item.app_menu.measured = TitleMeasure {
+        entries,
+        fonts: Some((title_font, app_font)),
+        spacing,
+        cells,
+    };
+}
+
+/// Sizes the `app_menu` title cells for this pass (positions are set by
+/// [`item_calculate_bounds`]). Cells whose size did not change keep their position, so an
+/// item laid out on one bar keeps its cells when another bar is laid out (L2).
+fn prepare_app_menu(item: &mut BarItem, res: &mut dyn Resources) {
+    if item.item_type != ItemType::AppMenu {
+        return;
+    }
+    measure_app_menu(item, res);
+    let am = &mut item.app_menu;
+    let cells = &am.measured.cells;
+    let same = am.title_bounds.len() == cells.len()
+        && am
+            .title_bounds
+            .iter()
+            .zip(cells)
+            .all(|(r, c)| r.width == c.width && r.height == c.height);
+    if !same {
+        am.title_bounds = cells
+            .iter()
+            .map(|c| Rect::new(0.0, 0.0, c.width, c.height))
+            .collect();
+    }
+}
+
+/// The measured title lines of an `app_menu` item (measured only when the cache is stale),
+/// without touching the laid-out title cells.
+fn app_menu_lines(item: &mut BarItem, res: &mut dyn Resources) -> Vec<MenuLine> {
+    measure_app_menu(item, res);
+    item.app_menu
+        .measured
+        .cells
+        .iter()
+        .map(|c| MenuLine {
+            key: c.key,
+            descent: c.descent,
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------------------
@@ -327,19 +514,58 @@ pub fn layout(model: &mut Model, res: &mut dyn Resources) -> Layout {
     prepare(model, res);
     let vertical = model.bar.is_vertical();
     let mut out = Layout::default();
+    let laid = model
+        .bars
+        .iter()
+        .filter(|b| b.sid >= 1 && b.adid >= 1)
+        .count();
+    // Bounds of each bar's items right after that bar's pass (only needed with > 1 bar).
+    let mut snapshots: Vec<Vec<(usize, ItemGeometry)>> = Vec::new();
     for i in 0..model.bars.len() {
         let b = &model.bars[i];
         if b.sid < 1 || b.adid < 1 {
             continue;
         }
         let bl = if vertical {
-            layout_bar_vertical(model, i, res)
+            vertical_pass(model, i, res)
         } else {
-            layout_bar_horizontal(model, i, res)
+            horizontal_pass(model, i, res)
         };
+        if laid > 1 {
+            snapshots.push(snapshot_geometry(model, &bl));
+        }
         out.bars.push(bl);
     }
+    // A later bar may have overwritten the bounds; keep the differing ones per bar (L1).
+    for (bl, snap) in out.bars.iter_mut().zip(snapshots) {
+        for (idx, g) in snap {
+            let item = &model.items[idx];
+            if ItemGeometry::of(item) != g {
+                bl.geometry.push((item.id, g));
+            }
+        }
+    }
     out.popups = collect_popups(model, res);
+    out
+}
+
+/// The bounds of the items painted by [`bar_scene`] for `bl` (popup members are painted by
+/// their popup and laid out once, on the active bar), with their model index.
+fn snapshot_geometry(model: &Model, bl: &BarLayout) -> Vec<(usize, ItemGeometry)> {
+    let mut out = Vec::new();
+    let mut cur = 0;
+    for p in &bl.items {
+        // `items` is in global order.
+        let Some(off) = model.items[cur..].iter().position(|i| i.id == p.id) else {
+            break;
+        };
+        cur += off;
+        let item = &model.items[cur];
+        if item.position != Position::Popup {
+            out.push((cur, ItemGeometry::of(item)));
+        }
+        cur += 1;
+    }
     out
 }
 
@@ -414,6 +640,11 @@ pub fn layout_bar_horizontal(
     res: &mut dyn Resources,
 ) -> BarLayout {
     prepare(model, res);
+    horizontal_pass(model, bar_index, res)
+}
+
+/// [`layout_bar_horizontal`] without the preparation (done once per [`layout`] pass).
+fn horizontal_pass(model: &mut Model, bar_index: usize, res: &mut dyn Resources) -> BarLayout {
     let bar = model.bars[bar_index].clone();
     if bar.sid < 1 || bar.adid < 1 {
         return empty_bar_layout(&bar);
@@ -505,6 +736,11 @@ pub fn layout_bar_vertical(
     res: &mut dyn Resources,
 ) -> BarLayout {
     prepare(model, res);
+    vertical_pass(model, bar_index, res)
+}
+
+/// [`layout_bar_vertical`] without the preparation (done once per [`layout`] pass).
+fn vertical_pass(model: &mut Model, bar_index: usize, res: &mut dyn Resources) -> BarLayout {
     let bar = model.bars[bar_index].clone();
     if bar.sid < 1 || bar.adid < 1 {
         return empty_bar_layout(&bar);
@@ -554,7 +790,8 @@ pub fn layout_bar_vertical(
         calc_bounds(item, ih, x, yy, bbw, art);
         let frame = Rect::new(
             (bar.frame.x as f64 - l as f64) as f32,
-            (bar.frame.y as f64 + *cur as f64 - (-item.y_offset).max(0) as f64) as f32,
+            // In f64: `-y_offset` overflows i32 for `y_offset=-2147483648`.
+            (bar.frame.y as f64 + *cur as f64 - (-(item.y_offset as f64)).max(0.0)) as f32,
             t as f32,
             (ih as f64 + (item.y_offset as f64).abs()) as f32,
         );
@@ -576,6 +813,7 @@ fn empty_bar_layout(bar: &BarState) -> BarLayout {
         frame: bar_window_frame(bar),
         items: Vec::new(),
         menu_lines: Vec::new(),
+        geometry: Vec::new(),
     }
 }
 
@@ -597,7 +835,7 @@ fn finish_bar(model: &mut Model, bar: &BarState, res: &mut dyn Resources) -> Bar
             item.set_frame(adid, frame);
             out.items.push(PlacedItem { id: item.id, frame });
             if item.item_type == ItemType::AppMenu {
-                let lines = prepare_app_menu_lines(item, res);
+                let lines = app_menu_lines(item, res);
                 out.menu_lines.push((item.id, lines));
             }
         } else {
@@ -606,16 +844,6 @@ fn finish_bar(model: &mut Model, bar: &BarState, res: &mut dyn Resources) -> Bar
         }
     }
     out
-}
-
-/// Measures the app_menu lines without disturbing the laid-out title cells.
-fn prepare_app_menu_lines(item: &mut BarItem, res: &mut dyn Resources) -> Vec<MenuLine> {
-    let cells = item.app_menu.title_bounds.clone();
-    let lines = prepare_app_menu(item, res);
-    if cells.len() == item.app_menu.title_bounds.len() {
-        item.app_menu.title_bounds = cells;
-    }
-    lines
 }
 
 /// `bar_manager_length_for_bar_side` (`bar.md` §4.3): sum over items with the given
@@ -821,7 +1049,10 @@ fn slider_bounds(s: &mut Slider, x: u32, y: u32, art: Option<Size>) {
     let fw = to_u32(w as f64 * s.percentage as f64 / 100.0);
     bg_bounds(&mut s.fill, x, y, fw, h, art);
     let kw = s.knob.bounds.width as f64;
-    let raw = (s.percentage as f64 / 100.0 * w as f64 - kw / 2.0) as i32;
+    // `((float)pct)/100.f * W - knob.w/2.`: the quotient is single precision (e.g. 0.11f·100
+    // = 10.9999997 truncates one lower than the double 11.000000000000002).
+    let q = (s.percentage as f32 / 100.0f32) as f64;
+    let raw = (q * w as f64 - kw / 2.0) as i32;
     let off = (raw as f64).min(w as f64 - (kw + 1.0)).max(0.0);
     text_bounds(&mut s.knob, x.wrapping_add(to_u32(off)), y, art);
 }
@@ -850,8 +1081,13 @@ fn bracket_bounds_impl(
         return nirvana_rect(Size::default());
     };
     let adid = bar.adid;
+    // `group_get_first/last_member`: `int min = INT32_MAX` / `int max = INT32_MIN`, compared
+    // as doubles with strict `<` / `>` but stored truncated to `int`, so a member sharing a
+    // fractional edge with the previous winner replaces it.
     let mut first: Option<(Rect, i32)> = None;
     let mut last: Option<(Rect, i32)> = None;
+    let mut min = i32::MAX as f64;
+    let mut max = i32::MIN as f64;
     for m in &model.items[bi].bracket_members {
         let Some(mi) = model.item(*m) else { continue };
         if !model.draws_item(bar, mi) {
@@ -861,10 +1097,13 @@ fn bracket_bounds_impl(
         let f = mi
             .frame(adid)
             .unwrap_or_else(|| nirvana_rect(Size::new(1.0, 1.0)));
-        if first.map_or(true, |(r, _)| f.x < r.x) {
+        let (lo, hi) = (f.x as f64, f.x as f64 + f.width as f64);
+        if lo < min {
+            min = (lo as i32) as f64;
             first = Some((f, mi.background.padding_left));
         }
-        if last.map_or(true, |(r, _)| f.x + f.width > r.x + r.width) {
+        if hi > max {
+            max = (hi as i32) as f64;
             last = Some((f, mi.background.padding_right));
         }
     }
@@ -1161,11 +1400,13 @@ fn popup_bounds_impl(
         let p = &mut model.items[hi].popup;
         p.background.bounds = Rect::new(0.0, 0.0, width as f32, y as f32);
         p.background.height = y;
-        let ih = p.background.image.bounds.height;
+        // `image_calculate_bounds(image, uint32_t x, uint32_t y)`: `bw + h/2` is truncated
+        // by the parameter type before `y - h/2` (an odd image height lands 0.5 pt lower).
+        let ih = p.background.image.bounds.height as f64;
         image_bounds(
             &mut p.background.image,
             bw as f32,
-            bw as f32 + ih / 2.0,
+            to_u32(bw as f64 + ih / 2.0) as f32,
             art,
         );
         if adid > 0 {
@@ -1229,7 +1470,7 @@ fn popup_snapshot(model: &mut Model, host: ItemId, res: &mut dyn Resources) -> P
         let Some(f) = it.frame(adid) else { continue };
         out.items.push(PlacedItem { id: m, frame: f });
         if it.item_type == ItemType::AppMenu {
-            let lines = prepare_app_menu_lines(&mut model.items[mi], res);
+            let lines = app_menu_lines(&mut model.items[mi], res);
             out.menu_lines.push((m, lines));
         }
     }
@@ -1517,15 +1758,34 @@ pub fn bar_scene(model: &Model, layout: &BarLayout) -> Scene {
     bg.enabled = true;
     draw_background(&bg, &cv, art, &mut scene);
 
+    let resolved = resolve_placed(model, &layout.items);
+    // Items whose bounds on this bar differ from the model's (L1): painted from a copy
+    // carrying this bar's bounds. `geometry` is a subsequence of `items`.
+    let mut copies: Vec<(usize, BarItem)> = Vec::new();
+    if !layout.geometry.is_empty() {
+        let mut gi = 0;
+        for (k, (p, item)) in resolved.iter().enumerate() {
+            if let Some((id, g)) = layout.geometry.get(gi) {
+                if *id == p.id {
+                    let mut c = (*item).clone();
+                    g.apply(&mut c);
+                    copies.push((k, c));
+                    gi += 1;
+                }
+            }
+        }
+    }
+    let mut resolved = resolved;
+    for (k, c) in &copies {
+        resolved[*k].1 = c;
+    }
+
     // Clip holes (`bar_item_clip_bar`) for every item drawn on this bar, popup members
     // included (C does the same, with their x relative to the bar window). Q11: the hole
     // outline is stroked with the bar's border width / border alpha.
     let stroke_width = model.bar.background.border_width as f32;
     let stroke_alpha = model.bar.background.border_color.a;
-    for p in &layout.items {
-        let Some(item) = model.item(p.id) else {
-            continue;
-        };
+    for (p, item) in &resolved {
         let dx = p.frame.x - layout.frame.x;
         for b in [
             &item.background,
@@ -1546,10 +1806,8 @@ pub fn bar_scene(model: &Model, layout: &BarLayout) -> Scene {
         }
     }
 
-    let placed: Vec<(&PlacedItem, &BarItem)> = layout
-        .items
-        .iter()
-        .filter_map(|p| model.item(p.id).map(|i| (p, i)))
+    let placed: Vec<(&PlacedItem, &BarItem)> = resolved
+        .into_iter()
         .filter(|(_, i)| i.position != Position::Popup)
         .collect();
     paint_windows(
@@ -1560,6 +1818,41 @@ pub fn bar_scene(model: &Model, layout: &BarLayout) -> Scene {
         &mut scene,
     );
     scene
+}
+
+/// Resolves placed items to their model items in `O(items + placed)` (PERF-1): a forward
+/// walk while `placed` follows the global order (bars), an id map from the first item out of
+/// order on (popup order). Unknown ids are skipped.
+fn resolve_placed<'a>(
+    model: &'a Model,
+    placed: &'a [PlacedItem],
+) -> Vec<(&'a PlacedItem, &'a BarItem)> {
+    let items = &model.items;
+    let mut out = Vec::with_capacity(placed.len());
+    let mut cur = 0;
+    let mut map: Option<HashMap<ItemId, usize>> = None;
+    for p in placed {
+        let idx = match &map {
+            Some(m) => m.get(&p.id).copied(),
+            None => match items[cur..].iter().position(|i| i.id == p.id) {
+                Some(off) => {
+                    cur += off + 1;
+                    Some(cur - 1)
+                }
+                None => {
+                    let m: HashMap<ItemId, usize> =
+                        items.iter().enumerate().map(|(k, i)| (i.id, k)).collect();
+                    let idx = m.get(&p.id).copied();
+                    map = Some(m);
+                    idx
+                }
+            },
+        };
+        if let Some(k) = idx {
+            out.push((p, &items[k]));
+        }
+    }
+    out
 }
 
 /// Paints item windows in window z-order: brackets (below the first item window) in
@@ -1609,11 +1902,7 @@ pub fn popup_scene(model: &Model, layout: &PopupLayout) -> Scene {
         bg.shadow.enabled = false;
         draw_background(&bg, &cv, art, &mut scene);
     }
-    let placed: Vec<(&PlacedItem, &BarItem)> = layout
-        .items
-        .iter()
-        .filter_map(|p| model.item(p.id).map(|i| (p, i)))
-        .collect();
+    let placed = resolve_placed(model, &layout.items);
     paint_windows(
         &placed,
         layout.frame.origin(),
@@ -1722,9 +2011,8 @@ pub fn window_at(model: &Model, layout: &Layout, p: Point) -> WindowHit {
         popup: bool,
         ws: &mut Vec<(Rect, WindowHit)>,
     ) {
-        let resolved: Vec<(&PlacedItem, &BarItem)> = items
-            .iter()
-            .filter_map(|pi| model.item(pi.id).map(|i| (pi, i)))
+        let resolved: Vec<(&PlacedItem, &BarItem)> = resolve_placed(model, items)
+            .into_iter()
             .filter(|(_, i)| i.drawing && (popup || i.position != Position::Popup))
             .collect();
         for brackets in [true, false] {

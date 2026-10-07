@@ -35,7 +35,8 @@ use crate::layout::{self, BarLayout, Layout, PopupLayout, WindowHit};
 use crate::model::Model;
 use crate::platform::{
     Effect, FrameOutput, ImageInfo, Input, LuaRequest, MouseInput, MouseKind, OsEvent,
-    PlatformRequest, ReplyToken, Resources, SystemQuery, SystemValue, WindowKey, WindowUpdate,
+    PlatformRequest, ReplyToken, Resources, SpaceMove, SystemQuery, SystemValue, WindowKey,
+    WindowUpdate,
 };
 use crate::props::{
     AnimSpec, AnimTarget, HiddenRequest, PropCx, PropEffects, PropRequest, PropResult,
@@ -51,7 +52,8 @@ use std::time::{Duration, Instant};
 /// Static configuration of a daemon instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfig {
-    /// `BAR_NAME` (basename of argv[0]; `sketchybar` maps to `mbar`).
+    /// Bar name / IPC identity (basename of argv[0]; `sketchybar` maps to `mbar`). The
+    /// `BAR_NAME` env var keeps the unmapped basename.
     pub bar_name: String,
     /// `$HOME` for `~` expansion.
     pub home: String,
@@ -77,6 +79,8 @@ pub const WAKE_REPOST_DELAY: Duration = Duration::from_millis(500);
 const SAMPLE_CAP: usize = 512;
 /// Pending script start times kept per item (for durations from `ScriptFinished`).
 const PENDING_SCRIPTS_CAP: usize = 64;
+/// Compiled regex selectors kept by [`Runtime::regex_select`] (cleared when full).
+const REGEX_CACHE_SIZE: usize = 64;
 
 /// Window properties of a bar window (part of every `WindowUpdate`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,11 +92,24 @@ struct WinProps {
     font_smoothing: bool,
 }
 
+/// Outcome of [`Runtime::bar_needs_redraw`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Redraw {
+    No,
+    /// Only popup members changed: update the association bits, re-render the bar window
+    /// only if a popup member clips it.
+    PopupMembers,
+    Bar,
+}
+
 /// What was last sent to the platform for a bar window.
 #[derive(Debug, Clone)]
 struct EmittedBar {
+    /// The layout as far as [`layout::bar_scene`] paints it ([`bar_scene_layout`]).
     layout: BarLayout,
     props: WinProps,
+    /// The emitted scene contains clip holes of popup members.
+    popup_clips: bool,
 }
 
 /// What was last sent to the platform for a popup window.
@@ -186,6 +203,13 @@ pub struct Runtime {
     force_refresh: bool,
     /// Windows that must be re-rendered by the next `frame`.
     dirty: BTreeSet<WindowKey>,
+    /// Bars (adid) redrawn by `refresh` only because of popup members: their windows are
+    /// re-rendered only if a popup member punches a clip hole into the bar.
+    popup_member_bars: BTreeSet<u32>,
+    /// `bar_change_space` requests (adid → dsid) for the next `frame` (`bar.md` §6.4).
+    space_moves: Vec<(u32, u64)>,
+    /// Compiled `--set /regex/` selectors by pattern.
+    regex_cache: HashMap<String, command::BreRegex>,
     /// Bar windows currently open on the platform (by adid) and what they show.
     emitted_bars: HashMap<u32, EmittedBar>,
     /// Popup windows currently open on the platform (by host).
@@ -207,8 +231,12 @@ pub struct Runtime {
     /// Front app menus (app_menu extension).
     menu_app: String,
     menu_titles: Vec<String>,
-    /// The current message sends no reply (`--exit`, `--monitor`).
+    /// The current message sends no reply (`--exit`).
     no_reply: bool,
+    /// `--monitor` executed by the current message (merged mode; extension).
+    monitor_req: Option<MonitorMode>,
+    /// Time spent in executed Lua callbacks (µs), for `lua.avg_us`.
+    lua_total_us: u64,
     /// `--exit` was executed: ignore the rest of the message.
     exiting: bool,
 }
@@ -229,6 +257,48 @@ fn bit32(n: u32) -> u32 {
 
 fn name_or_null(n: Option<&str>) -> &str {
     n.unwrap_or("(null)")
+}
+
+/// The item punches a clip hole into the bar it is drawn on (`bar_item_clip_bar`).
+fn item_clips_bar(item: &BarItem) -> bool {
+    item.background.clips_bar()
+        || item.icon.background.clips_bar()
+        || item.label.background.clips_bar()
+}
+
+/// The part of a bar layout that [`layout::bar_scene`] paints: popup members (ids in
+/// `popup_members`, value = clips the bar) are dropped unless they punch a clip hole.
+/// Returns the filtered layout and whether any popup member clips the bar.
+fn bar_scene_layout(bl: &BarLayout, popup_members: &HashMap<ItemId, bool>) -> (BarLayout, bool) {
+    let mut clips = false;
+    let mut keep = |id: &ItemId| match popup_members.get(id) {
+        Some(c) => {
+            clips |= *c;
+            *c
+        }
+        None => true,
+    };
+    let items = if popup_members.is_empty() {
+        bl.items.clone()
+    } else {
+        bl.items.iter().filter(|p| keep(&p.id)).copied().collect()
+    };
+    let menu_lines = bl
+        .menu_lines
+        .iter()
+        .filter(|(id, _)| !popup_members.contains_key(id))
+        .cloned()
+        .collect();
+    (
+        BarLayout {
+            adid: bl.adid,
+            frame: bl.frame,
+            items,
+            menu_lines,
+            geometry: bl.geometry.clone(),
+        },
+        clips,
+    )
 }
 
 impl Runtime {
@@ -252,6 +322,9 @@ impl Runtime {
             needs_render: false,
             force_refresh: false,
             dirty: BTreeSet::new(),
+            popup_member_bars: BTreeSet::new(),
+            space_moves: Vec::new(),
+            regex_cache: HashMap::new(),
             emitted_bars: HashMap::new(),
             emitted_popups: HashMap::new(),
             stats: Stats::default(),
@@ -269,6 +342,8 @@ impl Runtime {
             menu_app: String::new(),
             menu_titles: Vec::new(),
             no_reply: false,
+            monitor_req: None,
+            lua_total_us: 0,
             exiting: false,
         }
     }
@@ -360,24 +435,39 @@ impl Runtime {
         self.needs_render = false;
         let Some(layout) = self.layout.take() else {
             self.dirty.clear();
+            self.popup_member_bars.clear();
+            self.space_moves.clear();
             return FrameOutput::default();
         };
         let mut out = FrameOutput::default();
         let props = self.bar_props();
 
-        // Bars.
-        let mut redrawn_bars: Vec<u32> = Vec::new();
+        // Bars. Popup members are listed in a bar's layout (association bits) but painted
+        // by the popup window; only their clip holes reach the bar scene, so the comparison
+        // ignores the members that punch none (PERF-4).
+        let popup_members: HashMap<ItemId, bool> = self
+            .model
+            .items
+            .iter()
+            .filter(|i| i.position == Position::Popup)
+            .map(|i| (i.id, item_clips_bar(i)))
+            .collect();
         for bl in &layout.bars {
             let key = WindowKey::Bar(bl.adid);
+            let (painted, popup_clips) = bar_scene_layout(bl, &popup_members);
             let changed = self.dirty.contains(&key)
                 || match self.emitted_bars.get(&bl.adid) {
-                    Some(e) => e.props != props || e.layout != *bl,
+                    Some(e) => {
+                        e.props != props
+                            || e.layout != painted
+                            || (self.popup_member_bars.contains(&bl.adid)
+                                && (popup_clips || e.popup_clips))
+                    }
                     None => true,
                 };
             if !changed {
                 continue;
             }
-            redrawn_bars.push(bl.adid);
             let scene = layout::bar_scene(&self.model, bl);
             out.windows.push(WindowUpdate {
                 key,
@@ -394,8 +484,9 @@ impl Runtime {
             self.emitted_bars.insert(
                 bl.adid,
                 EmittedBar {
-                    layout: bl.clone(),
+                    layout: painted,
                     props,
+                    popup_clips,
                 },
             );
         }
@@ -426,7 +517,6 @@ impl Runtime {
                 .map(|h| h.popup.blur_radius)
                 .unwrap_or(0);
             let changed = self.dirty.contains(&key)
-                || redrawn_bars.contains(&pl.adid)
                 || match self.emitted_popups.get(&pl.host) {
                     Some(e) => e.blur != blur || e.props != props || e.layout != *pl,
                     None => true,
@@ -474,8 +564,27 @@ impl Runtime {
             }
         }
 
+        // `bar_change_space`: the bar window and the popups open on that bar.
+        for (adid, dsid) in std::mem::take(&mut self.space_moves) {
+            if self.emitted_bars.contains_key(&adid) {
+                out.space_moves.push(SpaceMove {
+                    key: WindowKey::Bar(adid),
+                    dsid,
+                });
+            }
+            for (host, e) in &self.emitted_popups {
+                if e.layout.adid == adid {
+                    out.space_moves.push(SpaceMove {
+                        key: WindowKey::Popup(*host),
+                        dsid,
+                    });
+                }
+            }
+        }
+
         self.layout = Some(layout);
         self.dirty.clear();
+        self.popup_member_bars.clear();
         self.stats.frames += 1;
         self.frame_times.push(t0.elapsed().as_micros() as u64);
         out
@@ -485,6 +594,18 @@ impl Runtime {
     /// (Providers are sampled by the platform at their own `freq`; aliases are recaptured on
     /// the routine tick.)
     pub fn next_deadline(&self) -> Option<Instant> {
+        self.deadline(None)
+    }
+
+    /// [`Runtime::next_deadline`] for a platform without a display link: the animation
+    /// deadline is paced to one `frame_interval` after the last animation frame
+    /// ([`crate::animation::Animator::next_deadline_paced`]) instead of "now", so a loop
+    /// that sleeps until the deadline does not busy-spin while animations run.
+    pub fn next_deadline_paced(&self, frame_interval: Duration) -> Option<Instant> {
+        self.deadline(Some(frame_interval))
+    }
+
+    fn deadline(&self, frame_interval: Option<Duration>) -> Option<Instant> {
         let mut d = self.next_tick;
         let mut min = |x: Option<Instant>| {
             if let Some(x) = x {
@@ -494,13 +615,48 @@ impl Runtime {
         min(self.wake_repost);
         if let Some(now) = self.last_now {
             if !self.sleeps {
-                min(self.animator.next_deadline(now));
+                min(match frame_interval {
+                    Some(i) => self.animator.next_deadline_paced(now, i),
+                    None => self.animator.next_deadline(now),
+                });
             }
             if self.needs_render || self.needs_layout {
                 min(Some(now));
             }
         }
         d
+    }
+
+    /// True if [`Input::Timer`] has work to do at `now` (routine tick or delayed wake
+    /// re-post). Unlike [`Runtime::next_deadline`] this ignores render and animation
+    /// deadlines, which [`Runtime::frame`] serves.
+    pub fn timer_due(&self, now: Instant) -> bool {
+        [self.next_tick, self.wake_repost]
+            .into_iter()
+            .flatten()
+            .any(|t| t <= now)
+    }
+
+    /// True while animations run (each frame is an event in SketchyBar, `events.md` Q5).
+    pub fn animating(&self) -> bool {
+        !self.sleeps && !self.animator.is_empty()
+    }
+
+    /// `bar_manager_poll_active_display` on its own, for platform-driven events that do not
+    /// go through [`Runtime::handle`] (animation frames).
+    pub fn poll_display(&mut self, res: &mut dyn Resources) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        self.poll_active_display(&mut effects, res);
+        effects
+    }
+
+    /// Records `count` executed Lua callbacks (handlers, `mbar.exec` and `mbar.delay`
+    /// callbacks) that took `total_us` together, the slowest `max_us` (`lua` in
+    /// `--query stats`).
+    pub fn record_lua_callbacks(&mut self, count: u64, total_us: u64, max_us: u64) {
+        self.stats.lua_callbacks = self.stats.lua_callbacks.saturating_add(count);
+        self.lua_total_us = self.lua_total_us.saturating_add(total_us);
+        self.stats.lua_max_us = self.stats.lua_max_us.max(max_us);
     }
 
     /// Tells the runtime which `--monitor` streams still have subscribers, so it stops
@@ -534,13 +690,18 @@ impl Runtime {
         res: &mut dyn Resources,
     ) -> Vec<Effect> {
         let mut effects = Vec::new();
-        if let Some(text) = self.run_message(args, &mut effects, res) {
-            effects.push(Effect::Reply { reply, text });
+        let text = self.run_message(args, &mut effects, res);
+        let monitor = self.monitor_req.take();
+        match (text, monitor) {
+            (Some(text), Some(mode)) => effects.push(Effect::MonitorStart { reply, mode, text }),
+            (Some(text), None) => effects.push(Effect::Reply { reply, text }),
+            (None, _) => {}
         }
         effects
     }
 
-    /// Executes a message; `None` = no reply (`--exit`, `--monitor`).
+    /// Executes a message; `None` = no reply (`--exit`). A `--monitor` in the message is
+    /// left in `monitor_req` for [`Runtime::handle_message`].
     fn run_message(
         &mut self,
         args: &[String],
@@ -550,6 +711,7 @@ impl Runtime {
         self.stats.ipc_messages += 1;
         self.anim = None;
         self.no_reply = false;
+        self.monitor_req = None;
         let cmds = command::parse(args);
         // Queries see the state as of the last refresh (frames/bounding rects included).
         if self.needs_layout && cmds.iter().any(|c| matches!(c, Command::Query(_))) {
@@ -725,8 +887,12 @@ impl Runtime {
                         self.monitor_stats = true;
                     }
                 }
-                // The connection stays open for the stream: no reply.
-                self.no_reply = true;
+                // The connection stays open for the stream: the reply becomes its first
+                // frame (`Effect::MonitorStart`).
+                self.monitor_req = Some(match self.monitor_req {
+                    Some(prev) if prev != mode => MonitorMode::All,
+                    _ => mode,
+                });
                 false
             }
             Command::Menu(which) => {
@@ -767,7 +933,7 @@ impl Runtime {
     /// Resolves a selector (`cli.md` §3.5): exact name or BRE over all names in global order;
     /// appends `[!] Set: Item not found '<name>'\n` / regex messages as appropriate (the
     /// caller decides the error prefix for `--remove`).
-    fn select(&self, sel: &Selector, rsp: &mut String) -> Vec<ItemId> {
+    fn select(&mut self, sel: &Selector, rsp: &mut String) -> Vec<ItemId> {
         match sel {
             Selector::Name(n) => match self.model.find(n) {
                 Some(id) => vec![id],
@@ -781,21 +947,33 @@ impl Runtime {
     }
 
     /// Regex selection (`regcomp` BRE, unanchored `regexec` over all names in order).
-    fn regex_select(&self, token: &str, pattern: &str, rsp: &mut String) -> Vec<ItemId> {
-        let re = command::bre_to_regex(pattern)
-            .ok()
-            .and_then(|p| regex::Regex::new(&p).ok());
-        let Some(re) = re else {
-            let _ = write!(rsp, "[!] Regex: Could not compile regex '{token}'\n");
-            return Vec::new();
-        };
-        let ids: Vec<ItemId> = self
-            .model
-            .items
-            .iter()
-            .filter(|i| i.name.as_deref().is_some_and(|n| re.is_match(n)))
-            .map(|i| i.id)
-            .collect();
+    /// Compiled patterns are cached (configs re-run the same selectors on every event).
+    fn regex_select(&mut self, token: &str, pattern: &str, rsp: &mut String) -> Vec<ItemId> {
+        if !self.regex_cache.contains_key(pattern) {
+            let Ok(re) = command::compile_bre(pattern) else {
+                let _ = write!(rsp, "[!] Regex: Could not compile regex '{token}'\n");
+                return Vec::new();
+            };
+            if self.regex_cache.len() >= REGEX_CACHE_SIZE {
+                self.regex_cache.clear();
+            }
+            self.regex_cache.insert(pattern.to_string(), re);
+        }
+        let re = &self.regex_cache[pattern];
+        let mut ids = Vec::new();
+        for item in &self.model.items {
+            let Some(name) = item.name.as_deref() else {
+                continue;
+            };
+            match re.is_match(name) {
+                Ok(true) => ids.push(item.id),
+                Ok(false) => {}
+                Err(e) => {
+                    let _ = write!(rsp, "[!] Regex: Regex match failed '{e}'\n");
+                    return Vec::new();
+                }
+            }
+        }
         if ids.is_empty() {
             let _ = write!(rsp, "[?] Regex: No match found for regex '{token}'\n");
         }
@@ -808,6 +986,23 @@ impl Runtime {
     fn set_prop_on(
         &mut self,
         target: AnimTarget,
+        key: &str,
+        value: &str,
+        res: &mut dyn Resources,
+    ) -> (PropResult, String, PropEffects, Vec<PropRequest>) {
+        let idx = match target {
+            AnimTarget::Item(id) => self.model.index_of(id),
+            _ => None,
+        };
+        self.set_prop_at(target, idx, key, value, res)
+    }
+
+    /// [`Runtime::set_prop_on`] with the item's index already resolved (`idx` must hold
+    /// the item of an `AnimTarget::Item` target; `None` = item gone).
+    fn set_prop_at(
+        &mut self,
+        target: AnimTarget,
+        idx: Option<usize>,
         key: &str,
         value: &str,
         res: &mut dyn Resources,
@@ -825,9 +1020,9 @@ impl Runtime {
         let r = match target {
             AnimTarget::Bar => model.bar.set_prop(key, value, &mut cx),
             AnimTarget::Default => model.default_item.set_prop(key, value, &mut cx),
-            AnimTarget::Item(id) => match model.item_mut(id) {
-                Some(item) => item.set_prop(key, value, &mut cx),
-                None => Ok(false),
+            AnimTarget::Item(id) => match idx.and_then(|i| model.items.get_mut(i)) {
+                Some(item) if item.id == id => item.set_prop(key, value, &mut cx),
+                _ => Ok(false),
             },
         };
         let response = std::mem::take(&mut cx.response);
@@ -847,6 +1042,20 @@ impl Runtime {
         effects: &mut Vec<Effect>,
         res: &mut dyn Resources,
     ) {
+        // Index of each selected item: regex selections are in global order, so one pass.
+        let mut hints: Vec<Option<usize>> = Vec::with_capacity(ids.len());
+        let mut from = 0;
+        for &id in ids {
+            let found = self.model.items[from.min(self.model.items.len())..]
+                .iter()
+                .position(|it| it.id == id)
+                .map(|p| p + from)
+                .or_else(|| self.model.index_of(id));
+            if let Some(i) = found {
+                from = i + 1;
+            }
+            hints.push(found);
+        }
         for tok in tokens {
             match tok {
                 SetToken::Malformed(t) => {
@@ -858,12 +1067,19 @@ impl Runtime {
                     );
                 }
                 SetToken::Pair { key, value } => {
-                    for &id in ids {
-                        if self.model.item(id).is_none() {
-                            continue;
-                        }
+                    for (n, &id) in ids.iter().enumerate() {
+                        // Index lookups are O(1) while the items keep their places (setters
+                        // that move items, e.g. `position=popup.x`, fall back to a scan).
+                        let idx = match hints[n] {
+                            Some(i) if self.model.items.get(i).is_some_and(|it| it.id == id) => i,
+                            _ => match self.model.index_of(id) {
+                                Some(i) => i,
+                                None => continue,
+                            },
+                        };
+                        hints[n] = Some(idx);
                         let (r, response, fx, reqs) =
-                            self.set_prop_on(AnimTarget::Item(id), key, value, res);
+                            self.set_prop_at(AnimTarget::Item(id), Some(idx), key, value, res);
                         rsp.push_str(&response);
                         let changed = match r {
                             Ok(c) => c,
@@ -872,9 +1088,15 @@ impl Runtime {
                                 false
                             }
                         };
+                        let unmoved = reqs.is_empty();
                         let out = self.apply_requests(Some(id), reqs, fx, rsp, effects, res);
                         if changed && !out.suppress_update {
-                            if let Some(item) = self.model.item_mut(id) {
+                            let item = if unmoved {
+                                self.model.items.get_mut(idx)
+                            } else {
+                                self.model.item_mut(id)
+                            };
+                            if let Some(item) = item {
                                 item.needs_update = true;
                             }
                         }
@@ -1590,7 +1812,6 @@ impl Runtime {
         let env = script::build_update_env(&mut item.env, env, name.as_deref(), &sender);
         let mach_payload = mach.map(|service| (service, script::serialize_for_mach(&env)));
         if let Some(h) = lua {
-            self.stats.lua_callbacks += 1;
             effects.push(Effect::LuaCallback {
                 handler: h,
                 env: env.into_vec(),
@@ -1622,7 +1843,6 @@ impl Runtime {
         };
         let name = item.name.clone();
         if let Some(h) = lua_id(&cs) {
-            self.stats.lua_callbacks += 1;
             effects.push(Effect::LuaCallback {
                 handler: h,
                 env: env.into_vec(),
@@ -2089,7 +2309,8 @@ impl Runtime {
     }
 
     /// `bar_manager_handle_space_change(forced)` (`events.md` §5.2, `bar.md` §6.4–6.5):
-    /// sids, `shown`, space-item selection, `space_change` with INFO.
+    /// sids, `shown`, `bar_change_space` of non-sticky bars, space-item selection,
+    /// `space_change` with INFO, then `unfreeze(); bar_manager_refresh(force_refresh)`.
     fn handle_space_change(
         &mut self,
         forced: bool,
@@ -2097,6 +2318,7 @@ impl Runtime {
         res: &mut dyn Resources,
     ) {
         let show_fs = self.model.bar.show_in_fullscreen;
+        let sticky = self.model.bar.sticky;
         let mut force = false;
         let mut infos = Vec::with_capacity(self.model.bars.len());
         for i in 0..self.model.bars.len() {
@@ -2109,7 +2331,15 @@ impl Runtime {
                 self.model.needs_ordering = true;
             }
             force |= was_shown != bar.shown;
-            bar.dsid = dsid;
+            if bar.dsid != dsid {
+                bar.dsid = dsid;
+                if !sticky && bar.shown && bar.adid >= 1 {
+                    let adid = bar.adid;
+                    self.space_moves.retain(|(a, _)| *a != adid);
+                    self.space_moves.push((adid, dsid));
+                    self.needs_render = true;
+                }
+            }
             infos.push(BarSpace {
                 adid: bar.adid,
                 sid: bar.sid,
@@ -2118,9 +2348,12 @@ impl Runtime {
         let info = event::space_change_info(&infos);
         self.update_space_components(forced, res);
         self.trigger_info("space_change", info, effects);
-        if force {
-            self.force_refresh = true;
-        }
+        // `unfreeze(); bar_manager_refresh(force_refresh)`. Like SketchyBar this also ends
+        // the freeze of a message batch (`--update`, `--trigger space_change`; Q7, D14), so
+        // items added earlier in the batch are associated with their bars before the
+        // forced events that follow are dispatched (`updates=when_shown`).
+        self.frozen = false;
+        self.refresh(force, res);
     }
 
     /// `bar_manager_update_space_components(forced)` (`events.md` §5.2.1).
@@ -2183,11 +2416,14 @@ impl Runtime {
     }
 
     /// `bar_manager_display_changed` (`events.md` §9.3): full reset of bars, forced refresh,
-    /// `display_change`, forced `space_change`.
+    /// `display_change`, forced `space_change`. The forced refresh runs before the events
+    /// so the `associated_bar` bits cleared by the reset are set again (`is_shown` for
+    /// `updates=when_shown` and marquee starts).
     fn displays_changed(&mut self, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
         self.model.active_adid = res.active_display();
         self.reset_bars(res);
-        self.force_refresh = true;
+        self.frozen = false;
+        self.refresh(true, res);
         self.handle_display_change(effects, res);
         self.handle_space_change(true, effects, res);
     }
@@ -2273,9 +2509,14 @@ impl Runtime {
         };
         let adid = Self::adid_of(it, m.point).unwrap_or(active);
         let local = layout::item_local_point(it, adid, m.point);
-        if it.has_slider() {
-            let inside = local.is_some_and(|l| layout::slider_track_contains(it, l));
-            if it.slider.is_dragged || inside {
+        // Hit tests against the bounds the item has on the clicked bar.
+        let geometry = self.layout.as_ref().and_then(|l| l.geometry_of(adid, id));
+        let (proceed, menu) = layout::with_geometry(it, geometry, |it| {
+            if it.has_slider() {
+                let inside = local.is_some_and(|l| layout::slider_track_contains(it, l));
+                if !(it.slider.is_dragged || inside) {
+                    return (false, None);
+                }
                 if let Some(l) = local {
                     if it.slider.handle_drag(l) {
                         it.needs_update = true;
@@ -2284,14 +2525,19 @@ impl Runtime {
                 it.slider.is_dragged = false;
                 let pct = it.slider.percentage.to_string();
                 it.env.set("PERCENTAGE", pct);
+            }
+            let menu = if it.item_type == ItemType::AppMenu {
+                local.and_then(|l| layout::app_menu_title_at(it, l))
             } else {
-                return;
-            }
+                None
+            };
+            (true, menu)
+        });
+        if !proceed {
+            return;
         }
-        if it.item_type == ItemType::AppMenu {
-            if let Some(index) = local.and_then(|l| layout::app_menu_title_at(it, l)) {
-                effects.push(Effect::Platform(PlatformRequest::OpenMenu { index }));
-            }
+        if let Some(index) = menu {
+            effects.push(Effect::Platform(PlatformRequest::OpenMenu { index }));
         }
         let subscribed = it.update_mask.has(EventKind::MouseClicked);
         let persistent = it.env.clone();
@@ -2533,7 +2779,8 @@ impl Runtime {
         }
         let adid = Self::adid_of(it, m.point).unwrap_or(active);
         if let Some(local) = layout::item_local_point(it, adid, m.point) {
-            if it.slider.handle_drag(local) {
+            let geometry = self.layout.as_ref().and_then(|l| l.geometry_of(adid, id));
+            if layout::with_geometry(it, geometry, |it| it.slider.handle_drag(local)) {
                 it.needs_update = true;
             }
         }
@@ -2625,65 +2872,80 @@ impl Runtime {
         self.model.bar_needs_update = true;
     }
 
-    /// `bar_manager_bar_needs_redraw` (`bar.md` §5.2) for one bar.
-    fn bar_needs_redraw(&self, adid: u32) -> bool {
+    /// `bar_manager_bar_needs_redraw` (`bar.md` §5.2) for one bar. `Redraw::PopupMembers`
+    /// when only popup members triggered it: SketchyBar still runs `bar_draw` (association
+    /// bits), but the bar window shows nothing of them except clip holes (PERF-4).
+    fn bar_needs_redraw(&self, adid: u32) -> Redraw {
         let m = &self.model;
         if m.bar_needs_update {
-            return true;
+            return Redraw::Bar;
         }
         let Some(bar) = m.bar(adid) else {
-            return false;
+            return Redraw::No;
         };
         let mask = bit32(adid) as u64;
         let sid_bit = bit32(bar.sid);
+        let mut popup_only = false;
         for item in &m.items {
-            let draws = m.draws_item(bar, item);
-            if item.needs_update && draws {
-                return true;
-            }
-            if !item.drawing && item.associated_bar != 0 {
-                return true;
-            }
-            if item.ignore_association {
-                continue;
-            }
-            let drawn_here = ((item.associated_bar as u64) << 1) & mask != 0;
-            let in_display = (item.associated_display as u64) & mask != 0;
-            if draws && in_display && !drawn_here {
-                return true;
-            }
-            if draws && item.associated_to_active_display && m.active_adid == adid && !drawn_here {
-                return true;
-            }
-            if !item.associated_to_active_display
-                && item.associated_display > 0
-                && !in_display
-                && drawn_here
-            {
-                return true;
-            }
-            if item.drawing
-                && item.associated_to_active_display
-                && drawn_here
-                && adid != m.active_adid
-            {
-                return true;
-            }
-            if item.item_type == ItemType::Space {
-                continue;
-            }
-            if item.associated_space > 0 && item.associated_space & sid_bit == 0 && drawn_here {
-                return true;
-            }
-            if draws
-                && item.associated_space > 0
-                && item.associated_space & sid_bit != 0
-                && !drawn_here
-            {
-                return true;
+            if Self::item_needs_redraw(m, bar, item, adid, mask, sid_bit) {
+                if item.position != Position::Popup {
+                    return Redraw::Bar;
+                }
+                popup_only = true;
             }
         }
-        false
+        if popup_only {
+            Redraw::PopupMembers
+        } else {
+            Redraw::No
+        }
+    }
+
+    /// The per-item conditions of `bar_manager_bar_needs_redraw`.
+    fn item_needs_redraw(
+        m: &Model,
+        bar: &BarState,
+        item: &BarItem,
+        adid: u32,
+        mask: u64,
+        sid_bit: u32,
+    ) -> bool {
+        let draws = m.draws_item(bar, item);
+        if item.needs_update && draws {
+            return true;
+        }
+        if !item.drawing && item.associated_bar != 0 {
+            return true;
+        }
+        if item.ignore_association {
+            return false;
+        }
+        let drawn_here = ((item.associated_bar as u64) << 1) & mask != 0;
+        let in_display = (item.associated_display as u64) & mask != 0;
+        if draws && in_display && !drawn_here {
+            return true;
+        }
+        if draws && item.associated_to_active_display && m.active_adid == adid && !drawn_here {
+            return true;
+        }
+        if !item.associated_to_active_display
+            && item.associated_display > 0
+            && !in_display
+            && drawn_here
+        {
+            return true;
+        }
+        if item.drawing && item.associated_to_active_display && drawn_here && adid != m.active_adid
+        {
+            return true;
+        }
+        if item.item_type == ItemType::Space {
+            return false;
+        }
+        if item.associated_space > 0 && item.associated_space & sid_bit == 0 && drawn_here {
+            return true;
+        }
+        draws && item.associated_space > 0 && item.associated_space & sid_bit != 0 && !drawn_here
     }
 
     /// Window properties of bar windows.
@@ -2719,13 +2981,19 @@ impl Runtime {
         let props_changed = self.emitted_bars.values().any(|e| e.props != props);
         for i in 0..self.model.bars.len() {
             let (adid, sid) = (self.model.bars[i].adid, self.model.bars[i].sid);
-            if !(forced || props_changed || self.bar_needs_redraw(adid)) {
+            let redraw = if forced || props_changed {
+                Redraw::Bar
+            } else {
+                self.bar_needs_redraw(adid)
+            };
+            if redraw == Redraw::No || sid < 1 || adid < 1 {
                 continue;
             }
-            if sid < 1 || adid < 1 {
-                continue;
+            if redraw == Redraw::Bar {
+                self.dirty.insert(WindowKey::Bar(adid));
+            } else {
+                self.popup_member_bars.insert(adid);
             }
-            self.dirty.insert(WindowKey::Bar(adid));
             let bit = bit32(adid - 1);
             for idx in 0..self.model.items.len() {
                 let draws = self
@@ -2760,7 +3028,7 @@ impl Runtime {
                 self.dirty.insert(WindowKey::Popup(host.id));
             }
         }
-        if !self.dirty.is_empty() {
+        if !self.dirty.is_empty() || !self.popup_member_bars.is_empty() {
             self.needs_layout = true;
             self.needs_render = true;
         }
@@ -2929,8 +3197,9 @@ impl Runtime {
         match req {
             LuaRequest::Command { args, callback } => {
                 let rsp = self.run_message(&args, effects, res).unwrap_or_default();
+                // In-process callers cannot stream.
+                self.monitor_req = None;
                 if let Some(handler) = callback {
-                    self.stats.lua_callbacks += 1;
                     effects.push(Effect::LuaCallback {
                         handler,
                         env: vec![("RESPONSE".to_string(), rsp)],
@@ -3011,6 +3280,10 @@ impl Runtime {
             0.0
         };
         self.stats.script_max_ms = self.scripts.values().map(|s| s.max_ms).fold(0.0, f64::max);
+        self.stats.lua_avg_us = self
+            .lua_total_us
+            .checked_div(self.stats.lua_callbacks)
+            .unwrap_or(0);
         self.stats.scripts_by_item = self
             .scripts
             .iter()
@@ -3023,5 +3296,44 @@ impl Runtime {
                 (k.clone(), (s.runs, avg, s.max_ms))
             })
             .collect();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::HeadlessResources;
+
+    #[test]
+    fn regex_selectors_are_compiled_once() {
+        let mut res = HeadlessResources::default();
+        let mut rt = Runtime::new(RuntimeConfig {
+            bar_name: "mbar".into(),
+            home: "/home/u".into(),
+            config_path: None,
+        });
+        rt.begin(&mut res);
+        let mut fx = Vec::new();
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        rt.run_message(&args(&["--add", "item", "a1", "left"]), &mut fx, &mut res);
+        for _ in 0..3 {
+            let rsp = rt.run_message(&args(&["--set", "/a.*/", "label=x"]), &mut fx, &mut res);
+            assert_eq!(rsp.as_deref(), Some(""));
+        }
+        assert_eq!(rt.regex_cache.len(), 1);
+        assert!(rt.regex_cache.contains_key("a.*"));
+        // Failed compiles are not cached.
+        let rsp = rt.run_message(&args(&["--set", "/a\\(/", "label=x"]), &mut fx, &mut res);
+        assert_eq!(
+            rsp.as_deref(),
+            Some("[!] Regex: Could not compile regex '/a\\(/'\n")
+        );
+        assert_eq!(rt.regex_cache.len(), 1);
+        // The cache is bounded.
+        for i in 0..(REGEX_CACHE_SIZE + 5) {
+            let sel = format!("/a{i}/");
+            rt.run_message(&args(&["--set", &sel, "label=x"]), &mut fx, &mut res);
+        }
+        assert!(rt.regex_cache.len() <= REGEX_CACHE_SIZE);
     }
 }

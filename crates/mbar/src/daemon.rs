@@ -29,8 +29,18 @@ pub fn run(bar_name: String, opts: DaemonOptions) -> ! {
         std::process::exit(1);
     }
 
-    let socket_path = mbar_ipc::socket_path(&bar_name);
-    let lock_path = lock_path(&socket_path, &user, &bar_name);
+    // `cli.md` §1.1: the lock file has a fixed per-user path that does not depend on
+    // `$TMPDIR` (a private `mbar-<uid>` directory inside `/tmp`, see
+    // `mbar_ipc::lock_dir`), so daemons started with different `$TMPDIR`s (service
+    // manager vs. shell) still exclude each other.
+    let lock_path = match mbar_ipc::prepare_lock_path(&user, &bar_name) {
+        Ok(p) => p,
+        Err(e) => {
+            log::error!("lock directory: {e}");
+            eprintln!("{bar_name}: could not create lock-file! abort..");
+            std::process::exit(1);
+        }
+    };
     let lock = match acquire_lock(&lock_path) {
         Ok(f) => f,
         Err(LockError::Create) => {
@@ -43,6 +53,16 @@ pub fn run(bar_name: String, opts: DaemonOptions) -> ! {
         }
     };
 
+    // The socket directory must be private to this user (a per-user `mbar-<uid>`
+    // directory inside a shared `$TMPDIR` / `/tmp`).
+    let socket_path = match mbar_ipc::prepare_socket_path(&bar_name) {
+        Ok(p) => p,
+        Err(e) => {
+            log::error!("ipc: socket directory: {e}");
+            eprintln!("{bar_name}: could not create lock-file! abort..");
+            std::process::exit(1);
+        }
+    };
     let listener = match Listener::bind(&socket_path) {
         Ok(l) => l,
         Err(e) => {
@@ -63,6 +83,17 @@ pub fn run(bar_name: String, opts: DaemonOptions) -> ! {
         .and_then(|p| p.parent())
         .map(Path::to_path_buf);
 
+    // `cli.md` §10.2 step 2: `CONFIG_DIR` lives in the daemon's own environment (Lua's
+    // `os.getenv`, `io.popen`, `os.execute` see it). Set here, before any thread exists;
+    // `Driver::run_config` only touches it again when a reload changes the directory.
+    if let Some(dir) = config_path
+        .as_deref()
+        .filter(|p| p.is_file())
+        .and_then(Path::parent)
+    {
+        std::env::set_var("CONFIG_DIR", dir);
+    }
+
     // `BAR_NAME` was set in `main` before any thread existed.
     let base_env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
 
@@ -80,15 +111,6 @@ pub fn run(bar_name: String, opts: DaemonOptions) -> ! {
         lock,
     };
     crate::platform::platform_main(setup)
-}
-
-/// The lock file lives next to the socket (`$TMPDIR/mbar_<user>_<bar>.lock`, falling back
-/// to `/tmp`), so independent `TMPDIR`s run independent daemons (tests).
-fn lock_path(socket: &Path, user: &str, bar_name: &str) -> PathBuf {
-    socket
-        .parent()
-        .unwrap_or(Path::new("/tmp"))
-        .join(format!("mbar_{user}_{bar_name}.lock"))
 }
 
 #[derive(Debug, PartialEq, Eq)]

@@ -9,6 +9,8 @@ use crate::bar::{BarProps, BarState};
 use crate::event::CustomEvents;
 use crate::item::{BarItem, ItemId, ItemType, Position};
 use crate::platform::{ImageInfo, Resources};
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 /// All bar state.
 #[derive(Debug, Clone)]
@@ -34,6 +36,20 @@ pub struct Model {
     /// Window z-order must be refreshed.
     pub needs_ordering: bool,
     next_id: u64,
+    /// `ItemId` → index into `items` (PERF-8). `items` is a public `Vec` that the runtime
+    /// reorders, inserts into and removes from directly, so the map is never trusted: every
+    /// hit is validated against `items[idx].id` and a stale or missing entry triggers a full
+    /// O(n) rebuild. Lookups are O(1) amortized between structural changes (SketchyBar
+    /// follows direct pointers, e.g. `item->parent` in `bar_draws_item`).
+    index: RefCell<ItemIndex>,
+}
+
+/// Lazily rebuilt id → position map backing `Model::index_of` / `item` / `item_mut`.
+#[derive(Debug, Clone, Default)]
+struct ItemIndex {
+    map: HashMap<ItemId, usize>,
+    /// Number of full rebuilds (observability for the PERF-8 regression tests).
+    rebuilds: u64,
 }
 
 impl Default for Model {
@@ -59,6 +75,7 @@ impl Model {
             might_need_clipping: false,
             needs_ordering: false,
             next_id: 1,
+            index: RefCell::new(ItemIndex::default()),
         }
     }
 
@@ -79,17 +96,41 @@ impl Model {
         id
     }
 
-    /// Position of an item in the global order.
+    /// Position of an item in the global order. O(1) amortized: served from the validated
+    /// id index, which is rebuilt only after `items` changed structurally.
     pub fn index_of(&self, id: ItemId) -> Option<usize> {
-        self.items.iter().position(|i| i.id == id)
+        let mut index = self.index.borrow_mut();
+        if let Some(&idx) = index.map.get(&id) {
+            if self.items.get(idx).is_some_and(|i| i.id == id) {
+                return Some(idx);
+            }
+        }
+        // Stale or missing entry. An id that is simply absent (removed item) costs one linear
+        // scan, as before; any other miss means `items` was reordered or grown, so the whole
+        // map is rebuilt once and later lookups are O(1) again.
+        let found = self.items.iter().position(|i| i.id == id);
+        if found.is_some() || index.map.contains_key(&id) {
+            index.map.clear();
+            index
+                .map
+                .extend(self.items.iter().enumerate().map(|(n, i)| (i.id, n)));
+            index.rebuilds += 1;
+        }
+        found
     }
 
     pub fn item(&self, id: ItemId) -> Option<&BarItem> {
-        self.items.iter().find(|i| i.id == id)
+        self.index_of(id).map(|idx| &self.items[idx])
     }
 
     pub fn item_mut(&mut self, id: ItemId) -> Option<&mut BarItem> {
-        self.items.iter_mut().find(|i| i.id == id)
+        self.index_of(id).map(|idx| &mut self.items[idx])
+    }
+
+    /// Full id-index rebuilds so far (PERF-8 regression tests).
+    #[doc(hidden)]
+    pub fn index_rebuilds(&self) -> u64 {
+        self.index.borrow().rebuilds
     }
 
     /// `bar_manager_get_item_index_for_name`: exact name, first match.
@@ -190,5 +231,88 @@ mod tests {
         assert!(m.draws_item(&bar, m.item(b).unwrap()));
         m.item_mut(a).unwrap().drawing = false;
         assert!(!m.draws_item(&bar, m.item(b).unwrap()));
+    }
+
+    /// PERF-8: the id index stays correct whatever happens to the public `items` Vec.
+    #[test]
+    fn id_index_survives_direct_vec_mutation() {
+        let mut res = HeadlessResources::default();
+        let mut m = Model::new();
+        let ids: Vec<ItemId> = (0..6).map(|_| m.create_item(&mut res)).collect();
+        let check = |m: &Model| {
+            for (n, it) in m.items.iter().enumerate() {
+                assert_eq!(m.index_of(it.id), Some(n));
+                assert_eq!(m.item(it.id).map(|i| i.id), Some(it.id));
+            }
+        };
+        check(&m);
+        m.items.swap(0, 5);
+        check(&m);
+        let removed = m.items.remove(2).id;
+        assert_eq!(m.index_of(removed), None);
+        assert!(m.item(removed).is_none());
+        check(&m);
+        let it = m.items.remove(0);
+        m.items.insert(3, it);
+        check(&m);
+        m.items.reverse();
+        check(&m);
+        let fresh = m.create_item(&mut res);
+        assert_eq!(m.index_of(fresh), Some(m.items.len() - 1));
+        m.items = m.items.iter().rev().cloned().collect();
+        check(&m);
+        m.item_mut(ids[1]).unwrap().set_name("x");
+        assert_eq!(m.find("x"), Some(ids[1]));
+        assert_eq!(m.index_of(ItemId(9999)), None);
+        let c = m.clone();
+        check(&c);
+    }
+
+    /// PERF-8: `draws_item` resolves popup parents without rescanning `items`: once the
+    /// index is warm, repeated visibility checks (refresh/layout on every input) and
+    /// lookups of removed ids never rebuild it.
+    #[test]
+    fn popup_parent_lookup_uses_index() {
+        let mut res = HeadlessResources::default();
+        let mut m = Model::new();
+        m.active_adid = 1;
+        let bar = BarState::new(1, 1);
+        for _ in 0..200 {
+            m.create_item(&mut res);
+        }
+        let mut members = Vec::new();
+        for _ in 0..50 {
+            let host = m.create_item(&mut res);
+            m.item_mut(host).unwrap().popup.drawing = true;
+            for _ in 0..4 {
+                let mi = m.create_item(&mut res);
+                let it = m.item_mut(mi).unwrap();
+                it.position = Position::Popup;
+                it.parent = Some(host);
+                members.push(mi);
+            }
+        }
+        let gone = m.items.pop().unwrap().id;
+        assert!(m.item(gone).is_none());
+        let before = m.index_rebuilds();
+        for _ in 0..100 {
+            for it in &m.items {
+                let drawn = m.draws_item(&bar, it);
+                assert_eq!(drawn, it.id != gone);
+            }
+            assert!(m.item(gone).is_none());
+        }
+        assert_eq!(m.index_rebuilds(), before);
+        // A structural change costs exactly one rebuild, then lookups are cached again.
+        m.items.swap(0, 1);
+        for it in &m.items {
+            assert!(m.draws_item(&bar, it));
+        }
+        let first = m.items[0].id;
+        assert_eq!(m.index_of(first), Some(0));
+        assert_eq!(m.index_rebuilds(), before + 1);
+        assert!(members
+            .iter()
+            .all(|id| m.item(*id).is_some() || *id == gone));
     }
 }

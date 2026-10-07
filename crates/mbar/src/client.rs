@@ -8,13 +8,23 @@
 //! streams until it closes the connection.
 
 use std::io::Write;
-use std::os::unix::net::UnixStream;
 
 /// Runs client mode; returns the process exit code.
 pub fn run(bar_name: &str, args: &[String]) -> i32 {
     // `sketchybar -m` with nothing to send.
     if args.is_empty() {
         return 0;
+    }
+    if lua_sync_marked(
+        bar_name,
+        std::env::var_os(mbar_lua::SYNC_SHELL_ENV).as_deref(),
+    ) {
+        eprintln!(
+            "{bar_name}: cannot message the bar from a blocking io.popen/os.execute of its own \
+             Lua config or handler (the daemon cannot answer before Lua returns); use \
+             mbar.query/mbar.exec instead"
+        );
+        return 1;
     }
     if std::env::var_os("USER").map_or(true, |u| u.is_empty()) {
         eprintln!("sketchybar-msg: 'env USER' not set! abort..");
@@ -30,6 +40,15 @@ pub fn run(bar_name: &str, args: &[String]) -> i32 {
             0
         }
     }
+}
+
+/// Whether this process was started (directly or indirectly) by a blocking
+/// `io.popen` / `os.execute` of the Lua engine of the daemon `bar_name`
+/// (`mbar_lua::SYNC_SHELL_ENV`). Messaging that daemon would only wait for the
+/// client timeout: its main thread, the only one that answers, is busy running
+/// the very Lua call that waits for this process.
+fn lua_sync_marked(bar_name: &str, marker: Option<&std::ffi::OsStr>) -> bool {
+    marker.is_some_and(|m| m == bar_name)
 }
 
 fn print_response(rsp: &str) -> i32 {
@@ -50,7 +69,7 @@ fn print_response(rsp: &str) -> i32 {
 /// until EOF. An error response as first frame exits with 1.
 fn monitor(bar_name: &str, args: &[String]) -> i32 {
     let path = mbar_ipc::socket_path(bar_name);
-    let Ok(mut stream) = UnixStream::connect(&path) else {
+    let Ok(mut stream) = mbar_ipc::socket::connect(&path) else {
         return 0;
     };
     let _ = stream.set_write_timeout(Some(mbar_ipc::socket::CLIENT_TIMEOUT));

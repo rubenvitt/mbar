@@ -52,9 +52,17 @@ impl Default for Graph {
     }
 }
 
+/// Largest graph width (samples = points) `--add graph` accepts; larger widths are clamped
+/// to it (D22). Wider than any display, small enough that the buffer and its `--query`
+/// output stay cheap.
+pub const MAX_GRAPH_WIDTH: u32 = 4096;
+
 impl Graph {
-    /// `graph_setup(width)`.
+    /// `graph_setup(width)`. D22: `width` is clamped to [`MAX_GRAPH_WIDTH`], so a client
+    /// command such as `--add graph g left 4294967295` cannot abort the daemon on a 17 GB
+    /// allocation.
     pub fn setup(&mut self, width: u32) {
+        let width = width.min(MAX_GRAPH_WIDTH);
         self.width = width;
         self.samples = vec![0.0; width as usize];
         self.cursor = 0;
@@ -180,5 +188,17 @@ mod tests {
         Graph::default().write_json(&mut out, "\t\t");
         assert!(out.ends_with("\"data\": [\n\n\t\t]"));
         assert_eq!(g.effective_fill().hex >> 24, (255.0f32 * 0.2) as u32);
+    }
+
+    #[test]
+    fn setup_clamps_width() {
+        let mut g = Graph::default();
+        g.setup(u32::MAX);
+        assert_eq!(g.width, MAX_GRAPH_WIDTH);
+        assert_eq!(g.samples.len(), MAX_GRAPH_WIDTH as usize);
+        g.setup(MAX_GRAPH_WIDTH);
+        assert_eq!(g.width, MAX_GRAPH_WIDTH);
+        g.setup(MAX_GRAPH_WIDTH - 1);
+        assert_eq!(g.samples.len(), MAX_GRAPH_WIDTH as usize - 1);
     }
 }

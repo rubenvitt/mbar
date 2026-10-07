@@ -67,7 +67,7 @@ fn parse_unsigned_magnitude(s: &str) -> (bool, u128) {
 }
 
 /// `strtof(s, NULL)` semantics: parses the longest valid float prefix
-/// (decimal, exponent, `inf`, `nan`, hex floats are treated as decimal `0`).
+/// (decimal, exponent, hex float such as `0x1p-2`, `inf`, `nan`).
 /// Returns 0.0 if nothing parses.
 pub fn parse_float(s: &str) -> f32 {
     parse_float_prefix(s).unwrap_or(0.0)
@@ -88,6 +88,10 @@ pub fn parse_float_prefix(s: &str) -> Option<f32> {
         if lower.starts_with(word) {
             return t[..i + word.len()].parse::<f32>().ok();
         }
+    }
+    if let Some(v) = parse_hex_float(&b[i..]) {
+        let neg = i > 0 && b[0] == b'-';
+        return Some(if neg { -v } else { v });
     }
     let mut digits = false;
     while i < b.len() && b[i].is_ascii_digit() {
@@ -122,6 +126,76 @@ pub fn parse_float_prefix(s: &str) -> Option<f32> {
         return None;
     }
     t[..end].parse::<f32>().ok()
+}
+
+/// C99 hex-float body (after the optional sign): `0x`, hex digits with an optional `.`
+/// (at least one digit), then an optional binary exponent `p[+-]digits`. Returns `None`
+/// when no hex mantissa digit follows `0x` (strtof then parses just the leading `0`).
+fn parse_hex_float(b: &[u8]) -> Option<f32> {
+    if b.len() < 2 || b[0] != b'0' || (b[1] != b'x' && b[1] != b'X') {
+        return None;
+    }
+    let mut i = 2;
+    // Mantissa accumulated in 60 bits; further digits only shift the exponent and
+    // set a sticky bit so the final rounding to f32 stays correct.
+    let mut mant: u64 = 0;
+    let mut exp: i64 = 0;
+    let mut sticky = false;
+    let mut digits = false;
+    let mut seen_dot = false;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'.' && !seen_dot {
+            seen_dot = true;
+        } else if let Some(d) = (c as char).to_digit(16) {
+            digits = true;
+            if mant >> 56 == 0 {
+                mant = (mant << 4) | d as u64;
+                if seen_dot {
+                    exp -= 4;
+                }
+            } else {
+                sticky |= d != 0;
+                if !seen_dot {
+                    exp += 4;
+                }
+            }
+        } else {
+            break;
+        }
+        i += 1;
+    }
+    if !digits {
+        return None;
+    }
+    if i < b.len() && (b[i] == b'p' || b[i] == b'P') {
+        let mut j = i + 1;
+        let mut eneg = false;
+        if j < b.len() && (b[j] == b'+' || b[j] == b'-') {
+            eneg = b[j] == b'-';
+            j += 1;
+        }
+        let start = j;
+        let mut e: i64 = 0;
+        while j < b.len() && b[j].is_ascii_digit() {
+            e = (e * 10 + (b[j] - b'0') as i64).min(1 << 20);
+            j += 1;
+        }
+        if j > start {
+            exp += if eneg { -e } else { e };
+        }
+    }
+    if mant == 0 {
+        return Some(0.0);
+    }
+    if sticky {
+        mant |= 1;
+    }
+    // `u64 -> f32` rounds correctly (sticky bit included); scaling by a power of two in
+    // f64 is exact, and the final cast only rounds again for subnormal/overflowing results.
+    let m = mant as f32 as f64;
+    let exp = exp.clamp(-2000, 2000) as i32;
+    Some((m * 2f64.powi(exp)) as f32)
 }
 
 /// SketchyBar's `evaluate_boolean_state`: `on|yes|true|1|!off|!no|!false|!0` → true,
@@ -316,6 +390,32 @@ mod tests {
         assert_eq!(parse_float("x"), 0.0);
         assert_eq!(parse_float(""), 0.0);
         assert_eq!(parse_float("5."), 5.0);
+    }
+
+    #[test]
+    fn float_hex_like_strtof() {
+        assert_eq!(parse_float("0x1p-2"), 0.25);
+        assert_eq!(parse_float("0x10"), 16.0);
+        assert_eq!(parse_float("0X1P4"), 16.0);
+        assert_eq!(parse_float("-0x1.8p1"), -3.0);
+        assert_eq!(parse_float("+0x.8"), 0.5);
+        assert_eq!(parse_float("0xA.8p0xyz"), 10.5);
+        assert_eq!(parse_float("0x1p"), 1.0);
+        assert_eq!(parse_float("0x1p+"), 1.0);
+        assert_eq!(parse_float("  0x2e"), 46.0);
+        assert_eq!(parse_float("0x"), 0.0);
+        assert_eq!(parse_float("0xg"), 0.0);
+        assert_eq!(parse_float("0x.p1"), 0.0);
+        assert_eq!(parse_float("0x0p99999999"), 0.0);
+        assert_eq!(parse_float("0x1p999"), f32::INFINITY);
+        assert_eq!(parse_float("0x1p-999"), 0.0);
+        // Exactly halfway between 1 and the next f32: ties to even.
+        assert_eq!(parse_float("0x1.000001p0"), 1.0);
+        // A nonzero digit past the 60 accumulated bits still breaks the tie upward.
+        assert_eq!(parse_float("0x1.0000010000000000001p0"), 1.0 + f32::EPSILON);
+        assert_eq!(parse_float("0x1000000000000000000p-72"), 1.0);
+        assert_eq!(parse_float_prefix("0x"), Some(0.0));
+        assert_eq!(parse_float_prefix("-0x1p-1pt"), Some(-0.5));
     }
 
     #[test]

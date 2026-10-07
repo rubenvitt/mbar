@@ -22,6 +22,7 @@
 use super::{hex, FontSpec};
 use crate::color::Color;
 use crate::geometry::Rect;
+use crate::platform::TextKey;
 use crate::props::{set_i32, set_u32, AnimValue, PropCx, PropEffects, PropError, PropResult};
 use crate::value;
 use std::fmt::Write;
@@ -47,6 +48,36 @@ pub struct AppMenu {
     pub hovered: Option<usize>,
     /// Layout output: one rect per drawn title (app name first), item-local coordinates.
     pub title_bounds: Vec<Rect>,
+    /// Layout cache (not a property): the title measurements of the last layout pass.
+    pub measured: TitleMeasure,
+}
+
+/// One measured `app_menu` title cell.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MeasuredTitle {
+    pub key: TextKey,
+    /// Cell size: `typographic width + spacing` × `ascent + descent + 2·pad`.
+    pub width: f32,
+    pub height: f32,
+    pub descent: f32,
+}
+
+/// Cache of the `app_menu` title measurements, keyed by everything they depend on (drawn
+/// entries, both fonts, spacing), so unrelated redraws do not measure text again.
+/// Compares equal to any other cache: it is derived state, not part of the item.
+#[derive(Debug, Clone, Default)]
+pub struct TitleMeasure {
+    /// `(text, drawn with the app font)` per drawn entry.
+    pub entries: Vec<(String, bool)>,
+    pub fonts: Option<(FontSpec, FontSpec)>,
+    pub spacing: i32,
+    pub cells: Vec<MeasuredTitle>,
+}
+
+impl PartialEq for TitleMeasure {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 impl Default for AppMenu {
@@ -64,6 +95,7 @@ impl Default for AppMenu {
             titles: Vec::new(),
             hovered: None,
             title_bounds: Vec::new(),
+            measured: TitleMeasure::default(),
         }
     }
 }

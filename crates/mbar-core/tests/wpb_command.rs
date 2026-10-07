@@ -913,7 +913,7 @@ fn bre_errors() {
         "[abc",       // REG_EBRACK
         "[",          // REG_EBRACK
         "[]",         // `]` first is literal → unterminated
-        "\\(a\\)\\1", // back-references
+        "\\(a\\)\\2", // REG_ESUBREG (back-references: review_bre.rs)
         "a\\",        // trailing backslash
         "[[:foo:]]",  // REG_ECTYPE
         "[[:alpha:]", // unterminated

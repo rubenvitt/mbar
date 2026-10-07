@@ -38,9 +38,68 @@ pub fn read_frame(r: &mut impl Read) -> io::Result<Vec<u8>> {
     Ok(data)
 }
 
+/// Effective uid of the process on the other end of `stream` (`SO_PEERCRED` /
+/// `getpeereid`).
+pub fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    use std::os::unix::io::AsRawFd;
+    let fd = stream.as_raw_fd();
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        // SAFETY: `ucred` is plain data; getsockopt writes at most `len` bytes into it.
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut cred as *mut libc::ucred).cast(),
+                &mut len,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(cred.uid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        let (mut uid, mut gid) = (0, 0);
+        // SAFETY: valid fd and out pointers.
+        if unsafe { libc::getpeereid(fd, &mut uid, &mut gid) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(uid)
+    }
+}
+
+/// Whether the peer may use this connection: it runs as our effective uid, or as root.
+pub fn peer_trusted(stream: &UnixStream) -> bool {
+    match peer_uid(stream) {
+        Ok(uid) => uid == crate::euid() || uid == 0,
+        Err(e) => {
+            log::debug!("ipc: cannot read peer credentials: {e}");
+            false
+        }
+    }
+}
+
+/// Client: connects to the daemon's socket and verifies that the listener runs as the
+/// same user (or root), so a socket bound by another local user is never talked to.
+pub fn connect(path: &Path) -> io::Result<UnixStream> {
+    let stream = UnixStream::connect(path)?;
+    if !peer_trusted(&stream) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} is served by another user", path.display()),
+        ));
+    }
+    Ok(stream)
+}
+
 /// Client: sends one request and waits for its response.
 pub fn send(path: &Path, payload: &[u8]) -> io::Result<String> {
-    let mut stream = UnixStream::connect(path)?;
+    let mut stream = connect(path)?;
     stream.set_read_timeout(Some(CLIENT_TIMEOUT))?;
     stream.set_write_timeout(Some(CLIENT_TIMEOUT))?;
     write_frame(&mut stream, payload)?;
@@ -95,6 +154,7 @@ impl Server {
             std::fs::remove_file(path)?;
         }
         let listener = UnixListener::bind(path)?;
+        restrict_socket_mode(path)?;
         Ok(Server {
             path: path.to_path_buf(),
             listener,
@@ -120,6 +180,10 @@ impl Server {
                 let server = self;
                 for conn in server.listener.incoming() {
                     let Ok(mut stream) = conn else { continue };
+                    if !peer_trusted(&stream) {
+                        log::warn!("ipc: rejected a connection from another user");
+                        continue;
+                    }
                     let _ = stream.set_read_timeout(Some(CLIENT_TIMEOUT));
                     match read_frame(&mut stream) {
                         Ok(payload) => on_request(Request {
@@ -131,6 +195,12 @@ impl Server {
                 }
             })
     }
+}
+
+/// `chmod 0600` on a freshly bound socket: only this user may connect.
+pub fn restrict_socket_mode(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
 impl Drop for Server {

@@ -8,19 +8,23 @@
 //! [`FrameOutput`] and execute [`Driver::take_platform_requests`].
 //!
 //! Effects (`docs/ARCHITECTURE.md` "Data flow"):
-//! * `Reply` → the pending IPC request's [`Responder`] (or a monitor subscription).
+//! * `Reply` → the pending IPC request's [`Responder`]; `MonitorStart` → a `--monitor`
+//!   subscription on that request's connection.
 //! * `RunScript` → `sh -c` (D1 clean env, cwd config dir, 60 s timeout; reaper posts
 //!   `Input::ScriptFinished`), or the Lua handler when the script is `lua:<id>`.
 //! * `LuaCallback` → `LuaEngine::run_handler`.
-//! * `RunConfig` → (re)load the config: shell config in a child, `init.lua` in a fresh
-//!   `LuaEngine`.
+//! * `RunConfig` → (re)load the config: shell config in a child (bash when it has no
+//!   shebang), `init.lua` in a fresh `LuaEngine`.
 //! * `Exit`, `Log`, `Monitor`, `Platform(SetHotload)` handled here; every other
 //!   `PlatformRequest` goes to the platform.
 //!
 //! Lua re-entrancy (`docs/LUA.md`, `mbar_lua` crate docs): while the engine runs, the
 //! engine is taken out of the driver; `Host::command` feeds the runtime synchronously and
 //! every Lua call or config reload it causes is queued in `deferred` and executed by
-//! [`Driver::drain`] after the engine call has returned.
+//! [`Driver::drain`] after the engine call has returned. A drain is bounded (the work queued
+//! before it started, then at most [`DRAIN_BUDGET`]), so Lua handlers that keep triggering
+//! each other cannot starve IPC, timers and frames; the rest runs on the next loop iteration
+//! ([`Driver::next_deadline`] is "now" while work is queued).
 
 use mbar_core::command::MonitorMode;
 use mbar_core::platform::{Effect, FrameOutput, Input, PlatformRequest, ReplyToken, Resources};
@@ -28,13 +32,15 @@ use mbar_core::{Runtime, RuntimeConfig};
 use mbar_lua::{Host, LuaEngine};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
+use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::ipc::Responder;
+use crate::ipc::{encode_frame, Responder};
 use crate::logging::daemon_log;
 use crate::scripts::{self, Spawn, SCRIPT_TIMEOUT};
 
@@ -90,8 +96,18 @@ enum Deferred {
     RunConfig(Option<String>),
 }
 
+/// Wall-clock time one [`Driver::drain`] may keep running work queued during the drain.
+const DRAIN_BUDGET: Duration = Duration::from_millis(5);
+
+/// Frames a `--monitor` subscriber may lag behind before it is dropped.
+const MONITOR_QUEUE: usize = 1024;
+/// A subscriber whose socket accepts nothing for this long is dropped.
+const MONITOR_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// One `--monitor` connection. Its socket is written by its own thread
+/// ([`monitor_writer`]), so a subscriber that stops reading never blocks the main loop.
 struct MonitorSub {
-    stream: UnixStream,
+    tx: SyncSender<Arc<[u8]>>,
     mode: MonitorMode,
 }
 
@@ -107,6 +123,9 @@ impl MonitorSub {
 
 pub struct Driver {
     rt: Runtime,
+    /// IPC bar name; marks blocking `io.popen`/`os.execute` children of Lua
+    /// (`mbar_lua::SYNC_SHELL_ENV`).
+    bar_name: String,
     config_path: Option<PathBuf>,
     config_dir: Option<PathBuf>,
     base_env: Vec<(OsString, OsString)>,
@@ -114,7 +133,6 @@ pub struct Driver {
     hotload: Arc<AtomicBool>,
     next_token: u64,
     pending: HashMap<ReplyToken, Responder>,
-    pending_monitors: HashMap<ReplyToken, (Responder, MonitorMode)>,
     monitors: Vec<MonitorSub>,
     lua: Option<LuaEngine>,
     /// Bumped on every config (re)load; stale Lua exec/timer callbacks are dropped.
@@ -123,6 +141,11 @@ pub struct Driver {
     deferred: VecDeque<Deferred>,
     platform_requests: Vec<PlatformRequest>,
     exit: bool,
+    /// Latest `Resources::now` seen (deadline for queued work).
+    last_now: Option<Instant>,
+    /// `Input::Timer`s handed to the runtime (tests).
+    #[cfg(test)]
+    timer_inputs: u64,
 }
 
 impl Driver {
@@ -137,6 +160,7 @@ impl Driver {
         });
         Driver {
             rt,
+            bar_name: cfg.bar_name,
             config_dir: None,
             config_path: cfg.config_path,
             base_env: cfg.base_env,
@@ -144,7 +168,6 @@ impl Driver {
             hotload,
             next_token: 1,
             pending: HashMap::new(),
-            pending_monitors: HashMap::new(),
             monitors: Vec::new(),
             lua: None,
             lua_generation: 0,
@@ -152,6 +175,9 @@ impl Driver {
             deferred: VecDeque::new(),
             platform_requests: Vec::new(),
             exit: false,
+            last_now: None,
+            #[cfg(test)]
+            timer_inputs: 0,
         }
     }
 
@@ -164,6 +190,7 @@ impl Driver {
     /// `bar_manager_begin`, then the first config run. Call once the IPC server is up so
     /// the shell config's commands reach the daemon.
     pub fn start(&mut self, res: &mut dyn Resources) {
+        self.last_now = Some(res.now());
         let fx = self.rt.begin(res);
         self.apply(fx);
         self.deferred.push_back(Deferred::RunConfig(None));
@@ -181,6 +208,7 @@ impl Driver {
     }
 
     pub fn handle_event(&mut self, ev: Event, res: &mut dyn Resources) {
+        self.last_now = Some(res.now());
         match ev {
             Event::Input(input) => {
                 let fx = self.rt.handle(input, res);
@@ -204,9 +232,23 @@ impl Driver {
     /// needed. Returns the frame for the platform to present.
     pub fn poll(&mut self, res: &mut dyn Resources) -> Option<FrameOutput> {
         let now = res.now();
-        if !self.exit && self.rt.next_deadline().is_some_and(|d| d <= now) {
-            let fx = self.rt.handle(Input::Timer, res);
-            self.apply(fx);
+        self.last_now = Some(now);
+        if !self.exit {
+            // Render and animation deadlines are served by `frame` below; `Input::Timer`
+            // only when the routine clock or the wake re-post is due.
+            if self.rt.timer_due(now) {
+                #[cfg(test)]
+                {
+                    self.timer_inputs += 1;
+                }
+                let fx = self.rt.handle(Input::Timer, res);
+                self.apply(fx);
+            } else if self.rt.animating() && self.rt.needs_frame() {
+                // An animation frame is an event of its own in SketchyBar, which polls the
+                // active display first (`events.md` §5.3 Q5).
+                let fx = self.rt.poll_display(res);
+                self.apply(fx);
+            }
         }
         if !self.lua_timers.is_empty() {
             let mut due: Vec<_> = Vec::new();
@@ -232,10 +274,28 @@ impl Driver {
         }
     }
 
-    /// When [`Driver::poll`] must run next (`None`: only on events).
+    /// When [`Driver::poll`] must run next (`None`: only on events). "Now" while Lua work
+    /// is left over from a bounded [`Driver::drain`].
+    /// Used by display-link platforms (macOS); headless uses [`Driver::next_deadline_paced`].
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn next_deadline(&self) -> Option<Instant> {
+        self.deadline(self.rt.next_deadline())
+    }
+
+    /// [`Driver::next_deadline`] for a platform without a display link (headless): running
+    /// animations ask for the next frame one `frame_interval` after the last one instead of
+    /// "now" ([`mbar_core::runtime::Runtime::next_deadline_paced`]), so the loop sleeps
+    /// between animation frames rather than spinning.
+    pub fn next_deadline_paced(&self, frame_interval: Duration) -> Option<Instant> {
+        self.deadline(self.rt.next_deadline_paced(frame_interval))
+    }
+
+    fn deadline(&self, rt: Option<Instant>) -> Option<Instant> {
+        if !self.deferred.is_empty() {
+            return Some(self.last_now.unwrap_or_else(Instant::now));
+        }
         let lua = self.lua_timers.iter().map(|t| t.0).min();
-        [self.rt.next_deadline(), lua].into_iter().flatten().min()
+        [rt, lua].into_iter().flatten().min()
     }
 
     // ------------------------------------------------------------------ requests
@@ -251,21 +311,11 @@ impl Driver {
             return;
         }
         let token = self.token();
-        match monitor_mode(&args) {
-            Some(mode) => {
-                self.pending_monitors.insert(token, (responder, mode));
-            }
-            None => {
-                self.pending.insert(token, responder);
-            }
-        }
+        self.pending.insert(token, responder);
+        // The reply arrives as `Effect::Reply`, or as `Effect::MonitorStart` when the
+        // runtime executed `--monitor` (the connection then stays open).
         let fx = self.rt.handle(Input::Message { args, reply: token }, res);
         self.apply(fx);
-        // The runtime does not reply to an accepted `--monitor` (the connection stays
-        // open); an error reply has already been delivered by `apply`.
-        if let Some((r, mode)) = self.pending_monitors.remove(&token) {
-            self.start_monitor(r, mode, String::new());
-        }
     }
 
     /// Runs a message synchronously and returns its reply (Lua `Host::command`).
@@ -290,8 +340,6 @@ impl Driver {
     fn reply(&mut self, token: ReplyToken, text: String) {
         if let Some(r) = self.pending.remove(&token) {
             r.respond(&text);
-        } else if let Some((r, mode)) = self.pending_monitors.remove(&token) {
-            self.start_monitor(r, mode, text);
         } else {
             log::debug!("reply for unknown token {token:?}");
         }
@@ -329,17 +377,32 @@ impl Driver {
                     let line = compact_json(&line);
                     self.broadcast(&line, is_stats_line(&line));
                 }
+                Effect::MonitorStart { reply, mode, text } => {
+                    match self.pending.remove(&reply) {
+                        Some(r) => self.start_monitor(r, mode, text),
+                        // `--monitor` from Lua (`Host::command`): nothing to stream to.
+                        None => log::debug!("--monitor without a connection ({reply:?})"),
+                    }
+                    self.sync_monitor_flags();
+                }
             }
         }
     }
 
-    /// Executes queued Lua calls and config runs until nothing is left.
+    /// Executes queued Lua calls and config runs: everything queued before the call, then
+    /// work queued meanwhile until [`DRAIN_BUDGET`] is used up. Leftovers run on the next
+    /// call (see [`Driver::next_deadline`]), so self-triggering handlers cannot freeze the
+    /// main loop.
     pub fn drain(&mut self, res: &mut dyn Resources) {
+        let batch = self.deferred.len();
+        let start = Instant::now();
+        let mut done = 0usize;
         while let Some(d) = self.deferred.pop_front() {
             if self.exit {
                 self.deferred.clear();
                 return;
             }
+            done += 1;
             match d {
                 Deferred::Handler {
                     generation,
@@ -360,6 +423,9 @@ impl Driver {
                 }
                 Deferred::RunConfig(path) => self.run_config(path, res),
                 stale => log::debug!("dropping stale lua work {stale:?}"),
+            }
+            if done >= batch && start.elapsed() >= DRAIN_BUDGET {
+                break;
             }
         }
     }
@@ -415,7 +481,8 @@ impl Driver {
 
         if is_lua_config(&path) {
             match LuaEngine::new() {
-                Ok(engine) => {
+                Ok(mut engine) => {
+                    engine.set_bar_name(Some(&self.bar_name));
                     self.lua = Some(engine);
                     self.with_lua(res, |e, h| e.load_file(&path, h));
                 }
@@ -423,19 +490,16 @@ impl Driver {
             }
         } else {
             ensure_executable(&path);
-            let post = self.post.clone();
             let spec = Spawn {
-                command: scripts::shell_quote(&path.to_string_lossy()),
+                command: config_command(&path),
                 env: Vec::new(),
                 cwd: Some(dir),
                 capture: false,
             };
-            let r = scripts::spawn(spec, &self.base_env, SCRIPT_TIMEOUT, move |pid, _| {
-                post(Event::Input(Input::ScriptFinished {
-                    pid,
-                    item: None,
-                    output: None,
-                }))
+            // The runtime never counted the config as a script (`note_script_spawn`), so its
+            // exit is not reported (it would skew `scripts.running` in `--query stats`).
+            let r = scripts::spawn(spec, &self.base_env, SCRIPT_TIMEOUT, |pid, _| {
+                log::debug!("config (pid {pid}) exited");
             });
             if r.is_err() {
                 daemon_log(&format!("failed to execute file '{}'", path.display()));
@@ -443,9 +507,15 @@ impl Driver {
         }
     }
 
-    /// `CONFIG_DIR` for every later child and the daemon's cwd (relative paths, `cli.md`
-    /// §4.5.1).
+    /// `CONFIG_DIR` for every later child and the daemon's own environment (`cli.md` §10.2
+    /// step 2: Lua's `os.getenv`/`io.popen`/`os.execute` see it), and the daemon's cwd
+    /// (relative paths, `cli.md` §4.5.1).
     fn set_config_dir(&mut self, dir: &Path) {
+        // Normally already set by `daemon::run` before any thread existed; only a reload
+        // with a config in another directory changes it here.
+        if std::env::var_os("CONFIG_DIR").as_deref() != Some(dir.as_os_str()) {
+            std::env::set_var("CONFIG_DIR", dir);
+        }
         let key = OsString::from("CONFIG_DIR");
         self.base_env.retain(|(k, _)| *k != key);
         self.base_env.push((key, dir.as_os_str().to_owned()));
@@ -466,10 +536,20 @@ impl Driver {
             return;
         };
         let generation = self.lua_generation;
+        let before = engine.stats();
         let result = {
             let mut host = LuaHost { d: self, res };
             f(&mut engine, &mut host)
         };
+        let after = engine.stats();
+        if after.callbacks > before.callbacks {
+            // Handlers, `mbar.exec` and `mbar.delay` callbacks (`lua` in `--query stats`).
+            self.rt.record_lua_callbacks(
+                after.callbacks - before.callbacks,
+                after.total_us.saturating_sub(before.total_us),
+                after.max_us,
+            );
+        }
         if let Err(e) = result {
             daemon_log(&format!("lua: {e}"));
         }
@@ -506,9 +586,11 @@ impl Driver {
     // Contract with mbar-ui (`StreamDecoder`): the connection stays open after the request;
     // the daemon writes length-prefixed frames (same framing as replies), each holding
     // newline-terminated JSON lines (`docs/EXTENSIONS.md`). The first frame is the reply
-    // (empty when accepted; `[!] …` = error, then the connection closes). Event and stats
-    // lines come from the runtime (`Effect::Monitor`); subscribers that cannot be written
-    // to (gone, or stalled > 1 s) are dropped.
+    // (the output of the message, empty for a plain `--monitor`; `[!] …` = error, then the
+    // connection closes). Event and stats lines come from the runtime (`Effect::Monitor`).
+    // Each subscriber has a writer thread fed through a bounded queue: the main loop never
+    // blocks on a socket. Subscribers that are gone, stalled (nothing accepted for 1 s) or
+    // more than `MONITOR_QUEUE` frames behind are dropped.
 
     fn start_monitor(&mut self, responder: Responder, mode: MonitorMode, text: String) {
         if mbar_ipc::is_error_response(&text) {
@@ -516,37 +598,69 @@ impl Driver {
             return;
         }
         match responder.into_stream() {
-            Ok(mut stream) => {
-                // The (usually empty) reply is the first frame: it acknowledges the
-                // subscription and fixes the framed stream format for the reader.
-                if mbar_ipc::socket::write_frame(&mut stream, text.as_bytes()).is_err() {
-                    return;
+            Ok(stream) => {
+                let (tx, rx) = mpsc::sync_channel::<Arc<[u8]>>(MONITOR_QUEUE);
+                // The reply is the first frame: it acknowledges the subscription and fixes
+                // the framed stream format for the reader.
+                let _ = tx.try_send(encode_frame(text.as_bytes()).into());
+                let spawned = std::thread::Builder::new()
+                    .name("mbar-monitor".into())
+                    .spawn(move || monitor_writer(stream, rx));
+                match spawned {
+                    Ok(_) => self.monitors.push(MonitorSub { tx, mode }),
+                    Err(e) => log::warn!("monitor: cannot spawn writer: {e}"),
                 }
-                let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
-                self.monitors.push(MonitorSub { stream, mode });
             }
             Err(r) => r.respond("[!] Monitor: only available over the Unix socket\n"),
         }
+    }
+
+    /// Tells the runtime which monitor streams still have subscribers.
+    fn sync_monitor_flags(&mut self) {
+        let events = self.monitors.iter().any(|m| m.wants(false));
+        let stats = self.monitors.iter().any(|m| m.wants(true));
+        self.rt.set_monitor(events, stats);
     }
 
     fn broadcast(&mut self, line: &str, stats: bool) {
         if self.monitors.is_empty() {
             return;
         }
-        let mut frame = line.to_string();
-        if !frame.ends_with('\n') {
-            frame.push('\n');
+        let mut text = line.to_string();
+        if !text.ends_with('\n') {
+            text.push('\n');
         }
+        let frame: Arc<[u8]> = encode_frame(text.as_bytes()).into();
         let before = self.monitors.len();
-        self.monitors.retain_mut(|m| {
-            !m.wants(stats)
-                || mbar_ipc::socket::write_frame(&mut m.stream, frame.as_bytes()).is_ok()
+        self.monitors.retain(|m| {
+            if !m.wants(stats) {
+                return true;
+            }
+            match m.tx.try_send(frame.clone()) {
+                Ok(()) => true,
+                Err(TrySendError::Full(_)) => {
+                    log::debug!("monitor: dropping a subscriber that does not keep up");
+                    false
+                }
+                Err(TrySendError::Disconnected(_)) => false,
+            }
         });
         if self.monitors.len() != before {
             // Some subscribers went away: stop producing lines nobody reads.
-            let events = self.monitors.iter().any(|m| m.wants(false));
-            let stats = self.monitors.iter().any(|m| m.wants(true));
-            self.rt.set_monitor(events, stats);
+            self.sync_monitor_flags();
+        }
+    }
+}
+
+/// Writes queued frames to one `--monitor` connection until the driver drops the
+/// subscription or a write fails (client gone, or nothing accepted for
+/// [`MONITOR_WRITE_TIMEOUT`]).
+fn monitor_writer(mut stream: UnixStream, rx: Receiver<Arc<[u8]>>) {
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_write_timeout(Some(MONITOR_WRITE_TIMEOUT));
+    while let Ok(frame) = rx.recv() {
+        if stream.write_all(&frame).is_err() {
+            return;
         }
     }
 }
@@ -567,25 +681,43 @@ impl Host for LuaHost<'_, '_> {
     }
 
     fn schedule(&mut self, delay: Duration, callback: u64) {
-        let at = self.res.now() + delay;
-        self.d
-            .lua_timers
-            .push((at, self.d.lua_generation, callback));
+        // A delay beyond what `Instant` can represent never fires (and must not panic).
+        match self.res.now().checked_add(delay) {
+            Some(at) => self
+                .d
+                .lua_timers
+                .push((at, self.d.lua_generation, callback)),
+            None => log::debug!("lua: mbar.delay({delay:?}) never fires"),
+        }
     }
-}
-
-/// `--monitor [events|stats|all]` anywhere in the message (default `all`).
-fn monitor_mode(args: &[String]) -> Option<MonitorMode> {
-    let i = args.iter().position(|a| a == "--monitor")?;
-    Some(match args.get(i + 1).map(String::as_str) {
-        Some("events") => MonitorMode::Events,
-        Some("stats") => MonitorMode::Stats,
-        _ => MonitorMode::All,
-    })
 }
 
 fn is_lua_config(path: &Path) -> bool {
     path.extension().is_some_and(|e| e == "lua")
+}
+
+/// True if the file starts with `#!`.
+fn has_shebang(path: &Path) -> bool {
+    let mut head = [0u8; 2];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .map_or(true, |_| head == *b"#!")
+}
+
+/// The `sh -c` command line that runs a shell config (`cli.md` §10.2 step 5). The stock rc
+/// has no shebang and uses bash arrays: it only works on macOS because `/bin/sh` is bash
+/// there. On Linux `/bin/sh` is usually dash, which would run (and fail on) such a file
+/// after `ENOEXEC`, so a shebang-less config runs with bash when it is installed
+/// (`examples.md` §1.1.3).
+fn config_command(path: &Path) -> String {
+    let quoted = scripts::shell_quote(&path.to_string_lossy());
+    if has_shebang(path) {
+        quoted
+    } else {
+        format!(
+            "if command -v bash >/dev/null 2>&1; then exec bash {quoted}; else exec {quoted}; fi"
+        )
+    }
 }
 
 /// `chmod(mode | S_IXUSR)` (`cli.md` §10.2 step 4).
@@ -647,24 +779,6 @@ mod tests {
     }
 
     #[test]
-    fn monitor_modes() {
-        assert_eq!(monitor_mode(&s(&["--query", "bar"])), None);
-        assert_eq!(monitor_mode(&s(&["--monitor"])), Some(MonitorMode::All));
-        assert_eq!(
-            monitor_mode(&s(&["--monitor", "events"])),
-            Some(MonitorMode::Events)
-        );
-        assert_eq!(
-            monitor_mode(&s(&["--monitor", "stats"])),
-            Some(MonitorMode::Stats)
-        );
-        assert_eq!(
-            monitor_mode(&s(&["--monitor", "all"])),
-            Some(MonitorMode::All)
-        );
-    }
-
-    #[test]
     fn json_compaction() {
         assert_eq!(
             compact_json("{\n\t\"a b\": \"x\\\" y\",\n\t\"c\": [1, 2]\n}\n"),
@@ -678,5 +792,196 @@ mod tests {
     fn lua_config_detection() {
         assert!(is_lua_config(Path::new("/a/init.lua")));
         assert!(!is_lua_config(Path::new("/a/mbarrc")));
+    }
+
+    // ------------------------------------------------------------ driver harness
+
+    use mbar_core::platform::HeadlessResources;
+    use std::sync::Mutex;
+
+    fn driver() -> (Driver, HeadlessResources) {
+        let post: Post = Arc::new(|_| {});
+        let cfg = DriverConfig {
+            bar_name: "mbar".into(),
+            home: "/nonexistent".into(),
+            config_path: None,
+            base_env: Vec::new(),
+        };
+        let mut d = Driver::new(cfg, post, Arc::new(AtomicBool::new(false)));
+        let mut res = HeadlessResources {
+            now: Instant::now(),
+            ..HeadlessResources::default()
+        };
+        d.start(&mut res);
+        (d, res)
+    }
+
+    /// Sends one request; returns its reply (callback transport).
+    fn req(d: &mut Driver, res: &mut HeadlessResources, args: &[&str]) -> Option<String> {
+        let out = Arc::new(Mutex::new(None));
+        let out2 = out.clone();
+        let responder = Responder::Callback(Box::new(move |t| *out2.lock().unwrap() = Some(t)));
+        d.handle_event(
+            Event::Request {
+                args: s(args),
+                responder,
+            },
+            res,
+        );
+        let _ = d.poll(res);
+        let r = out.lock().unwrap().take();
+        r
+    }
+
+    /// Sends one request over a socket pair; returns the client end.
+    fn req_socket(d: &mut Driver, res: &mut HeadlessResources, args: &[&str]) -> UnixStream {
+        let (server, client) = UnixStream::pair().unwrap();
+        d.handle_event(
+            Event::Request {
+                args: s(args),
+                responder: Responder::Socket(server),
+            },
+            res,
+        );
+        let _ = d.poll(res);
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        client
+    }
+
+    fn read_text(c: &mut UnixStream) -> std::io::Result<String> {
+        mbar_ipc::socket::read_frame(c).map(|f| String::from_utf8_lossy(&f).into_owned())
+    }
+
+    // ------------------------------------------------------------ review regressions
+
+    /// CLI-1: a shebang-less (stock) rc runs with bash, not `sh` (dash on Linux).
+    #[test]
+    fn shebang_less_config_runs_with_bash() {
+        let dir = std::env::temp_dir().join(format!("mbar-cfgcmd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = dir.join("sketchybarrc");
+        std::fs::write(&plain, "arr=( a b )\n").unwrap();
+        let bang = dir.join("mbarrc");
+        std::fs::write(&bang, "#!/bin/sh\necho hi\n").unwrap();
+        let cmd = config_command(&plain);
+        assert!(cmd.contains("exec bash '"), "{cmd}");
+        assert_eq!(
+            config_command(&bang),
+            scripts::shell_quote(&bang.to_string_lossy())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// PERF-11: render/animation deadlines do not feed `Input::Timer`; only the routine
+    /// clock does.
+    #[test]
+    fn no_spurious_timer_per_frame() {
+        let (mut d, mut res) = driver();
+        req(&mut d, &mut res, &["--add", "item", "a", "left"]).unwrap();
+        req(
+            &mut d,
+            &mut res,
+            &["--animate", "linear", "30", "--set", "a", "y_offset=10"],
+        )
+        .unwrap();
+        let mut frames = 0;
+        for _ in 0..30 {
+            res.now += Duration::from_millis(16);
+            if d.poll(&mut res).is_some() {
+                frames += 1;
+            }
+        }
+        assert!(frames > 10, "animation produced {frames} frames");
+        assert_eq!(d.timer_inputs, 0, "no routine tick was due (480 ms)");
+        // The routine clock still fires once per second.
+        res.now += Duration::from_millis(600);
+        let _ = d.poll(&mut res);
+        assert_eq!(d.timer_inputs, 1);
+    }
+
+    /// F1: `mbar.delay` with a delay `Instant` cannot represent must not panic.
+    #[test]
+    fn huge_lua_delay_does_not_panic() {
+        let (mut d, mut res) = driver();
+        {
+            let mut host = LuaHost {
+                d: &mut d,
+                res: &mut res,
+            };
+            host.schedule(Duration::MAX, 1);
+            host.schedule(Duration::from_secs_f64(1e19), 2);
+            host.schedule(Duration::from_millis(5), 3);
+        }
+        assert_eq!(d.lua_timers.len(), 1);
+        assert_eq!(d.lua_timers[0].2, 3);
+    }
+
+    /// F9: only a `--monitor` the runtime executed starts a stream; anything else gets a
+    /// normal reply and the connection closes.
+    #[test]
+    fn monitor_detected_by_runtime_not_argv() {
+        let (mut d, mut res) = driver();
+        req(&mut d, &mut res, &["--add", "item", "a", "left"]).unwrap();
+        // An empty argument ends the message (`cli.md` §3.1): `--monitor` never runs.
+        let mut c = req_socket(
+            &mut d,
+            &mut res,
+            &["--set", "a", "label=x", "", "--monitor"],
+        );
+        assert_eq!(read_text(&mut c).unwrap(), "");
+        assert!(read_text(&mut c).is_err(), "connection must close");
+        assert!(d.monitors.is_empty());
+        // Output of earlier commands is the first frame instead of being dropped.
+        let mut c = req_socket(&mut d, &mut res, &["--query", "a", "--monitor", "events"]);
+        let first = read_text(&mut c).unwrap();
+        assert!(first.contains("\"name\": \"a\""), "{first}");
+        assert_eq!(d.monitors.len(), 1);
+        // `--monitor` without a streaming transport is an error, and leaves no stream on.
+        let r = req(&mut d, &mut res, &["--monitor", "stats"]).unwrap();
+        assert!(r.starts_with("[!] Monitor"), "{r}");
+        assert_eq!(d.monitors.len(), 1);
+    }
+
+    /// PERF-2: a `--monitor` subscriber that stops reading never blocks the main loop.
+    #[test]
+    fn stalled_monitor_does_not_block() {
+        let (mut d, mut res) = driver();
+        req(
+            &mut d,
+            &mut res,
+            &[
+                "--add",
+                "event",
+                "e",
+                "--add",
+                "item",
+                "a",
+                "left",
+                "--subscribe",
+                "a",
+                "e",
+            ],
+        )
+        .unwrap();
+        // Two subscribers that read the acknowledgement and then nothing.
+        let mut stalled = Vec::new();
+        for _ in 0..2 {
+            let mut c = req_socket(&mut d, &mut res, &["--monitor", "events"]);
+            assert_eq!(read_text(&mut c).unwrap(), "");
+            stalled.push(c);
+        }
+        let info = format!("INFO={}", "x".repeat(8000));
+        let mut worst = Duration::ZERO;
+        for _ in 0..400 {
+            let t = Instant::now();
+            req(&mut d, &mut res, &["--trigger", "e", &info]).unwrap();
+            worst = worst.max(t.elapsed());
+        }
+        assert!(
+            worst < Duration::from_millis(500),
+            "worst request {worst:?}"
+        );
     }
 }

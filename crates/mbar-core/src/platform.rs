@@ -414,6 +414,15 @@ pub enum Effect {
     Log(String),
     /// One line for `--monitor` subscribers (extension).
     Monitor(String),
+    /// The message `reply` executed `--monitor` (extension): instead of a plain [`Effect::Reply`],
+    /// `text` (the output of the message, usually empty) is the first frame of a stream that
+    /// stays open for `mode`'s lines. Emitted only when the runtime actually ran the command,
+    /// so platforms never have to guess from the raw arguments.
+    MonitorStart {
+        reply: ReplyToken,
+        mode: crate::command::MonitorMode,
+        text: String,
+    },
 }
 
 /// Window level constants (`bar.md` §3.7).
@@ -455,6 +464,19 @@ pub struct FrameOutput {
     pub windows: Vec<WindowUpdate>,
     /// Windows to close (popup closed, bar removed).
     pub closed: Vec<WindowKey>,
+    /// Non-sticky windows to move to another space (`bar_change_space`, `bar.md` §6.4):
+    /// after a space change with `--bar sticky=off`, the bar window of each display whose
+    /// current space changed and the popups open on that bar. Applied after `windows`.
+    pub space_moves: Vec<SpaceMove>,
+}
+
+/// One `window_send_to_space(dsid)` (`SLSMoveWindowsToManagedSpace`), see
+/// [`FrameOutput::space_moves`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpaceMove {
+    pub key: WindowKey,
+    /// Target space id (`DisplayInfo::current_space` / `SpaceInfo::id`).
+    pub dsid: u64,
 }
 
 /// Deterministic platform for Linux and tests (`DESIGN-CORE.md` "Testing"):

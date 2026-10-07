@@ -35,6 +35,9 @@
 mod api;
 mod json;
 mod props;
+mod shell;
+
+pub use shell::SYNC_SHELL_ENV;
 
 use std::cell::RefCell;
 use std::fmt;
@@ -145,11 +148,22 @@ impl LuaEngine {
         let lua = Lua::new();
         let state = Rc::new(RefCell::new(api::State::default()));
         api::install(&lua, &state)?;
+        shell::install(&lua, &state)?;
         Ok(LuaEngine {
             lua,
             state,
             stats: LuaStats::default(),
         })
+    }
+
+    /// Names the bar (its IPC name) this engine runs in. Shell commands started by
+    /// a blocking `io.popen` / `os.execute` of this engine then get
+    /// [`SYNC_SHELL_ENV`]`=<bar>` in their environment, and the `mbar` client
+    /// refuses to message that bar from them: the daemon could not answer before
+    /// the Lua call returns, so the client would only time out (a self-deadlock).
+    /// Without a name (the default) the commands run unchanged.
+    pub fn set_bar_name(&mut self, bar: Option<&str>) {
+        self.state.borrow_mut().shell_marker = bar.map(str::to_owned);
     }
 
     /// Runs the config file at `path` (`init.lua`). Sets the global `CONFIG_DIR`
@@ -307,7 +321,13 @@ impl LuaEngine {
                 Ok(())
             })?;
             let schedule = scope.create_function(move |_, (secs, id): (f64, u64)| {
-                let delay = Duration::try_from_secs_f64(secs).unwrap_or(Duration::ZERO);
+                // `mbar.delay` passes a finite, non-negative value. One too large for a
+                // `Duration` means "never", not "now".
+                let delay = Duration::try_from_secs_f64(secs).unwrap_or(if secs > 0.0 {
+                    Duration::MAX
+                } else {
+                    Duration::ZERO
+                });
                 host.borrow_mut().schedule(delay, id);
                 Ok(())
             })?;

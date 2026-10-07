@@ -82,8 +82,9 @@ impl Default for BarProps {
 }
 
 /// `display=` value → pattern (`bar.md` §2.5): `all` → all, `main` → 0 (both overwrite),
-/// `n` → `|= 1 << (n-1)`. Entries `0`, non-numeric or > 32 are rejected (mbar, D9) and
-/// returned for an error response.
+/// `n` → `|= 1 << (n-1)`. Entries `0` or non-numeric (shift `-1`, UB in C) are silently
+/// ignored (`cli.md` §5 `display`); entries > 32 are skipped and returned for an error
+/// response (D9).
 pub fn parse_display_pattern(v: &str) -> (u32, Vec<String>) {
     let mut pattern = 0u32;
     let mut bad = Vec::new();
@@ -93,7 +94,9 @@ pub fn parse_display_pattern(v: &str) -> (u32, Vec<String>) {
             "main" => pattern = DISPLAY_MAIN,
             _ => {
                 let n = value::parse_u32(entry);
-                if n == 0 || n > 32 {
+                if n == 0 {
+                    // Ignored without a reply, so the client exits 0 like SketchyBar.
+                } else if n > 32 {
                     bad.push(entry.to_string());
                 } else {
                     pattern |= 1u32 << (n - 1);
@@ -437,7 +440,9 @@ mod tests {
         assert!(b.set_prop("display", "", &mut cx).unwrap());
         assert_eq!(b.displays, DISPLAY_MAIN);
         assert_eq!(parse_display_pattern("2,main").0, 0);
-        assert_eq!(parse_display_pattern("0").1, vec!["0".to_string()]);
+        assert_eq!(parse_display_pattern("0"), (0, vec![]));
+        assert_eq!(parse_display_pattern("abc,2"), (0b10, vec![]));
+        assert_eq!(parse_display_pattern("33,1"), (1, vec!["33".to_string()]));
         assert!(!b.set_prop("hidden", "toggle", &mut cx).unwrap());
         assert_eq!(
             cx.requests.last(),

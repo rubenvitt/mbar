@@ -912,6 +912,7 @@ S}
 `token_to_uint32t`), zero-filled f32 ring buffer, `cursor = 0`. **Quirk:** `width = 0` makes
 every `--push` divide by zero (crash); mbar should reject/ignore pushes when width is 0.
 `--clone` of a graph shares the sample buffer pointer (memcpy; quirk — mbar deep-copies).
+The width has no upper bound (a huge width fails the `malloc`); mbar clamps it to 4096 (D22).
 
 | field | default | property |
 |---|---|---|

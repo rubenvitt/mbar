@@ -33,10 +33,15 @@ pub(crate) struct State {
     /// Open `mbar.animate` blocks (innermost last).
     pub(crate) anim: Vec<AnimFrame>,
     next_id: u64,
-    /// Item name -> handler id of its `script=lua:<id>`.
+    /// Item name (or `/regex/` selector) -> handler id of its `script=lua:<id>`.
     item_handlers: HashMap<String, u64>,
+    /// Item name (or `/regex/` selector) -> handler id of its `click_script=lua:<id>`.
+    click_handlers: HashMap<String, u64>,
     anon: u64,
     batch_depth: u32,
+    /// IPC bar name exported to blocking `io.popen` / `os.execute` commands
+    /// (see `crate::shell`).
+    pub(crate) shell_marker: Option<String>,
 }
 
 pub(crate) struct AnimFrame {
@@ -129,25 +134,88 @@ fn is_regex(name: &str) -> bool {
     name.len() > 1 && name.starts_with('/') && name.ends_with('/')
 }
 
-/// Handler id of item `name`, created on first use. `true` when it is new.
-fn item_handler(st: &Shared, name: &str) -> (u64, bool) {
-    if is_regex(name) {
-        return (new_id(st), true);
-    }
-    let existing = st.borrow().item_handlers.get(name).copied();
-    if let Some(id) = existing {
-        return (id, false);
-    }
-    let id = new_id(st);
-    st.borrow_mut().item_handlers.insert(name.to_string(), id);
-    (id, true)
+/// The per-item handler slots: `script=lua:<id>` and `click_script=lua:<id>`.
+#[derive(Clone, Copy)]
+enum Slot {
+    Script,
+    Click,
 }
 
-fn forget_item(lua: &Lua, st: &Shared, name: &str) -> Result<()> {
-    let id = st.borrow_mut().item_handlers.remove(name);
+impl State {
+    fn slot(&mut self, slot: Slot) -> &mut HashMap<String, u64> {
+        match slot {
+            Slot::Script => &mut self.item_handlers,
+            Slot::Click => &mut self.click_handlers,
+        }
+    }
+}
+
+/// Handler id of the `slot` of item (or `/regex/` selector) `name`, created on
+/// first use and reused afterwards, so replacing a handler function never
+/// allocates a new registry entry.
+fn item_handler(st: &Shared, slot: Slot, name: &str) -> u64 {
+    let existing = st.borrow_mut().slot(slot).get(name).copied();
+    if let Some(id) = existing {
+        return id;
+    }
+    let id = new_id(st);
+    st.borrow_mut().slot(slot).insert(name.to_string(), id);
+    id
+}
+
+/// Drops the `slot` handler of `name` (mapping and registry entry).
+fn forget_slot(lua: &Lua, st: &Shared, slot: Slot, name: &str) -> Result<()> {
+    let id = st.borrow_mut().slot(slot).remove(name);
     if let Some(id) = id {
         let handlers: Table = lua.named_registry_value(KEY_HANDLERS)?;
         handlers.raw_set(id, Value::Nil)?;
+    }
+    Ok(())
+}
+
+/// Drops every Lua handler of `name`: the item is gone (or about to be
+/// re-created), so a later `subscribe` must start from a fresh handler.
+fn forget_item(lua: &Lua, st: &Shared, name: &str) -> Result<()> {
+    forget_slot(lua, st, Slot::Script, name)?;
+    forget_slot(lua, st, Slot::Click, name)
+}
+
+/// Moves the handlers of `old` to `new` after a successful `--rename`.
+fn rename_item(lua: &Lua, st: &Shared, old: &str, new: &str) -> Result<()> {
+    // `new` did not exist in the daemon, so anything still mapped to it is stale.
+    forget_item(lua, st, new)?;
+    let mut s = st.borrow_mut();
+    for slot in [Slot::Script, Slot::Click] {
+        if let Some(id) = s.slot(slot).remove(old) {
+            s.slot(slot).insert(new.to_string(), id);
+        }
+    }
+    Ok(())
+}
+
+/// Keeps the handler maps in sync with `--remove` / `--rename` sent verbatim
+/// through `mbar.command`. Regex removes cannot be resolved here; `mbar.add`
+/// and `subscribe` cover the names they removed.
+fn track_command(lua: &Lua, st: &Shared, argv: &[String], resp: &str) -> Result<()> {
+    let mut i = 0;
+    while i < argv.len() {
+        match argv[i].as_str() {
+            "--remove" if i + 1 < argv.len() => {
+                if !is_regex(&argv[i + 1]) {
+                    forget_item(lua, st, &argv[i + 1])?;
+                }
+                i += 2;
+            }
+            "--rename" if i + 2 < argv.len() => {
+                let (old, new) = (&argv[i + 1], &argv[i + 2]);
+                let failed = format!("Failed to rename item: {old} -> {new}\n");
+                if !new.is_empty() && !resp.contains(&failed) {
+                    rename_item(lua, st, old, new)?;
+                }
+                i += 3;
+            }
+            _ => i += 1,
+        }
     }
     Ok(())
 }
@@ -222,7 +290,11 @@ fn events_of(v: &Value) -> Result<Vec<String>> {
 }
 
 /// Resolver for functions inside property tables: `script = fn` becomes the
-/// item's Lua handler (catch-all), `click_script = fn` gets its own handler.
+/// item's Lua handler (catch-all), `click_script = fn` the item's click handler.
+/// Both reuse the item's (or regex selector's) handler id, so replacing them
+/// from a handler does not grow the registry. `mbar.bar` / `mbar.default`
+/// (`item == None`) need a new id per call: items created from an earlier
+/// default keep referring to the earlier function.
 fn resolver<'a>(
     lua: &'a Lua,
     st: &'a Shared,
@@ -230,8 +302,9 @@ fn resolver<'a>(
 ) -> impl FnMut(&str, Function) -> Result<String> + 'a {
     move |key, f| {
         let id = match (key, item) {
-            ("script", Some(name)) => item_handler(st, name).0,
-            ("script", None) | ("click_script", _) => new_id(st),
+            ("script", Some(name)) => item_handler(st, Slot::Script, name),
+            ("click_script", Some(name)) => item_handler(st, Slot::Click, name),
+            ("script" | "click_script", None) => new_id(st),
             _ => {
                 return err(format!(
                 "mbar: functions are only allowed for 'script' and 'click_script', not for '{key}'"
@@ -246,12 +319,15 @@ fn resolver<'a>(
 /// Flattens item properties, registering function values as handlers.
 fn item_tokens(lua: &Lua, st: &Shared, name: &str, props: &Table) -> Result<Vec<String>> {
     let tokens = props::flatten(props, &mut resolver(lua, st, Some(name)))?;
-    let plain_script = tokens
-        .iter()
-        .any(|t| t.starts_with("script=") && !t.starts_with(&format!("script={SCRIPT_PREFIX}")));
-    if plain_script {
-        // A shell script replaces the item's Lua handler.
-        forget_item(lua, st, name)?;
+    for (key, slot) in [("script=", Slot::Script), ("click_script=", Slot::Click)] {
+        let plain = tokens.iter().any(|t| {
+            t.strip_prefix(key)
+                .is_some_and(|v| !v.starts_with(SCRIPT_PREFIX))
+        });
+        if plain {
+            // A shell script replaces the item's Lua handler.
+            forget_slot(lua, st, slot, name)?;
+        }
     }
     Ok(tokens)
 }
@@ -323,6 +399,10 @@ fn add(lua: &Lua, st: &Shared, args: Variadic<Value>) -> Result<Value> {
             format!("__mbar.{ty}.{n}")
         }
     };
+    // A (re-)created item starts without Lua handlers. Removes by regex, through
+    // `mbar.command` or from a shell leave stale mappings behind, and reusing
+    // them would skip `script=lua:<id>` or share handlers with a renamed item.
+    forget_item(lua, st, &name)?;
 
     if ty == "bracket" {
         let mut members = Vec::new();
@@ -399,7 +479,7 @@ fn subscribe(
         (ev, Some(f)) => (events_of(&ev)?, f),
         (_, None) => return err("mbar.subscribe(name, events, fn): handler function required"),
     };
-    let (id, new) = item_handler(st, &name);
+    let id = item_handler(st, Slot::Script, &name);
     let entry = handler_entry(lua, id)?;
     if events.is_empty() || events.iter().any(|e| e == "*") {
         entry.raw_set("any", f.clone())?;
@@ -408,16 +488,17 @@ fn subscribe(
     for e in events.iter().filter(|e| *e != "*") {
         by_event.raw_set(e.as_str(), f.clone())?;
     }
-    if new {
-        emit(
-            st,
-            vec![
-                "--set".into(),
-                name.clone(),
-                format!("script={SCRIPT_PREFIX}{id}"),
-            ],
-        )?;
-    }
+    // Always (re)assert the script: setting the same value is a no-op in the
+    // daemon (item.md §3), and the item may have been removed and re-added, or
+    // had its script replaced, behind the engine's back.
+    emit(
+        st,
+        vec![
+            "--set".into(),
+            name.clone(),
+            format!("script={SCRIPT_PREFIX}{id}"),
+        ],
+    )?;
     let real: Vec<String> = events
         .into_iter()
         .filter(|e| !PSEUDO_EVENTS.contains(&e.as_str()))
@@ -731,7 +812,9 @@ pub(crate) fn install(lua: &Lua, st: &Shared) -> Result<Table> {
             return err("mbar.command: empty argument");
         }
         flush(lua, st)?;
-        host_command(lua, argv)
+        let resp = host_command(lua, argv.clone())?;
+        track_command(lua, st, &argv, &resp)?;
+        Ok(resp)
     })?;
     m.raw_set("event_loop", lua.create_function(|_, ()| Ok(()))?)?;
 

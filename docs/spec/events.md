@@ -97,8 +97,10 @@ Consequences that mbar must preserve:
 - Quirk Q7: `frozen` is a plain boolean, not a counter. Any nested `freeze()/unfreeze()` pair (e.g.
   `bar_manager_handle_space_change`, `bar_manager_display_changed`, `bar_manager_animator_refresh` reached
   synchronously from inside a mach batch via `--trigger space_change`, `--update`, `--reload`) **clears the batch's
-  freeze**, so later commands in that batch refresh immediately. mbar may implement a proper scoped freeze; the only
-  observable difference is intermediate redraws.
+  freeze**, so later commands in that batch refresh immediately. The difference is observable beyond intermediate
+  redraws: the refresh sets the `associated_bar` bits of items added earlier in the batch, so the forced events of
+  `--update` steps 2–8 (§8.2) and events triggered later in the batch already see them as shown
+  (`updates=when_shown`). mbar keeps the plain bool (D14).
 - `windows_freeze()/windows_unfreeze()` (`window.c`) is the separate SkyLight transaction batching layer
   (`SLSDisableUpdate` + `SLSTransactionCreate` … `SLSTransactionCommit` + `SLSReenableUpdate`; on macOS 26 no
   disable/reenable). Every handled event ends with `windows_unfreeze()`.
@@ -1317,7 +1319,7 @@ These animations are created outside a batch and stay unlocked until the next ba
 | Q4 | `setenv` in a vfork child likely mutates the daemon environ → vars of earlier scripts leak into later ones | `helpers.h:fork_exec` | see Open Question 1 |
 | Q5 | With separate Spaces off, active display is cursor-based and only re-evaluated at the start of the next event | `event_execute` | yes (or poll on cursor move; event still only on change) |
 | Q6 | Leaving the bar/popup to nowhere sends `mouse.exited` to **every** subscribed item (no `mouse_over` check) | `event_mouse_exited` | yes |
-| Q7 | `frozen` is a boolean; nested freeze/unfreeze clears the batch freeze | `bar_manager_freeze` | no (only intermediate redraws differ) |
+| Q7 | `frozen` is a boolean; nested freeze/unfreeze clears the batch freeze | `bar_manager_freeze` | yes (`is_shown` of items added earlier in the batch depends on it) |
 | Q8 | Marquee start inside a batch resets `--animate` for the rest of the batch | `text_animate_scroll` | optional |
 | Q9 | `--animate` duration via `strtoul(…,0)`: hex/octal accepted, negative wraps to ~4.29e9 frames | `handle_message_mach` | parse identically |
 | Q10 | Animation key is (target, setter): `color` vs `color.hex` vs `color.alpha` are independent animations | `animation.h` | yes |

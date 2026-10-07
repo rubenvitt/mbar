@@ -532,12 +532,13 @@ impl BarItem {
         let mut right = 0.0f64;
         for s in shadows {
             if s.enabled {
-                left += (-s.offset.x as f64).max(0.0);
+                left += (-(s.offset.x as f64)).max(0.0);
                 right += (s.offset.x as f64).max(0.0);
             }
         }
         if self.background.enabled {
-            left += (-self.background.x_offset as f64).max(0.0);
+            // Widen before negating: `-x as f64` negates in i32 and overflows for i32::MIN.
+            left += (-(self.background.x_offset as f64)).max(0.0);
             right += (self.background.x_offset as f64).max(0.0);
         }
         (left as i32, right as i32)
