@@ -1,0 +1,24 @@
+[package]
+name = "mbar"
+description = "mbar: SketchyBar-compatible status bar (client and daemon binary)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "mbar"
+path = "src/main.rs"
+
+[dependencies]
+mbar-core = { workspace = true }
+mbar-ipc = { workspace = true }
+mbar-lua = { workspace = true }
+libc = { workspace = true }
+log = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mbar-macos = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

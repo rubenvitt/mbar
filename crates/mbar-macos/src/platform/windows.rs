@@ -1,0 +1,349 @@
+//! [`WindowManager`]: reconciles the core's [`FrameOutput`] with [`BarWindow`]s.
+//!
+//! * One window per [`WindowKey`]; created on first update, destroyed when listed in
+//!   `closed`. Frame, level, sticky, shadow and blur are applied only when they change
+//!   (the setters are no-ops otherwise).
+//! * Only windows in the frame output are rendered; the [`DrawList`] is reused across
+//!   frames. The last scene of each window is kept (moved out of the update, no copy) so
+//!   a window can be re-rendered after a backing-scale change without a new scene.
+//! * Popups (`order > 0`) are ordered to the front of their level whenever a window was
+//!   (re)shown, so they stay above bars sharing the level.
+//! * `BlurRegion`s become borderless, click-through child windows (background blur through
+//!   SkyLight) ordered directly below their parent.
+//! * View mouse events are forwarded to the platform through a [`ViewMouseSink`] with the
+//!   window's key.
+//! * `space_moves` (`bar_change_space`, `bar.md` §6.4: after a space change with
+//!   `--bar sticky=off`) send a non-sticky window and its blur children to the display's
+//!   new current space with `SLSMoveWindowsToManagedSpace`. Sticky windows join every space
+//!   through `canJoinAllSpaces` and are never moved; non-sticky ones never get that flag.
+//! * [`WindowManager::for_each_text_key`] reports the text keys of the kept scenes, so text
+//!   cache pruning never drops a line a re-render still needs.
+
+use super::convert::{self, blur_regions, scene_to_drawlist, BlurSpec};
+use super::resources::MacResources;
+use crate::gfx::scene::{DrawList, Rect as GRect};
+use crate::gfx::window::{BarWindow, MouseEvent};
+use crate::sys::spaces;
+use mbar_core::geometry::{Point, Rect};
+use mbar_core::layout::NIRVANA;
+use mbar_core::platform::{FrameOutput, SpaceMove, TextKey, WindowKey, WindowUpdate};
+use mbar_core::scene::{Primitive, Scene};
+use objc2::MainThreadMarker;
+use std::collections::BTreeMap;
+use std::rc::Rc;
+
+/// Receives mouse events of bar/popup views (main thread).
+pub type ViewMouseSink = Rc<dyn Fn(WindowKey, MouseEvent)>;
+
+fn grect(r: &Rect) -> GRect {
+    GRect::new(r.x, r.y, r.width, r.height)
+}
+
+struct BlurChild {
+    win: BarWindow,
+    radius: u32,
+}
+
+struct Managed {
+    win: BarWindow,
+    scene: Scene,
+    order: u32,
+    shown: bool,
+    blur: Option<u32>,
+    children: Vec<BlurChild>,
+}
+
+/// Owner of every bar/popup window.
+pub struct WindowManager {
+    mtm: MainThreadMarker,
+    windows: BTreeMap<WindowKey, Managed>,
+    list: DrawList,
+    empty: DrawList,
+    blurs: Vec<BlurSpec>,
+    mouse: ViewMouseSink,
+    displays_changed: bool,
+}
+
+impl WindowManager {
+    pub fn new(mtm: MainThreadMarker, mouse: ViewMouseSink) -> WindowManager {
+        WindowManager {
+            mtm,
+            windows: BTreeMap::new(),
+            list: DrawList::new(),
+            empty: DrawList::new(),
+            blurs: Vec::new(),
+            mouse,
+            displays_changed: false,
+        }
+    }
+
+    /// Displays were reconfigured: re-render windows whose backing scale changed on the
+    /// next [`apply`](Self::apply).
+    pub fn mark_displays_changed(&mut self) {
+        self.displays_changed = true;
+    }
+
+    /// Number of open windows (diagnostics).
+    pub fn len(&self) -> usize {
+        self.windows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.windows.is_empty()
+    }
+
+    /// Global frame (top-left points) of `key`'s window.
+    pub fn frame(&self, key: WindowKey) -> Option<Rect> {
+        self.windows.get(&key).map(|m| {
+            let f = m.win.frame();
+            Rect::new(f.x, f.y, f.width, f.height)
+        })
+    }
+
+    /// Global origin of `key`'s window (view → global mouse conversion).
+    pub fn origin(&self, key: WindowKey) -> Option<Point> {
+        self.frame(key).map(|f| Point::new(f.x, f.y))
+    }
+
+    /// The key of the window with WindowServer number `n`.
+    pub fn key_for_window_number(&self, n: i64) -> Option<WindowKey> {
+        if n <= 0 {
+            return None;
+        }
+        self.windows
+            .iter()
+            .find(|(_, m)| m.win.window_number() as i64 == n)
+            .map(|(k, _)| *k)
+    }
+
+    /// The topmost of our windows containing global point `p` (popups first).
+    pub fn key_at(&self, p: Point) -> Option<WindowKey> {
+        let hit = |want_popup: bool| {
+            self.windows
+                .iter()
+                .filter(|(k, _)| matches!(k, WindowKey::Popup(_)) == want_popup)
+                .find(|(_, m)| {
+                    let f = m.win.frame();
+                    p.x >= f.x && p.x < f.x + f.width && p.y >= f.y && p.y < f.y + f.height
+                })
+                .map(|(k, _)| *k)
+        };
+        hit(true).or_else(|| hit(false))
+    }
+
+    /// Applies one frame: closes, creates/updates and renders windows.
+    pub fn apply(&mut self, frame: FrameOutput, res: &mut MacResources) {
+        for key in &frame.closed {
+            self.windows.remove(key);
+        }
+        let mut reorder = false;
+        for update in frame.windows {
+            reorder |= self.update(update, res);
+        }
+        if std::mem::take(&mut self.displays_changed) {
+            self.redraw_stale(res);
+            reorder = true;
+        }
+        if reorder {
+            self.reorder();
+        }
+        self.move_to_spaces(&frame.space_moves);
+    }
+
+    /// `bar_change_space` / `popup_change_space`: every listed non-sticky window (with its
+    /// blur children) goes to space `dsid`, one SkyLight call per target space.
+    fn move_to_spaces(&self, moves: &[SpaceMove]) {
+        if moves.is_empty() {
+            return;
+        }
+        let mut targets: Vec<(u64, Vec<u32>)> = Vec::new();
+        for mv in moves {
+            let Some(m) = self.windows.get(&mv.key) else {
+                continue;
+            };
+            if m.win.is_sticky() {
+                continue;
+            }
+            let wids = std::iter::once(m.win.window_number())
+                .chain(m.children.iter().map(|c| c.win.window_number()))
+                .filter(|n| *n > 0)
+                .map(|n| n as u32);
+            match targets.iter_mut().find(|(d, _)| *d == mv.dsid) {
+                Some((_, list)) => list.extend(wids),
+                None => targets.push((mv.dsid, wids.collect())),
+            }
+        }
+        for (dsid, wids) in targets {
+            if !spaces::move_windows_to_space(&wids, dsid) {
+                log::debug!("cannot move {} window(s) to space {dsid}", wids.len());
+            }
+        }
+        // `window_send_to_space`: a window parked at nirvana is put back there
+        // (`SLSMoveWindow(cid, wid, &g_nirvana)`), the space move may have placed it on
+        // screen.
+        for mv in moves {
+            let Some(m) = self.windows.get(&mv.key) else {
+                continue;
+            };
+            let f = m.win.frame();
+            if m.win.is_sticky() || f.x != NIRVANA.x || f.y != NIRVANA.y {
+                continue;
+            }
+            m.win.reapply_frame();
+            for c in &m.children {
+                c.win.reapply_frame();
+            }
+        }
+    }
+
+    /// Calls `f` for every text key referenced by the scenes kept for re-rendering.
+    pub fn for_each_text_key(&self, f: &mut dyn FnMut(TextKey)) {
+        for m in self.windows.values() {
+            for p in &m.scene.primitives {
+                if let Primitive::Text { key, .. } = p {
+                    f(*key);
+                }
+            }
+        }
+    }
+
+    /// Creates/updates and renders one window. Returns whether it was newly shown.
+    fn update(&mut self, u: WindowUpdate, res: &mut MacResources) -> bool {
+        let mtm = self.mtm;
+        let key = u.key;
+        let m = match self.windows.entry(key) {
+            std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::btree_map::Entry::Vacant(v) => {
+                let win = BarWindow::new(mtm, &res.renderer, grect(&u.frame));
+                let sink = self.mouse.clone();
+                win.set_mouse_handler(Some(Box::new(move |ev| sink(key, ev))));
+                v.insert(Managed {
+                    win,
+                    scene: Scene::default(),
+                    order: u.order,
+                    shown: false,
+                    blur: None,
+                    children: Vec::new(),
+                })
+            }
+        };
+        m.win.set_frame(grect(&u.frame));
+        m.win.set_level(convert::window_level(u.level));
+        m.win.set_sticky(u.sticky);
+        m.win.set_shadow(u.shadow);
+        m.order = u.order;
+        m.scene = u.scene;
+        res.text.system.set_font_smoothing(u.font_smoothing);
+
+        let mut look = res.lookup();
+        scene_to_drawlist(&m.scene, &mut self.list, &mut look);
+        m.win.render(
+            &self.list,
+            &mut res.renderer,
+            &mut res.text.system,
+            &res.images.store,
+        );
+        let newly_shown = !m.shown;
+        if newly_shown {
+            m.win.show();
+            m.shown = true;
+        }
+        if m.blur != Some(u.blur_radius) && (m.win.set_blur(u.blur_radius) || u.blur_radius == 0) {
+            m.blur = Some(u.blur_radius);
+        }
+
+        // Blur child windows for the scene's BlurRegions.
+        self.blurs.clear();
+        self.blurs.extend(blur_regions(&m.scene));
+        let parent = m.win.frame();
+        let level = m.win.level();
+        m.children.truncate(self.blurs.len());
+        let mut created = false;
+        for (i, spec) in self.blurs.iter().enumerate() {
+            let global = GRect::new(
+                parent.x + spec.rect.x,
+                parent.y + spec.rect.y,
+                spec.rect.width,
+                spec.rect.height,
+            );
+            if i == m.children.len() {
+                let mut win = BarWindow::new(mtm, &res.renderer, global);
+                win.set_ignores_mouse(true);
+                win.render(
+                    &self.empty,
+                    &mut res.renderer,
+                    &mut res.text.system,
+                    &res.images.store,
+                );
+                win.show();
+                m.children.push(BlurChild { win, radius: 0 });
+                created = true;
+            }
+            let c = &mut m.children[i];
+            c.win.set_frame(global);
+            c.win.set_level(level);
+            c.win.set_sticky(u.sticky);
+            c.win.set_corner_radius(spec.corner_radius);
+            if c.radius != spec.radius && c.win.set_blur(spec.radius) {
+                c.radius = spec.radius;
+            }
+        }
+        if created || newly_shown {
+            let n = m.win.window_number();
+            for c in &m.children {
+                c.win.order_relative(false, n);
+            }
+        }
+        newly_shown || created
+    }
+
+    /// Re-renders windows whose backing scale differs from their last render.
+    fn redraw_stale(&mut self, res: &mut MacResources) {
+        for m in self.windows.values_mut() {
+            if !m.win.needs_redraw() {
+                continue;
+            }
+            let mut look = res.lookup();
+            scene_to_drawlist(&m.scene, &mut self.list, &mut look);
+            m.win.render(
+                &self.list,
+                &mut res.renderer,
+                &mut res.text.system,
+                &res.images.store,
+            );
+            for c in &mut m.children {
+                if c.win.needs_redraw() {
+                    c.win.render(
+                        &self.empty,
+                        &mut res.renderer,
+                        &mut res.text.system,
+                        &res.images.store,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Popups (and anything with `order > 0`) to the front of their level, in order.
+    fn reorder(&self) {
+        let mut ordered: Vec<(&u32, &Managed)> = self
+            .windows
+            .values()
+            .filter(|m| m.order > 0 && m.shown)
+            .map(|m| (&m.order, m))
+            .collect();
+        ordered.sort_by_key(|(o, _)| **o);
+        for (_, m) in ordered {
+            m.win.order_relative(true, 0);
+            let n = m.win.window_number();
+            for c in &m.children {
+                c.win.order_relative(false, n);
+            }
+        }
+    }
+
+    /// Closes every window.
+    pub fn close_all(&mut self) {
+        self.windows.clear();
+    }
+}

@@ -1,0 +1,33 @@
+[package]
+name = "mbar-macos"
+description = "macOS platform layer for mbar: windows, Metal renderer, CoreText, system events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mbar-core = { workspace = true }
+log = { workspace = true }
+libc = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-core-foundation = "0.3"
+objc2-core-graphics = "0.3"
+objc2-core-text = "0.3"
+objc2-quartz-core = "0.3"
+objc2-metal = "0.3"
+objc2-core-video = "0.3"
+objc2-image-io = "0.3"
+objc2-core-audio = "0.3"
+objc2-core-audio-types = "0.3"
+objc2-io-kit = "0.3"
+objc2-core-wlan = "0.3"
+objc2-application-services = "0.3"
+mach2 = "0.4"
