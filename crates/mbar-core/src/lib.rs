@@ -1,9 +1,6 @@
 //! Platform-independent core of mbar. See `docs/ARCHITECTURE.md`, `docs/DESIGN-CORE.md`
 //! and `docs/IMPLEMENTATION-PLAN.md` (work packages and ownership of every module).
 
-// TODO(skeleton): remove once WP-A..WP-D have replaced every `todo!()`; the skeleton has
-// many not-yet-called helpers and unused parameters by design.
-#![allow(dead_code, unused_variables, unused_imports, unreachable_code)]
 #![allow(clippy::write_with_newline)]
 
 pub mod animation;
