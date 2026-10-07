@@ -1,0 +1,10 @@
+[package]
+name = "mbar-app"
+description = "mbar app bundle logic: versions, Info.plist, appcast, update decisions, config lookup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde_json = { workspace = true }
