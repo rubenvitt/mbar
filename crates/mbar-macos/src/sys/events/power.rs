@@ -9,7 +9,7 @@ use objc2_io_kit::{
     IOPSGetProvidingPowerSourceType, IOPSNotificationCreateRunLoopSource,
 };
 use std::ffi::c_void;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Providing power source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +75,7 @@ pub fn battery_percent(current: i64, max: i64) -> u32 {
 struct State {
     sink: Option<Sink>,
     current: Option<PowerState>,
-    listeners: Vec<Box<dyn Fn() + Send + Sync>>,
+    listeners: Vec<Arc<dyn Fn() + Send + Sync>>,
     source: Option<SendSource>,
 }
 
@@ -138,7 +138,7 @@ pub fn battery() -> Option<BatteryInfo> {
 
 fn handle(force: bool) {
     let new = providing_power_source();
-    let (sink, listeners_post) = {
+    let (sink, listeners) = {
         let mut s = state();
         let post = match new {
             Some(n) if force || s.current != Some(n) => {
@@ -147,16 +147,13 @@ fn handle(force: bool) {
             }
             _ => false,
         };
-        (if post { s.sink.clone() } else { None }, !s.listeners.is_empty())
+        (if post { s.sink.clone() } else { None }, s.listeners.clone())
     };
     if let (Some(sink), Some(n)) = (sink, new) {
         sink(SysEvent::PowerSourceChange(n.as_str().to_string()));
     }
-    if listeners_post {
-        let s = state();
-        for l in &s.listeners {
-            l();
-        }
+    for l in listeners {
+        l();
     }
 }
 
@@ -190,7 +187,7 @@ pub fn start(sink: Option<Sink>) {
 
 /// Registers a callback run (on the main thread) after every IOPS change notification
 /// (battery percentage changes included). Used by the `battery` provider.
-pub fn add_change_listener(f: Box<dyn Fn() + Send + Sync>) {
+pub fn add_change_listener(f: Arc<dyn Fn() + Send + Sync>) {
     start(None);
     state().listeners.push(f);
 }
