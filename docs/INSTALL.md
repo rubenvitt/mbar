@@ -116,9 +116,9 @@ This fills in `packaging/dev.rubeen.mbar.plist`, writes it to
 `~/Library/LaunchAgents/dev.rubeen.mbar.plist`, and loads it with
 `launchctl bootstrap`. The agent:
 
-- uses the label `dev.rubeen.mbar`, the same label as the management UI's
-  "launch at login" switch, so the two never start two daemons. Turning the
-  switch on in the UI rewrites the file without the log settings.
+- uses the label `dev.rubeen.mbar`, the same label as mbar.app's login item,
+  so the two never start two daemons. The management UI no longer writes this
+  file; mbar.app's setup boots it out and removes it in favour of the login item.
 - starts at login (`RunAtLoad`) and restarts mbar if it crashes
   (`KeepAlive` → `SuccessfulExit=false`). `mbar --exit` exits with status 0, so
   it stays stopped.

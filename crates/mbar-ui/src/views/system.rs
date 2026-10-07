@@ -368,7 +368,10 @@ impl Render for SystemView {
             .unwrap_or_else(|| "~/Library/LaunchAgents/dev.rubeen.mbar.plist".into());
         let login = section("Launch at login", cx).child(setting_row(
             "Start mbar when you log in",
-            format!("Managed by setup; legacy launch agent: {login_path}"),
+            format!(
+                "Managed by setup; from a source build use `make install-agent` \
+                 (launch agent: {login_path})"
+            ),
             Switch::new("launch-at-login")
                 .checked(self.launch_agent)
                 .disabled(true)
