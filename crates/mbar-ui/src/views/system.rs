@@ -247,17 +247,33 @@ impl Render for SystemView {
             h_flex()
                 .gap_3()
                 .child(
-                    h_flex()
+                    v_flex()
                         .flex_1()
-                        .gap_2()
-                        .text_sm()
-                        .child(div().size_3().rounded_full().bg(color))
-                        .child(format!(
-                            "{} · bar name `{}` · socket {}",
-                            status_text(&self.status),
-                            self.shared.client.bar_name(),
-                            mbar_ipc::socket_path(self.shared.client.bar_name()).display()
-                        )),
+                        .min_w_0()
+                        .gap_1()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .text_sm()
+                                .child(div().size_3().flex_shrink_0().rounded_full().bg(color))
+                                .child(format!(
+                                    "{} · bar name `{}`",
+                                    status_text(&self.status),
+                                    self.shared.client.bar_name(),
+                                )),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(format!(
+                                    "Socket: {}",
+                                    mbar_ipc::socket_path(self.shared.client.bar_name()).display()
+                                )),
+                        ),
                 )
                 .child(
                     Button::new("start-daemon")

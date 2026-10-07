@@ -121,6 +121,8 @@ impl PerfView {
                     .stroke(cx.theme().chart_1)
                     .linear()
                     .x_axis(false)
+                    .y_axis(true)
+                    .y_tick_format(|v| format!("{v:.2} ms"))
                     .tick_margin(20)
                     .appear(false)
                     .name("avg ms")
