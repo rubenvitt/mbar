@@ -7,10 +7,13 @@
 //!
 //! * [`headless::HeadlessPlatform`]: no windows, `HeadlessResources` (monospace metrics,
 //!   one 1920×1080 display). The only platform on non-macOS, and `--headless` on macOS.
-//! * macOS (`macos.rs`, `cfg(target_os = "macos")`): integrated separately; see the TODO
-//!   in [`platform_main`].
+//! * [`macos::MacPlatform`] (`cfg(target_os = "macos")`): `NSApplication` run loop, Metal
+//!   windows, native system services and the mach server; the default on macOS unless
+//!   `--headless`.
 
 pub mod headless;
+#[cfg(target_os = "macos")]
+pub mod macos;
 
 use crate::daemon::DaemonSetup;
 
@@ -27,12 +30,7 @@ pub fn platform_main(setup: DaemonSetup) -> ! {
     let code = if setup.headless {
         headless::HeadlessPlatform.run(setup)
     } else {
-        // TODO(macos): `mod macos;` with `macos::MacPlatform` (NSApplication run loop,
-        // mbar-macos Resources, Metal windows from `FrameOutput`, mach server feeding
-        // `Event::Request` with `Responder::Callback`, `PlatformRequest` execution).
-        // Until it lands the daemon runs headless on macOS too.
-        log::warn!("macOS platform not integrated yet; running headless");
-        headless::HeadlessPlatform.run(setup)
+        macos::MacPlatform.run(setup)
     };
     #[cfg(not(target_os = "macos"))]
     let code = headless::HeadlessPlatform.run(setup);

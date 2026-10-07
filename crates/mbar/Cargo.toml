@@ -17,5 +17,8 @@ mbar-lua = { workspace = true }
 libc = { workspace = true }
 log = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+mbar-macos = { workspace = true }
+
 [dev-dependencies]
 serde_json = { workspace = true }

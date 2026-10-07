@@ -146,6 +146,7 @@ dependencies = [
  "mbar-core",
  "mbar-ipc",
  "mbar-lua",
+ "mbar-macos",
  "serde_json",
 ]
 
