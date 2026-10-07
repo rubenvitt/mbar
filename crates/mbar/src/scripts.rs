@@ -467,12 +467,30 @@ mod tests {
     /// PERF-10: the exit is noticed by a blocking wait, not by 50 ms polls.
     #[test]
     fn review_perf10_exit_reported_without_poll_latency() {
-        // The old 1 → 50 ms polling reported a 70 ms command at ~113 ms, deterministically.
-        let best = (0..5)
-            .map(|_| run_captured("sleep 0.07", SCRIPT_TIMEOUT).1)
+        // The old 1 → 50 ms polling added up to 50 ms on top of the command's own runtime.
+        // Process start-up cost varies a lot between machines (macOS CI runners need
+        // 30–50 ms for `env sh -c`), so compare against a baseline: the same command
+        // started and waited for directly with `std::process`.
+        let cmd = "sleep 0.07";
+        let baseline = (0..5)
+            .map(|_| {
+                let t = Instant::now();
+                Command::new("/usr/bin/env")
+                    .args(["sh", "-c", cmd])
+                    .status()
+                    .unwrap();
+                t.elapsed()
+            })
             .min()
             .unwrap();
-        assert!(best < Duration::from_millis(100), "{best:?}");
+        let best = (0..5)
+            .map(|_| run_captured(cmd, SCRIPT_TIMEOUT).1)
+            .min()
+            .unwrap();
+        assert!(
+            best < baseline + Duration::from_millis(25),
+            "reported after {best:?}, direct wait took {baseline:?}"
+        );
     }
 
     #[test]
