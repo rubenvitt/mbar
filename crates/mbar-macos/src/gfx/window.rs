@@ -427,6 +427,14 @@ impl BarWindow {
         self.sync_layer();
     }
 
+    /// Applies the current frame again (after SkyLight moved the window, e.g. to another
+    /// space).
+    pub fn reapply_frame(&self) {
+        let (x, y, w, h) = util::top_left_to_appkit(self.frame, primary_screen_height(self.mtm));
+        let rect = NSRect::new(NSPoint::new(x, y), NSSize::new(w.max(1.0), h.max(1.0)));
+        self.window.setFrame_display(rect, false);
+    }
+
     /// Window level (see [`level`]).
     pub fn set_level(&mut self, level: isize) {
         if self.level != level {

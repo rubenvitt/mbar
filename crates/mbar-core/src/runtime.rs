@@ -1752,7 +1752,9 @@ impl Runtime {
                 }));
             }
             if it.has_alias() {
-                effects.push(Effect::Platform(PlatformRequest::RemoveAlias { item: it.id }));
+                effects.push(Effect::Platform(PlatformRequest::RemoveAlias {
+                    item: it.id,
+                }));
             }
         }
         self.animator.clear();
@@ -3432,7 +3434,16 @@ mod tests {
         msg(
             &mut rt,
             &mut res,
-            &["--add", "item", "a", "left", "--set", "a", "icon=I", "label=old"],
+            &[
+                "--add",
+                "item",
+                "a",
+                "left",
+                "--set",
+                "a",
+                "icon=I",
+                "label=old",
+            ],
         );
         msg(&mut rt, &mut res, &["--add", "item", "p", "popup.a"]);
         msg(&mut rt, &mut res, &["--set", "p", "label=in popup"]);
@@ -3447,7 +3458,12 @@ mod tests {
             &mut res,
         );
         rt.frame(res.now, &mut res);
-        let old = rt.model.item(rt.model.find("a").unwrap()).unwrap().label.line;
+        let old = rt
+            .model
+            .item(rt.model.find("a").unwrap())
+            .unwrap()
+            .label
+            .line;
         msg(&mut rt, &mut res, &["--set", "a", "label=new"]);
         // Many unrelated updates later the popup label is still live.
         for i in 0..50 {
@@ -3464,7 +3480,13 @@ mod tests {
         assert!(keys.contains(&line("p", |i| i.label.line)));
         assert!(keys.contains(&line("s", |i| i.slider.knob.line)));
         assert!(keys.contains(&line("s", |i| i.icon.line)));
-        let font = rt.model.item(rt.model.find("p").unwrap()).unwrap().label.font.clone();
+        let font = rt
+            .model
+            .item(rt.model.find("p").unwrap())
+            .unwrap()
+            .label
+            .font
+            .clone();
         let popup_key = res.text_metrics(&font, "in popup").key;
         assert!(keys.contains(&popup_key));
         let menu = rt.model.item(rt.model.find("m").unwrap()).unwrap();
@@ -3482,7 +3504,11 @@ mod tests {
     fn exit_outside_a_message_is_like_exit_command() {
         let (mut rt, mut res) = runtime();
         msg(&mut rt, &mut res, &["--add", "item", "a", "left"]);
-        msg(&mut rt, &mut res, &["--set", "a", "mach_helper=dev.test.helper"]);
+        msg(
+            &mut rt,
+            &mut res,
+            &["--set", "a", "mach_helper=dev.test.helper"],
+        );
         let fx = rt.exit();
         assert!(fx.contains(&Effect::Platform(PlatformRequest::MachSend {
             service: "dev.test.helper".into(),
@@ -3492,7 +3518,12 @@ mod tests {
         assert!(rt.exit().is_empty(), "second exit emits nothing");
         let fx = msg(&mut rt, &mut res, &["--set", "a", "label=late"]);
         assert!(fx.iter().all(|e| !matches!(e, Effect::Exit)));
-        let label = &rt.model.item(rt.model.find("a").unwrap()).unwrap().label.string;
+        let label = &rt
+            .model
+            .item(rt.model.find("a").unwrap())
+            .unwrap()
+            .label
+            .string;
         assert_eq!(label, "", "messages after exit are ignored");
     }
 
@@ -3510,8 +3541,16 @@ mod tests {
     #[test]
     fn removing_an_alias_emits_remove_alias() {
         let (mut rt, mut res) = runtime();
-        msg(&mut rt, &mut res, &["--add", "alias", "Control Center,Clock", "right"]);
-        msg(&mut rt, &mut res, &["--add", "alias", "Control Center,WiFi", "right"]);
+        msg(
+            &mut rt,
+            &mut res,
+            &["--add", "alias", "Control Center,Clock", "right"],
+        );
+        msg(
+            &mut rt,
+            &mut res,
+            &["--add", "alias", "Control Center,WiFi", "right"],
+        );
         msg(&mut rt, &mut res, &["--add", "item", "plain", "left"]);
         let clock = rt.model.find("Control Center,Clock").unwrap();
         let wifi = rt.model.find("Control Center,WiFi").unwrap();

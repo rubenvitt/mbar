@@ -130,6 +130,9 @@ Pure logic. No Apple types, no threads, no I/O except what is injected.
   `sketchybar --set` keep working.
 * Config lookup: `--config`, `$XDG_CONFIG_HOME/mbar/mbarrc`, `~/.config/mbar/mbarrc`,
   then SketchyBar locations `$XDG_CONFIG_HOME/sketchybar/sketchybarrc`, `~/.config/sketchybar/sketchybarrc`.
+* `SIGTERM`/`SIGINT`/`SIGHUP` end the daemon like `--exit` (self-pipe → `Event::Terminate`
+  into the platform loop): menu-bar auto-hide restored, socket removed, the process groups
+  of scripts still running terminated (D24).
 * On Linux the daemon runs with the **headless platform** (no windows, monospace text
   metrics). It still runs scripts, timers, events and answers queries — used for
   integration tests of full configs.

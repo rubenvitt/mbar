@@ -163,7 +163,8 @@ impl TextCache {
     /// Shrinks the table to three quarters of its bound without ever dropping a key that
     /// `for_each_live` reports (`Runtime::for_each_text_key`, plus the scenes the window
     /// manager keeps for re-rendering). Unreferenced lines go least recently used first;
-    /// if the live set alone exceeds the target, every unreferenced line is dropped.
+    /// if the live set alone exceeds the target, every unreferenced line is dropped and the
+    /// bound grows to twice the live set.
     pub fn prune_live(&mut self, for_each_live: impl FnOnce(&mut dyn FnMut(TextKey))) {
         let target = self.max_entries * 3 / 4;
         if self.entries.len() <= target {
@@ -181,7 +182,11 @@ impl TextCache {
                 .filter(|(k, _)| !live.contains(k))
                 .map(|(_, e)| e.used),
         );
-        let remove = self.entries.len().saturating_sub(target).min(self.stamps.len());
+        let remove = self
+            .entries
+            .len()
+            .saturating_sub(target)
+            .min(self.stamps.len());
         if remove > 0 {
             let (_, cutoff, _) = self.stamps.select_nth_unstable(remove - 1);
             let cutoff = *cutoff;
@@ -189,6 +194,11 @@ impl TextCache {
                 .retain(|k, e| e.used > cutoff || live.contains(k));
         }
         self.live = live;
+        if self.entries.len() > target {
+            // More live lines than the bound allows: raise it, so the next prune is not
+            // due after every frame.
+            self.max_entries = self.entries.len() * 2;
+        }
     }
 }
 

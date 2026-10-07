@@ -25,6 +25,7 @@ use crate::gfx::scene::{DrawList, Rect as GRect};
 use crate::gfx::window::{BarWindow, MouseEvent};
 use crate::sys::spaces;
 use mbar_core::geometry::{Point, Rect};
+use mbar_core::layout::NIRVANA;
 use mbar_core::platform::{FrameOutput, SpaceMove, TextKey, WindowKey, WindowUpdate};
 use mbar_core::scene::{Primitive, Scene};
 use objc2::MainThreadMarker;
@@ -175,6 +176,22 @@ impl WindowManager {
         for (dsid, wids) in targets {
             if !spaces::move_windows_to_space(&wids, dsid) {
                 log::debug!("cannot move {} window(s) to space {dsid}", wids.len());
+            }
+        }
+        // `window_send_to_space`: a window parked at nirvana is put back there
+        // (`SLSMoveWindow(cid, wid, &g_nirvana)`), the space move may have placed it on
+        // screen.
+        for mv in moves {
+            let Some(m) = self.windows.get(&mv.key) else {
+                continue;
+            };
+            let f = m.win.frame();
+            if m.win.is_sticky() || f.x != NIRVANA.x || f.y != NIRVANA.y {
+                continue;
+            }
+            m.win.reapply_frame();
+            for c in &m.children {
+                c.win.reapply_frame();
             }
         }
     }
