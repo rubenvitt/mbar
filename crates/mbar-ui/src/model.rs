@@ -1190,9 +1190,10 @@ pub fn parse_cli_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliArgs
         if arg == "-h" || arg == "--help" {
             return Err(usage.to_string());
         } else if arg == "--bar-name" {
+            // A following flag (`--bar-name --update`) is a missing value, not a name.
             bar_name = it
                 .next()
-                .filter(|v| !v.is_empty())
+                .filter(|v| !v.is_empty() && !v.starts_with('-'))
                 .ok_or_else(|| format!("--bar-name needs a value\n\n{usage}"))?;
         } else if let Some(v) = arg.strip_prefix("--bar-name=") {
             if v.is_empty() {
@@ -1613,6 +1614,11 @@ mod tests {
         assert!(!a.update);
         let a = parse_cli_args(["-psn_0_123".into(), "--update".into()]).unwrap();
         assert!(a.update);
+        let a = parse_cli_args(["--update".into(), "--bar-name".into(), "top".into()]).unwrap();
+        assert!(a.update);
+        assert_eq!(a.bar_name, "top");
+        assert!(parse_cli_args(["--bar-name".into(), "--update".into()]).is_err());
+        assert!(parse_cli_args(["--updates".into()]).is_err());
     }
 
     #[test]
