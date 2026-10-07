@@ -64,10 +64,12 @@ pub struct OldInstall {
 }
 
 fn inside(path: &Path, root: Option<&Path>) -> bool {
-    root.is_some_and(|r| path.starts_with(r))
+    root.is_some_and(|r| {
+        path.starts_with(r) || std::fs::canonicalize(r).is_ok_and(|r| path.starts_with(r))
+    })
 }
 
-/// Resolves one symlink hop (relative links against their directory); `None` when not a link.
+/// First symlink hop (relative links against their directory); `None` when not a link.
 fn link_target(p: &Path) -> Option<PathBuf> {
     let t = std::fs::read_link(p).ok()?;
     Some(if t.is_absolute() {
@@ -80,16 +82,24 @@ fn link_target(p: &Path) -> Option<PathBuf> {
 fn classify(path: &Path, bundle_root: Option<&Path>) -> Option<OldKind> {
     let meta = std::fs::symlink_metadata(path).ok()?;
     let target = link_target(path);
-    if let Some(t) = &target {
-        if inside(t, bundle_root) {
-            return None;
-        }
+    // The whole chain, resolved: `sketchybar -> mbar -> <app>` or `../../Applications/…`
+    // must count as a link into the app, never as an old install to remove.
+    let resolved = target
+        .as_ref()
+        .and_then(|_| std::fs::canonicalize(path).ok());
+    if [&target, &resolved]
+        .into_iter()
+        .flatten()
+        .any(|t| inside(t, bundle_root))
+    {
+        return None;
     }
     let name = path.file_name()?.to_str()?;
-    let points_to_mbar = target
-        .as_ref()
-        .and_then(|t| t.file_name())
-        .is_some_and(|n| n == "mbar" || n == "mbar-ui");
+    let points_to_mbar = [&target, &resolved]
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t.file_name())
+        .any(|n| n == "mbar" || n == "mbar-ui");
     match name {
         "mbar" | "mbar-ui" => Some(OldKind::Binary),
         "sketchybar" if points_to_mbar => Some(OldKind::Binary),
@@ -325,6 +335,28 @@ mod tests {
         assert!(
             find_old_installs(&home, &ulb, Some(Path::new("/Applications/mbar.app"))).is_empty()
         );
+    }
+
+    #[test]
+    fn chained_and_relative_links_into_the_app_are_kept() {
+        let root = tmp("chain");
+        let app = root.join("Applications/mbar.app");
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        std::fs::write(app.join("Contents/MacOS/mbar"), "bin").unwrap();
+        let home = root.join("home");
+        let lb = home.join(".local/bin");
+        std::fs::create_dir_all(&lb).unwrap();
+        let ulb = root.join("ulb");
+        std::fs::create_dir_all(&ulb).unwrap();
+        // ~/.local/bin/mbar -> ../../../Applications/mbar.app/… (relative, with `..`)
+        symlink(
+            "../../../Applications/mbar.app/Contents/MacOS/mbar",
+            lb.join("mbar"),
+        )
+        .unwrap();
+        // ~/.local/bin/sketchybar -> mbar -> app (two hops)
+        symlink("mbar", lb.join("sketchybar")).unwrap();
+        assert_eq!(find_old_installs(&home, &ulb, Some(&app)), vec![]);
     }
 
     #[test]
