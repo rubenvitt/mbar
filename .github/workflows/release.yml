@@ -20,6 +20,11 @@ jobs:
       - id: rp
         uses: googleapis/release-please-action@v5
         with:
+          # A PR opened with the default GITHUB_TOKEN triggers no workflows, so
+          # the required CI checks would never run on the release PR. A PAT
+          # (contents, pull requests, issues: read/write) avoids that and the
+          # "Allow GitHub Actions to create pull requests" repo setting.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
