@@ -3,5 +3,6 @@
 //! appcast parsing, update decisions and config lookup. Everything here is pure and
 //! unit-tested on any host; process spawning lives in the callers.
 
+pub mod bundle;
 pub mod config;
 pub mod version;

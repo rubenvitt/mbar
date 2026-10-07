@@ -106,6 +106,20 @@ pub fn run(bar_name: String, opts: DaemonOptions) -> ! {
         std::env::set_var("CONFIG_DIR", dir);
     }
 
+    // Running from mbar.app: scripts (and Lua's io.popen) find `sketchybar`/`mbar` in the
+    // bundle first, whatever PATH launchd gave the agent. Set before any thread exists.
+    let bundle = std::env::current_exe()
+        .ok()
+        .and_then(|exe| mbar_app::bundle::bundle_root_from_exe(&exe))
+        .and_then(|root| mbar_app::bundle::read_bundle(&root));
+    if let Some(b) = &bundle {
+        let current = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            mbar_app::bundle::script_path(&b.bin_dir(), &current),
+        );
+    }
+
     // `BAR_NAME` was set in `main` before any thread existed.
     let base_env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
 
