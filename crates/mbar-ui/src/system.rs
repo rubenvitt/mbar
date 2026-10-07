@@ -116,6 +116,40 @@ pub fn kickstart_daemon() -> io::Result<()> {
     }
 }
 
+/// The daemon version from `--query stats` output (`version` field, added together with
+/// app distribution). `None` for unparsable output or an older daemon without the field.
+pub fn daemon_version_from_stats(json: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(json).ok()?["version"]
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Whether the running daemon differs from the installed bundle's version. A daemon
+/// without a version (`None`) predates the field and is therefore older than the bundle.
+pub fn needs_daemon_restart(running: Option<&str>, bundle: &str) -> bool {
+    running != Some(bundle)
+}
+
+/// The `mbar.app` this binary runs from (`…/mbar.app/Contents/MacOS/mbar-ui`), with its
+/// `Info.plist` values; `None` outside a bundle (e.g. a `cargo run` or Linux build).
+pub fn current_bundle() -> Option<mbar_app::bundle::AppBundle> {
+    let exe = std::env::current_exe().ok()?;
+    let root = mbar_app::bundle::bundle_root_from_exe(&exe)?;
+    mbar_app::bundle::read_bundle(&root)
+}
+
+/// Restarts the daemon through launchd when it answers but reports a version other than
+/// the installed bundle's (e.g. after a Sparkle update while the daemon kept running).
+/// A stopped daemon is left alone: onboarding and the System page handle that. Blocking;
+/// run it on the background executor. Returns whether a restart was requested.
+pub fn sync_daemon_version(client: &Client, bundle_version: &str) -> bool {
+    let Ok(stats) = client.send_strs(&["--query", "stats"]) else {
+        return false;
+    };
+    let running = daemon_version_from_stats(&stats);
+    needs_daemon_restart(running.as_deref(), bundle_version) && kickstart_daemon().is_ok()
+}
+
 /// The real user id of this process (the launchd `gui/<uid>` domain).
 pub fn current_uid() -> u32 {
     extern "C" {
@@ -267,6 +301,20 @@ mod tests {
         let out = Command::new("id").arg("-u").output().unwrap();
         let id: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
         assert_eq!(current_uid(), id);
+    }
+
+    #[test]
+    fn daemon_version_parsing() {
+        assert_eq!(
+            daemon_version_from_stats("{\n\t\"items\": 3,\n\t\"version\": \"0.2.0\"\n}\n")
+                .as_deref(),
+            Some("0.2.0")
+        );
+        assert_eq!(daemon_version_from_stats("{\"items\": 3}"), None);
+        assert!(needs_daemon_restart(Some("0.1.0"), "0.2.0"));
+        assert!(!needs_daemon_restart(Some("0.2.0"), "0.2.0"));
+        // An old daemon without the field is older than any bundle with this feature.
+        assert!(needs_daemon_restart(None, "0.2.0"));
     }
 
     #[test]

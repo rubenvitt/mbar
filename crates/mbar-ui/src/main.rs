@@ -55,6 +55,17 @@ fn main() {
                 }),
                 ..Default::default()
             };
+            // Daemon version sync: inside mbar.app, restart a running daemon whose version
+            // differs from the bundle's. A no-op outside a bundle (dev builds, Linux).
+            if let Some(bundle) = mbar_ui_model::system::current_bundle() {
+                let client = Client::new(bar_name.clone());
+                cx.background_executor()
+                    .spawn(async move {
+                        mbar_ui_model::system::sync_daemon_version(&client, &bundle.short_version);
+                    })
+                    .detach();
+            }
+
             let client = Client::new(bar_name.clone());
             gpui_kit::open_window(options, cx, |window, cx| {
                 // Light/dark follows the system; AppView keeps it in sync afterwards.
