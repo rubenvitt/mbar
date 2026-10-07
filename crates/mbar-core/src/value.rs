@@ -70,6 +70,12 @@ fn parse_unsigned_magnitude(s: &str) -> (bool, u128) {
 /// (decimal, exponent, `inf`, `nan`, hex floats are treated as decimal `0`).
 /// Returns 0.0 if nothing parses.
 pub fn parse_float(s: &str) -> f32 {
+    parse_float_prefix(s).unwrap_or(0.0)
+}
+
+/// Like [`parse_float`] but returns `None` when no conversion happened (what `sscanf("%f")`
+/// reports as a failed conversion; used by `font=Family:Style:Size`).
+pub fn parse_float_prefix(s: &str) -> Option<f32> {
     let t = s.trim_start();
     let b = t.as_bytes();
     let mut end = 0;
@@ -80,7 +86,7 @@ pub fn parse_float(s: &str) -> f32 {
     let lower = t[i..].to_ascii_lowercase();
     for word in ["infinity", "inf", "nan"] {
         if lower.starts_with(word) {
-            return t[..i + word.len()].parse::<f32>().unwrap_or(0.0);
+            return t[..i + word.len()].parse::<f32>().ok();
         }
     }
     let mut digits = false;
@@ -113,9 +119,9 @@ pub fn parse_float(s: &str) -> f32 {
         }
     }
     if !digits {
-        return 0.0;
+        return None;
     }
-    t[..end].parse::<f32>().unwrap_or(0.0)
+    t[..end].parse::<f32>().ok()
 }
 
 /// SketchyBar's `evaluate_boolean_state`: `on|yes|true|1|!off|!no|!false|!0` → true,
@@ -148,6 +154,124 @@ pub fn escape_json_string(s: &str) -> String {
         }
     }
     out
+}
+
+/// Full JSON string escaping (deviation D13): `"`, `\\`, and all control characters are
+/// escaped so `--query` output always parses. Layout and key order stay SketchyBar's.
+/// The result does **not** include the surrounding quotes.
+pub fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// A C string as printed by `"%s"` inside a JSON string: escaped (D13), or the literal
+/// `(null)` (macOS libc) when the string is NULL.
+pub fn json_opt(s: Option<&str>) -> String {
+    match s {
+        Some(s) => json_escape(s),
+        None => "(null)".to_string(),
+    }
+}
+
+/// C `printf("%f")`: 6 decimals; `inf`, `-inf`, `nan` spelled like libc.
+pub fn fmt_f(v: f64) -> String {
+    if v.is_nan() {
+        "nan".to_string()
+    } else if v.is_infinite() {
+        if v > 0.0 { "inf" } else { "-inf" }.to_string()
+    } else {
+        format!("{v:.6}")
+    }
+}
+
+/// C `printf("%.2f")` (font sizes in queries).
+pub fn fmt_f2(v: f64) -> String {
+    if v.is_nan() {
+        "nan".to_string()
+    } else if v.is_infinite() {
+        if v > 0.0 { "inf" } else { "-inf" }.to_string()
+    } else {
+        format!("{v:.2}")
+    }
+}
+
+/// Result of `get_key_value_pair(key, '.')` on a property key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySplit<'a> {
+    /// No `.` in the key: a leaf property.
+    Leaf,
+    /// `sub.rest` with a non-empty `rest` (`sub` may be empty: `.x` → `("", "x")`).
+    Sub(&'a str, &'a str),
+    /// The first `.` is the last character (`icon.`): C replaces the `.` with NUL and
+    /// treats it as "no pair"; error messages then print only the part before the dot.
+    Trailing(&'a str),
+}
+
+/// Splits a property key at its **first** `.` with SketchyBar's `get_key_value_pair`
+/// semantics (see [`KeySplit`]).
+pub fn split_key(key: &str) -> KeySplit<'_> {
+    match key.find('.') {
+        None => KeySplit::Leaf,
+        Some(i) if i + 1 == key.len() => KeySplit::Trailing(&key[..i]),
+        Some(i) => KeySplit::Sub(&key[..i], &key[i + 1..]),
+    }
+}
+
+/// The key text C prints in "Invalid property '<key>'" messages: identical to `key`
+/// except that a trailing `.` was overwritten by NUL (so `icon.` prints as `icon`).
+pub fn display_key(key: &str) -> &str {
+    match split_key(key) {
+        KeySplit::Trailing(k) => k,
+        _ => key,
+    }
+}
+
+/// `resolve_path`: a leading `~` is replaced by `$HOME` (no `~user` handling, so `~bob`
+/// becomes `$HOMEbob`). The C buffer is 512 bytes; longer results are truncated to 511.
+pub fn resolve_path(path: &str, home: &str) -> String {
+    match path.strip_prefix('~') {
+        Some(rest) => {
+            let mut s = format!("{home}{rest}");
+            if s.len() > 511 {
+                let mut cut = 511;
+                while !s.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                s.truncate(cut);
+            }
+            s
+        }
+        None => path.to_string(),
+    }
+}
+
+/// `token_split(value, ',')`: an empty value yields no entries, otherwise every
+/// `,`-separated entry, including empty ones.
+pub fn split_list(value: &str) -> Vec<&str> {
+    if value.is_empty() {
+        Vec::new()
+    } else {
+        value.split(',').collect()
+    }
+}
+
+/// The first byte of a value as a C `char` (`'\0'` for an empty value); used for
+/// `align`, positions and `--animate` curves.
+pub fn first_byte(value: &str) -> u8 {
+    value.as_bytes().first().copied().unwrap_or(0)
 }
 
 /// Splits `key=value` at the first `=`. Returns `None` if there is no `=`.
@@ -202,6 +326,33 @@ mod tests {
         assert!(!parse_bool("garbage", true));
         assert!(parse_bool("toggle", false));
         assert!(!parse_bool("toggle", true));
+    }
+
+    #[test]
+    fn json_helpers() {
+        assert_eq!(json_escape("a\"b\\c\nd\u{1}"), "a\\\"b\\\\c\\nd\\u0001");
+        assert_eq!(json_opt(None), "(null)");
+        assert_eq!(fmt_f(1.0), "1.000000");
+        assert_eq!(fmt_f(0.5f32 as f64), "0.500000");
+        assert_eq!(fmt_f2(14.0), "14.00");
+        assert_eq!(fmt_f(f64::INFINITY), "inf");
+    }
+
+    #[test]
+    fn key_splitting() {
+        assert_eq!(split_key("color"), KeySplit::Leaf);
+        assert_eq!(split_key("a.b.c"), KeySplit::Sub("a", "b.c"));
+        assert_eq!(split_key("icon."), KeySplit::Trailing("icon"));
+        assert_eq!(split_key(".x"), KeySplit::Sub("", "x"));
+        assert_eq!(display_key("icon."), "icon");
+        assert_eq!(display_key("a.b"), "a.b");
+        assert_eq!(resolve_path("~/x", "/home/u"), "/home/u/x");
+        assert_eq!(resolve_path("~bob", "/h"), "/hbob");
+        assert_eq!(split_list(""), Vec::<&str>::new());
+        assert_eq!(split_list("1,,3"), vec!["1", "", "3"]);
+        assert_eq!(first_byte(""), 0);
+        assert_eq!(parse_float_prefix("x"), None);
+        assert_eq!(parse_float_prefix(" 12.5pt"), Some(12.5));
     }
 
     #[test]

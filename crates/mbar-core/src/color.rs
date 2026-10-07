@@ -87,14 +87,15 @@ impl Color {
         [self.r * self.a, self.g * self.a, self.b * self.a, self.a]
     }
 
-    /// Byte-wise interpolation as used by `ANIMATE_BYTES` for hex color animation:
-    /// every channel byte is interpolated independently.
-    pub fn lerp_bytes(from: u32, to: u32, t: f64) -> u32 {
+    /// Byte-wise interpolation as used by `ANIMATE_BYTES` for hex color animation
+    /// (`animation.c:animation_update`): every byte is interpolated independently as
+    /// `(u8)((1-s)*a + s*b)` — **truncation**, no rounding (`docs/spec/events.md` §10.4).
+    pub fn lerp_bytes(from: u32, to: u32, s: f64) -> u32 {
         let mut out = 0u32;
         for shift in [24u32, 16, 8, 0] {
             let a = ((from >> shift) & 0xff) as f64;
             let b = ((to >> shift) & 0xff) as f64;
-            let v = (a + (b - a) * t).round().clamp(0.0, 255.0) as u32;
+            let v = ((1.0 - s) * a + s * b).clamp(0.0, 255.0) as u32;
             out |= v << shift;
         }
         out
@@ -122,7 +123,7 @@ mod tests {
 
     #[test]
     fn byte_lerp() {
-        assert_eq!(Color::lerp_bytes(0x00000000, 0xff0000ff, 0.5), 0x80000080);
+        assert_eq!(Color::lerp_bytes(0x00000000, 0xff0000ff, 0.5), 0x7f00007f);
         assert_eq!(Color::lerp_bytes(0x11223344, 0x55667788, 1.0), 0x55667788);
     }
 }
