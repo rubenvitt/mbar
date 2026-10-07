@@ -19,6 +19,11 @@ or depends on undefined behaviour. Each one gets a defined, safe behaviour inste
 | D11 | `get_height` uses the background height of the previous layout pass | Uses the current pass |
 | D12 | Animation durations count 60 Hz display-link frames | Duration `n` = `n/60` s of wall-clock time; frames are rendered at the display's refresh rate (smoother on 120 Hz) |
 | D13 | `--query` prints strings without JSON escaping (backslashes, control chars) | Same layout and key order, but strings are properly JSON-escaped so the output always parses |
+| D15 | Curves `bounce` and `overshoot` are accepted but behave as linear | Implemented as standard ease-out-bounce and ease-out-back (overshoot 1.70158) |
+| D16 | `--trigger` and other events share one env object across subscribed items | Fresh env per item (see D1) |
+| D17 | Client waits 100 ms for a reply; slow daemon → empty `--query` | Client waits up to 5 s |
+| D18 | Removing an item leaves its animations pointing at freed memory | Animations of removed items are cancelled |
+| D19 | After hotload, distributed notifications may be registered twice | Each notification is delivered once |
 | D14 | Freeze flag is a plain bool (nested freeze/unfreeze cancel) | Kept as-is (no crash), documented |
 
 Extensions (new behaviour that does not exist in SketchyBar) are listed in `docs/EXTENSIONS.md`.
