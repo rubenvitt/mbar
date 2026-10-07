@@ -379,7 +379,7 @@ Not properties, even though they are defined in defines.h: `lazy`,
 | `color` | hex | bytes | if changed | |
 | `highlight` | bool | special | if changed | With animation active, cross-fades color ↔ highlight_color (text.c). Drawing uses `highlight_color` while highlighted. |
 | `highlight_color` | hex | bytes | | |
-| `font` | `family:style:size` | – | if changed | `sscanf("%254[^:]:%254[^:]:%f")`. A missing size defaults to **10.0**. Takes the **rest of the message** (`string_copy(message)`), not a token. |
+| `font` | `family:style:size` | – | if changed | `sscanf("%254[^:]:%254[^:]:%f")` on the whole value. A missing size defaults to **10.0**. A missing or empty field (scanning stops at the first empty field) becomes `""`. |
 | `font.family` / `font.style` | string | – | if changed | |
 | `font.size` | float | float | | |
 | `font.features` | `feat,...` | – | | OpenType tags (`+liga`, `-calt`) or `type:selector` pairs. |
@@ -582,6 +582,8 @@ if has_graph:
     gh = background.enabled ? (bg.bounds.h - bg.border_width - 1)
                             : (bar_height - (BAR.border_width + 1))
     graph_calculate_bounds(mid_x, ty, gh)                 // origin.y = ty - gh/2 + line_width
+                                                          // bg.bounds.h here = value from the PREVIOUS layout
+                                                          //   (the background is computed after the graph)
 if background.enabled:
     bh = bg.overrides_height ? bg.height : (bar_height - (BAR.border_width + 1))
     background_calculate_bounds(bg, x, ty, length, bh)    // NOTE: x, not content_x
@@ -615,8 +617,9 @@ if background.enabled:
 
 Text is drawn at `(origin.x + padding_left - scroll, origin.y + text.y_offset)`.
 When `max_chars>0`, drawing is clipped to x ∈ `[origin.x+padding_left, +width)`.
-If the text shadow is enabled, it is drawn first at the same position plus
-`shadow.offset` (text.c:text_draw).
+If the text shadow is enabled, it is drawn first at
+`(origin.x + shadow.offset.x + padding_left, origin.y + shadow.offset.y + y_offset)`,
+in the shadow color. The shadow does **not** apply `scroll` (text.c:text_draw).
 
 Slider (slider.c:slider_calculate_bounds):
 
@@ -1167,9 +1170,10 @@ Consequences:
 - `--update` (`forced=true`) runs every item that has a script or mach helper
   with `SENDER=forced`, regardless of `updates`, `update_freq` and the shown
   state.
-- When `env == NULL` (routine, forced, `mouse.entered`/`mouse.exited`, and
-  `.global` events without info), `SENDER` is written into the item's
-  **persistent** env. It stays there and leaks into later `click_script` runs
+- When `env == NULL`, `SENDER` is written into the item's **persistent**
+  env. This covers routine and forced runs, `mouse.entered`/`mouse.exited`,
+  and events triggered with a NULL env (`mouse.entered.global`,
+  `mouse.exited.global`, `system_woke`, `system_will_sleep`). It stays there and leaks into later `click_script` runs
   (8.5).
 - Event env sharing: `bar_manager_custom_events_trigger` passes the **same**
   env object to each subscribed item in turn. Each item adds its own vars and

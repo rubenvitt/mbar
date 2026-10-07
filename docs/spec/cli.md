@@ -244,9 +244,11 @@ next command token as a malformed pair:
 - `--bar --set foo x=1`:
   1. `--bar` reports the `--set` token and breaks.
   2. `foo` becomes the next command: `[!] Unknown domain 'foo'`.
-  3. The rest of the batch line is skipped. A *value* that starts with `-` is fine (`y_offset=-5`) because
-the token starts with the key. A token that is a bare `-5` ends the list and is
-then read as a command (`[!] Unknown domain '-5'`).
+  3. The rest of the batch line is skipped.
+
+A *value* that starts with `-` is fine (`y_offset=-5`) because the token starts
+with the key. A token that is a bare `-5` (after the first pair) ends the list
+and is then read as a command (`[!] Unknown domain '-5'`).
 
 **Mode B: batch line** (`get_batch_line`). Used by every other domain that takes
 arguments.
@@ -276,13 +278,14 @@ as its arguments.
   value is everything after it and may contain more `=`, spaces, or any byte
   except NUL.
 - If the token has no `=`, it is not a pair. Each domain then reports its
-  "Expected <key>=<value> pair" error (§4.1).
+  "Expected <key>=<value> pair" error (§5, §6.2, §6.3).
 - `key=` (empty value) gives value NULL. It is packed as `key\0\0\0`, so the
   property handler reads an **empty string** value. What an empty value does:
   - integers and floats become 0;
   - booleans become false (`evaluate_boolean_state("")`);
   - strings become empty;
-  - `display=` becomes `0` (the "main" pattern on the bar).
+  - list properties become an empty list: bar `display=` gives pattern 0
+    (main display only), and item `display=`/`space=` clear the mask (all).
 - `=value` gives the empty key `""`. That is then an invalid property.
 - The pair is packed as `key\0value\0\0`. The property handler gets the key as
   "property" and a cursor positioned on the value.
@@ -633,6 +636,9 @@ Algorithm:
    - Otherwise exact name. If not found, respond `[!] Set: Item not found '<name>'\n`.
 2. **Empty selection.** Consume and discard the rest of the batch line (Mode B
    scan), then continue with the next command.
+   - **Quirk:** the scan starts at the cursor. If the missing target is directly
+     followed by another command (`--set missing --bar height=10`), that command
+     is swallowed too.
 3. **Apply pairs.** Otherwise iterate the pairs in Mode A. For each token, and
    for each selected item in order (token-major, item-minor), apply
    `bar_item_parse_set_message(item, "key\0value\0\0")` (§6.11.1).

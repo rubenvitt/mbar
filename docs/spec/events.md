@@ -1012,7 +1012,7 @@ Selection is by the **first character only**:
 | `t` | tanh | `function_tanh` | `a = 0.52; a*tanh(2*atanh(1/(2a))*(x-0.5)) + 0.5` (f(0)=0, f(1)=1 exactly in exact arithmetic) |
 | `s` | sin | `function_sin` | `sin(π/2 * x)` |
 | `e` | exp | `function_exp` | `x * exp(x - 1)` |
-| `c` | circ | `function_circ` | `sqrt(1 - powf(x - 1, 2))` — the square is computed in **f32** (`powf`, `1.f`), the sqrt in f64 |
+| `c` | circ | `function_circ` | `sqrt(1 - (x-1)^2)`; C: `sqrt(1.f - powf(x - 1.f, 2.f))` → `d = (f32)(x - 1.0)`, `s = 1.0f32 - d*d` (f32), result `sqrt(s as f64)` |
 | `b` | bounce | — | **falls back to linear** (`INTERP_FUNCTION_BOUNCE` is defined but not mapped) |
 | `o` | overshoot | — | **falls back to linear** (`INTERP_FUNCTION_OVERSHOOT` defined but not mapped) |
 | anything else, `'\0'` | — | `function_linear` | `x` |
