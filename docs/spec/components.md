@@ -28,7 +28,7 @@ observable; mbar must reproduce it unless `docs/EXTENSIONS.md` says otherwise.
 * Item vertical centre: `y = (uint32)(window_height / 2)` (integer division of the bar window
   height, `bar.c:bar_calculate_bounds_top_bottom`), then `content_y = y + item.y_offset`.
 * Each item window is `bar_item_display_length + shadow_offsets.x + shadow_offsets.y` wide; the
-  item content starts at local `x = max(shadow_offsets.x, 0)` (see §3.8 for the shadow
+  item content starts at local `x = max(shadow_offsets.x, 0)` (see §10.4 for the shadow
   offsets).
 
 ### 0.2 Property value parsing (`misc/helpers.h`)
@@ -108,7 +108,7 @@ Reachable as `<owner>.<color-name>.<prop>` wherever a colour sub-domain exists (
 Important: setting a colour through these sub-properties **never** has the side effects of the
 owner's plain `color=` setter (e.g. `background.color.alpha=1` does **not** enable the background,
 `shadow.color.hex=…` does **not** enable the shadow, `graph.fill_color.hex` does **not** set
-`overrides_fill_color`). Exception: `alias.color.<prop>` sets `color_override` (§8).
+`overrides_fill_color`). Exception: `alias.color.<prop>` sets `color_override` (§9.9).
 
 ### 1.3 Where colour sub-domains exist
 
@@ -645,7 +645,7 @@ slider track.
 ## 6. Image (`image.c`) — `<…>.background.image`
 
 Images exist only as a background's image (item, icon, label, knob, popup, bar background) and
-internally inside an alias (§8). An image is **only drawn and only counted for width when its
+internally inside an alias (§9). An image is **only drawn and only counted for width when its
 background is enabled** (`background_draw` returns early; `bar_item_get_length` /
 `text_get_length` check `background.enabled && image.enabled`). Loading an image does **not**
 enable the background.
@@ -803,7 +803,7 @@ corner_radius, border, padding, y_offset and shadow of the image are **not** ser
 `--add slider <name> <position> <width>` → `slider_setup(width)`: track width = `width`
 (`token_to_uint32t`, missing → 0), track and fill backgrounds enabled
 (`message.c:handle_domain_add`). The item gets `has_slider = true`. Item content length adds
-`slider_get_length = track width` (between icon and label, §9).
+`slider_get_length = track width` (between icon and label, §10.2).
 
 ### 7.2 Model and defaults (`slider_init`)
 

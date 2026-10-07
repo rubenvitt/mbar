@@ -1753,3 +1753,119 @@ I}
 
 Note that the slider's foreground (fill) background is not serialized.
 
+
+---
+
+## 12. Miscellaneous item-related behavior
+
+- **Mach helper** (`mach_helper=<name>`): on every executed update, the
+  serialized env is sent to the port. It is a sequence of NUL-terminated
+  strings `k\0v\0...` with a final extra `\0`. On `bar_manager_destroy`
+  (exit, reload, hotload) every item with a port receives the 2-byte message
+  `"k\0"`.
+- **Reload/hotload** destroys all items, the defaults and the custom events,
+  re-inits the manager and re-executes the config (event.c:event_hotload).
+- **Media cover**: when the artwork changes, items with an image linked to
+  `media.artwork` (item, icon or label background) are marked dirty. A
+  refresh happens if any of them is shown.
+- **Alias recapture**: on each clock tick, for shown alias items,
+  `alias.counter++`. When it reaches `alias.update_freq` (default 1, i.e.
+  every second; 0 disables), the menu-extra window is recaptured. A changed
+  image refreshes the item.
+- **Animations** are attributed to an item by checking whether the target
+  pointer lies inside the `bar_item` struct. Changes then mark that item dirty;
+  otherwise they set the global `bar_needs_update`. In mbar, every animated
+  item sub-property must map back to its owning item.
+
+## 13. Numeric pitfalls
+
+The C behavior these cases produce is unspecified or wraps; pick explicit
+semantics.
+
+| Location | Expression | C behavior | Suggested mbar behavior |
+|---|---|---|---|
+| bar.c RTL cursor | `min(cur - disp - pr, W - disp)` with u32 `cur` | Unsigned wrap. When `cur < disp+pr`, the result is `W - disp`. | Compute in i64. If `cur - disp - pr < 0`, use `W - disp`; else take the min. |
+| bar.c center start | `(W - center_len)/2` | Double math, then truncation to u32 (UB if negative) | Clamp at 0. |
+| bar.c `W - disp` | Negative when the item is wider than the bar | Float → u32 UB | Clamp at 0. |
+| popup.c horizontal image | `x = (width - total)/2`, u32 | Wraps. `item_x = max((int)x + pl, 0)` then clamps. | Use signed math and clamp `item_x` at 0. |
+| `display=`/`space=` values ≥ 32 | `1 << n` | UB | Ignore them. |
+| `popup.height` negative | stored as u32 | Huge cell | Clamp at 0 or treat as invalid. |
+| `slider.percentage` | Setter compares the raw value, stores `min(v,100)` | Repeated `percentage=150` keeps returning "changed" | Same, or clamp before comparing. |
+| graph width 0 | `% width` | Division by zero | Reject or draw nothing. |
+
+## 14. Quirk index (keep unless deliberately deviating)
+
+1. `align` is overwritten by every non-popup `position` change. Positions `q`
+   and `e` give a left alignment.
+2. An item `width=N` is the total slot width **including** item padding in
+   bars. In **popups**, the item width becomes `pl + pr + N`, so the padding
+   is added on top.
+3. The automatic item background height is `H - 2*(bar_border+1)` in bars and
+   `cell - (bar_border+1)` in popups. The graph height follows the same rule.
+4. The bracket background height is not automatic (0 unless set).
+5. Brackets are not laid out on vertical (left/right) bars.
+6. Popup width adds the border once and the height adds it twice. Items are
+   not inset by the border horizontally.
+7. Popup background shadows are never drawn.
+8. Nested popups are anchored after their bounds are computed, so their
+   frames lag by one refresh.
+9. `mouse.exited` fires for **all** subscribed items whenever the pointer
+   leaves the bar or popup area entirely.
+10. Mouse item events (`entered`, `exited`, `clicked`, `scrolled`) are forced:
+    they ignore `updates=off` and `when_shown`. Global mouse events are not
+    forced.
+11. A `click_script` sees a stale `SENDER`. Click and scroll `INFO` contains
+    the misspelled key `modfier_code`.
+12. Clicking a slider outside its track does nothing at all.
+13. Event env objects are shared across the subscribers of one event, so
+    variables leak from earlier items to later ones. Item vars override
+    trigger-supplied vars with the same name.
+14. `vfork` + `setenv` leaks script env vars into the bar process
+    environment, so later scripts inherit stale vars. Scripts are killed
+    after 60 s (SIGALRM).
+15. `display=main` hides the item, because `main` parses as 0.
+16. `display=<n>,active` means the intersection: shown only when display n is
+    active.
+17. Space items: the space mask never hides them, `updates` is managed
+    automatically, and an inherited default script replaces the highlight
+    default. A clone sets `SID` from the parent's `DID`.
+18. `reset=` in any `--set` resets the **defaults**, and the default item's
+    name becomes NULL.
+19. `--move x before|after x` and duplicate names in `--reorder` corrupt the
+    order in C.
+20. Cloning: subscriptions and `popup.drawing` are copied. Image paths and
+    font features are lost. Cloned popup members are not attached. Cloned
+    brackets are broken.
+21. Re-setting `position=popup.<host>` moves the item to the end of the popup.
+22. Text `width` in `--query` prints `custom_width` (0 when never set) rather
+    than -1. The item `width` prints -1 when dynamic.
+23. `font=` without a size uses size 10.0, not 14.
+24. A subscription to `mouse.entered`/`mouse.exited` made after an item's
+    last redraw only becomes active at that item's next redraw.
+25. When a popup's last item is removed, the window closes but
+    `popup.drawing` stays on.
+26. Scroll events are coalesced with a 150 ms window. An accumulation older
+    than 300 ms is discarded.
+
+## 15. Open questions
+
+1. **Env leakage (quirks 13, 14).** Should mbar reproduce variable leakage
+   between subscribers and across script runs? Configs might rely on it by
+   accident. The recommendation is a clean per-run env, documented as a
+   deviation.
+2. **Slider click hit test.** It compares a y-down window-local point with
+   y-up drawing bounds. It needs verification on hardware; mbar should
+   probably use consistent coordinates.
+3. **Host hidden while `popup.drawing=on`** (6.6). Confirm empirically
+   whether the popup window stays visible. The code path suggests it does.
+4. **Nested popup one-refresh lag** (quirk 8). Replicate it, or compute the
+   anchor before the bounds?
+5. **UB cases** (bracket clone, self-move, graph width 0, duplicate reorder,
+   bracket whose first member token is not found). The proposal is to define
+   safe behavior and document it.
+6. **`text_animate_scroll` timing.** It depends on the 60 Hz frame-based
+   animator. Should mbar use wall time (duration/60 s) as SketchyBar does via
+   the display link?
+7. **`get_height` dependence on the previous layout** (4.1). It uses the
+   last computed background height. Should that be replicated for 1:1 popup
+   cell sizes?

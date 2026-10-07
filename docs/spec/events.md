@@ -1293,3 +1293,73 @@ These animations are created outside a batch and stay unlocked until the next ba
 | wake / display reconfiguration | display link renewed; animations resume (wall-clock → usually complete at once) |
 | no animations left after a frame | display link destroyed |
 
+---
+
+## 11. Quirk & bug index
+
+"Replicate?" is a recommendation for drop-in compatibility (configs/plugins depending on it).
+
+| ID | Behavior | Where | Replicate? |
+|---|---|---|---|
+| Q1 | One env map is threaded through all recipients of an event; item N+1 inherits item N's persistent keys it does not override | `bar_manager_custom_events_trigger` | optional (low value); at minimum each recipient must get its own persistent vars, NAME, SENDER |
+| Q2 | `counter` increments on every update call and resets on every actual run → events postpone the next routine run | `bar_item_update` | yes |
+| Q3 | `SENDER` from env-less deliveries is stored in the item's persistent env and leaks into click_script env and later events | `bar_item_update` | yes (cheap; plugins may read `$SENDER` in click scripts) |
+| Q4 | `setenv` in a vfork child likely mutates the daemon environ → vars of earlier scripts leak into later ones | `helpers.h:fork_exec` | see Open Question 1 |
+| Q5 | With separate Spaces off, active display is cursor-based and only re-evaluated at the start of the next event | `event_execute` | yes (or poll on cursor move; event still only on change) |
+| Q6 | Leaving the bar/popup to nowhere sends `mouse.exited` to **every** subscribed item (no `mouse_over` check) | `event_mouse_exited` | yes |
+| Q7 | `frozen` is a boolean; nested freeze/unfreeze clears the batch freeze | `bar_manager_freeze` | no (only intermediate redraws differ) |
+| Q8 | Marquee start inside a batch resets `--animate` for the rest of the batch | `text_animate_scroll` | optional |
+| Q9 | `--animate` duration via `strtoul(…,0)`: hex/octal accepted, negative wraps to ~4.29e9 frames | `handle_message_mach` | parse identically |
+| Q10 | Animation key is (target, setter): `color` vs `color.hex` vs `color.alpha` are independent animations | `animation.h` | yes |
+| Q11 | One Space switch → several `space_change` events (NSWorkspace + SLS 1327 + 1328) | §5.2 | recommended to coalesce *only if* script-visible results are identical; SketchyBar users rely on idempotent scripts — keep ≥1 |
+| Q12 | `system_woke` fires twice after real sleep (+500 ms), each with display rebuild, `display_change`, forced `space_change` | §9.2 | yes |
+| Q13 | `mouse.scrolled.global` and global click handling only on empty bar/popup area; clicks on empty area do nothing | §6.2/6.3 | yes |
+| Q14 | Click on a slider item outside its track: no click_script, no `mouse.clicked` | `bar_item_on_click` | yes |
+| Q15 | `bounce` and `overshoot` curves are linear | `animation_setup` | see Open Question 2 |
+| Q16 | `wifi_change` fires on IPv4 global state changes, without dedup; SSID may be empty | `wifi.m` | yes |
+| Q17 | Brightness dedup state is global across displays | `display.c` | yes |
+| Q18 | `--add event` with an existing name is silently ignored (notification not updated) | `custom_events_append` | yes |
+| Q19 | JSON key typo `modfier_code` in click/scroll INFO | `bar_item.c`, `bar_manager.c` | **yes, exact** |
+| Q20 | Space items run their script on `space_change` only when their selection flips (or forced) | §5.2.1 | yes |
+| Q21 | `--trigger` of space/display/space_windows/volume/media/wifi/power runs the forced OS handler and ignores passed vars; `--trigger brightness_change`/`front_app_switched` do *not* query the OS | `handle_domain_trigger` | yes |
+| Q22 | `event_post` on main thread is synchronous/re-entrant (`--reload` mid-batch) | `event_post` | yes for ordering |
+| Q23 | INFO JSON strings are not JSON-escaped (app names, SSIDs); media escapes only `"` and LF | §5 | yes (byte-exact) |
+| Q24 | `space_windows_change` on Space switch emits one event per space of every display | §5.11 | yes |
+| B1 | Space item inheriting from defaults/clone gets `SID = ancestor's DID` | `bar_item_inherit_from_item` | no (use ancestor SID) — or yes for exactness; trivial |
+| B2 | `space_change` INFO buffer `19*n+4` may truncate | `bar_manager_handle_space_change` | no |
+| B3 | `display_change` INFO buffer 3 bytes | `bar_manager_handle_display_change` | no |
+| B4 | Float snap on cancel uses int-typed call (garbage), immediately overwritten | `animator_cancel` | no (snap then set) |
+| B5 | Hotload while a display link exists with 0 animations leaks a running link (`animator_destroy` only releases when count > 0) | `animator_destroy` | no |
+| B6 | Distributed observers are never removed; after hotload, re-adding an event with the same notification registers a second observer → each notification triggers the event twice; if two events share one notification name, only the first is triggered (but once per observer registration) | `workspace.m`, `custom_events.c` | no (deliver exactly once per notification to the first matching event; document) — see Open Question 4 |
+| B7 | Removing an item does not cancel its animations (use-after-free) | `bar_manager_remove_item` | no (cancel) |
+| B8 | `power_handler` would crash if `IOPSGetProvidingPowerSourceType` returned NULL | `power.c` | no (treat as no event) |
+
+---
+
+## 12. Open questions
+
+1. **vfork env leak (Q4).** On macOS a vfork child shares the parent's address space, so `setenv` in the child very
+   likely persists in the daemon's `environ`; then e.g. `$INFO`, `$BUTTON`, `$SCROLL_DELTA` of a previous event are
+   visible to later scripts that did not set them. Needs empirical confirmation on a Mac (e.g. subscribe an item to
+   `mouse.clicked` and `routine`, print `$INFO` in the routine run). mbar must decide: replicate (maintain a
+   daemon-wide accumulated env map that every spawned script inherits) or spawn with clean per-event env.
+2. **bounce / overshoot.** This checkout maps them to linear. Upstream docs list them as real curves; the shallow clone
+   has no history to recover older formulas. Decide: byte-exact (linear) or implement documented easing (would be an
+   mbar extension).
+3. **Brightness callback thread.** `DisplayServicesRegisterForBrightnessChangeNotifications` delivery thread is
+   undocumented; `event_post` handles both cases, so semantics do not depend on it, but mbar's macOS layer must
+   marshal to its main loop.
+4. **Duplicate distributed observers after hotload (B6)** — confirm empirically whether NSDistributedNotificationCenter
+   delivers twice for a duplicate (observer, selector, name) registration; mbar recommendation: once.
+5. **SkyLight notify ids** (1327/1328 space, 1325/1326 window create/destroy, 815/816 unhide/hide, 1401, capture
+   gating 904/905/1508/1322) are private; their exact trigger conditions on current macOS (14–26) should be verified
+   when implementing `mbar-macos`.
+6. **Order of multiple `space_change` sources** (NSWorkspace vs SLS 1327/1328) and whether `bar.sid` is already
+   updated when the first one arrives — affects only redundant deliveries, but the first delivery might carry a stale
+   INFO. Needs runtime verification.
+7. **Carbon double scroll events** (`kEventMouseWheelMoved` + `kEventMouseScroll` for one gesture) — whether both are
+   delivered for the same physical event, which the 150 ms throttle would hide; mbar should use one CGEvent scroll
+   source plus the same throttle.
+8. **MediaRemote availability.** Since macOS 15.4 the private API refuses non-entitled callers; `media_change` is
+   effectively dead in SketchyBar. mbar may need an alternative provider (out of scope of 1:1 behavior; payload format
+   in §5.10 should be kept).

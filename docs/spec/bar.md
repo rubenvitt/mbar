@@ -453,6 +453,10 @@ So `get_length(item, false)` = `custom_width` whenever a width is set; `get_leng
 
 ### 4.4 Horizontal layout (`bar.c:bar_calculate_bounds_top_bottom`)
 
+Item positions (first char of the item's `position` value, `bar_item.c:bar_item_set_position`): `l` left,
+`r` right, `c` center, `q` = `POSITION_CENTER_LEFT` (left of the notch), `e` = `POSITION_CENTER_RIGHT` (right of
+the notch), `p` popup (`popup.<host>`). Other first chars are rejected.
+
 All cursors are `uint32_t`; `W`, `H` are the bar window's `frame.size` (CGFloat).
 ```
 notch = CGDisplayIsBuiltin(bar.did) ? notch_width : 0
