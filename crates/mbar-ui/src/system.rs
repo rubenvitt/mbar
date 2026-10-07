@@ -132,8 +132,11 @@ pub fn needs_daemon_restart(running: Option<&str>, bundle: &str) -> bool {
 
 /// The `mbar.app` this binary runs from (`…/mbar.app/Contents/MacOS/mbar-ui`), with its
 /// `Info.plist` values; `None` outside a bundle (e.g. a `cargo run` or Linux build).
+/// Canonicalized like the daemon's lookup: `current_exe` on macOS is the path that was
+/// exec'd, so a start via a symlink would otherwise not be recognised as the bundle.
 pub fn current_bundle() -> Option<mbar_app::bundle::AppBundle> {
     let exe = std::env::current_exe().ok()?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
     let root = mbar_app::bundle::bundle_root_from_exe(&exe)?;
     mbar_app::bundle::read_bundle(&root)
 }
@@ -142,7 +145,13 @@ pub fn current_bundle() -> Option<mbar_app::bundle::AppBundle> {
 /// the installed bundle's (e.g. after a Sparkle update while the daemon kept running).
 /// A stopped daemon is left alone: onboarding and the System page handle that. Blocking;
 /// run it on the background executor. Returns whether a restart was requested.
+///
+/// Only for the default bar: the launchd job `dev.rubeen.mbar` runs that one, so a
+/// mismatch on another bar (`mbar-ui --bar-name x`) must not restart the default daemon.
 pub fn sync_daemon_version(client: &Client, bundle_version: &str) -> bool {
+    if client.bar_name() != mbar_ipc::DEFAULT_BAR_NAME {
+        return false;
+    }
     let Ok(stats) = client.send_strs(&["--query", "stats"]) else {
         return false;
     };
@@ -315,6 +324,35 @@ mod tests {
         assert!(!needs_daemon_restart(Some("0.2.0"), "0.2.0"));
         // An old daemon without the field is older than any bundle with this feature.
         assert!(needs_daemon_restart(None, "0.2.0"));
+    }
+
+    #[test]
+    fn version_sync_ignores_other_bars() {
+        // A non-default bar is not run by `dev.rubeen.mbar`: it is never queried (and so
+        // never triggers a kickstart of the default bar's daemon).
+        let bar_name = format!("mbar-ui-test-sync-{}", std::process::id());
+        let path = mbar_ipc::socket_path(&bar_name);
+        let _ = std::fs::remove_file(&path);
+        let server = mbar_ipc::socket::Server::bind(&path).unwrap();
+        let queried = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let q = queried.clone();
+        server
+            .spawn(move |req| {
+                q.store(true, std::sync::atomic::Ordering::SeqCst);
+                req.respond("{\"version\": \"0.0.1\"}\n");
+            })
+            .unwrap();
+        assert!(!sync_daemon_version(
+            &Client::new(bar_name.clone()),
+            "9.9.9"
+        ));
+        assert!(!queried.load(std::sync::atomic::Ordering::SeqCst));
+        // Control: the fake daemon answers, so the guard (not a dead socket) skipped it.
+        assert!(Client::new(bar_name)
+            .send_strs(&["--query", "stats"])
+            .is_ok());
+        assert!(queried.load(std::sync::atomic::Ordering::SeqCst));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
