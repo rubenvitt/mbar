@@ -48,7 +48,8 @@ pub enum Action {
 /// `own_build` is the running daemon's build, `bundle_build` the `CFBundleVersion`
 /// currently on disk. A newer bundle on disk means an update was installed but the
 /// daemon still runs the old binary: restart, but only once per build so a failed
-/// restart never loops. Otherwise offer the newest appcast item, rate-limited per build.
+/// restart never loops. Otherwise offer the newest appcast item newer than both,
+/// rate-limited per build.
 pub fn decide(
     own_build: u64,
     bundle_build: u64,
@@ -56,21 +57,23 @@ pub fn decide(
     state: &UpdateState,
     now: u64,
 ) -> Action {
-    if bundle_build > own_build {
-        if state.restarted_for_build == Some(bundle_build) {
-            return Action::Nothing;
-        }
+    if bundle_build > own_build && state.restarted_for_build != Some(bundle_build) {
         return Action::RestartSelf {
             build: bundle_build,
         };
     }
-    let Some(item) = latest.filter(|i| i.build > own_build) else {
+    // After a failed restart the installed bundle is the baseline: never offer what is
+    // already on disk, but still offer anything newer.
+    let installed = own_build.max(bundle_build);
+    let Some(item) = latest.filter(|i| i.build > installed) else {
         return Action::Nothing;
     };
+    // An offer time in the future means the clock went backwards: don't let it
+    // suppress offers until the clock catches up.
     let recently = state.offered_build == Some(item.build)
         && state
             .offered_at
-            .is_some_and(|t| now.saturating_sub(t) < OFFER_INTERVAL_SECS);
+            .is_some_and(|t| t <= now && now - t < OFFER_INTERVAL_SECS);
     if recently {
         return Action::Nothing;
     }
@@ -158,6 +161,51 @@ mod tests {
             decide(1000, 2000, Some(&item(2000)), &s, 300),
             Action::Nothing
         );
+    }
+
+    #[test]
+    fn failed_restart_still_offers_newer_version_only() {
+        let s = UpdateState {
+            restarted_for_build: Some(2000),
+            ..UpdateState::default()
+        };
+        assert_eq!(
+            decide(1000, 2000, Some(&item(2000)), &s, 100),
+            Action::Nothing
+        );
+        assert!(matches!(
+            decide(1000, 2000, Some(&item(3000)), &s, 100),
+            Action::Offer { build: 3000, .. }
+        ));
+    }
+
+    #[test]
+    fn clock_going_backwards_does_not_block_offers() {
+        let mut s = UpdateState::default();
+        let a = decide(1000, 1000, Some(&item(2000)), &s, 1_000_000);
+        record(&mut s, &a, 1_000_000);
+        // Clock set back by a day: the stale future timestamp must not suppress offers.
+        let a = decide(1000, 1000, Some(&item(2000)), &s, 1_000_000 - 86_400);
+        assert!(matches!(a, Action::Offer { build: 2000, .. }));
+        record(&mut s, &a, 1_000_000 - 86_400);
+        // ...and the rate limit applies again from the new time.
+        assert_eq!(
+            decide(1000, 1000, Some(&item(2000)), &s, 1_000_000 - 86_000),
+            Action::Nothing
+        );
+    }
+
+    #[test]
+    fn corrupted_state_is_default() {
+        for bad in [
+            "",
+            "{\"offered_build\": 20",
+            "[1,2]",
+            "null",
+            "{\"offered_build\": \"2000\", \"offered_at\": -5, \"restarted_for_build\": 1.5}",
+        ] {
+            assert_eq!(UpdateState::from_json(bad), UpdateState::default(), "{bad}");
+        }
     }
 
     #[test]

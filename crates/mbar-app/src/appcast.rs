@@ -12,19 +12,44 @@ fn element<'a>(item: &'a str, name: &str) -> Option<&'a str> {
     let open = format!("<{name}>");
     let start = item.find(&open)? + open.len();
     let end = item[start..].find(&format!("</{name}>"))? + start;
-    Some(item[start..end].trim())
+    let text = item[start..end].trim();
+    Some(
+        text.strip_prefix("<![CDATA[")
+            .and_then(|t| t.strip_suffix("]]>"))
+            .map_or(text, str::trim),
+    )
 }
 
-/// All items with a numeric `sparkle:version` and a `sparkle:shortVersionString`;
-/// anything else (HTML error pages, empty bodies, malformed items) yields nothing.
+/// `name="value"` on the item's `<enclosure>` (older Sparkle feeds put
+/// `sparkle:version` and `sparkle:shortVersionString` there instead of elements).
+fn enclosure_attr<'a>(item: &'a str, name: &str) -> Option<&'a str> {
+    let start = item.find("<enclosure")?;
+    let tag = &item[start..start + item[start..].find('>')?];
+    let key = format!("{name}=");
+    let at = tag
+        .match_indices(&key)
+        .map(|(i, _)| i)
+        .find(|&i| tag[..i].ends_with(char::is_whitespace))?;
+    let rest = &tag[at + key.len()..];
+    let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let value = &rest[1..];
+    Some(value[..value.find(quote)?].trim())
+}
+
+fn field<'a>(item: &'a str, name: &str) -> Option<&'a str> {
+    element(item, name).or_else(|| enclosure_attr(item, name))
+}
+
+/// All items with a numeric `sparkle:version` and a `sparkle:shortVersionString`
+/// (as elements or as `<enclosure>` attributes); anything else (HTML error pages, empty bodies, malformed items) yields nothing.
 pub fn parse_appcast(xml: &str) -> Vec<AppcastItem> {
     xml.split("<item>")
         .skip(1)
         .filter_map(|chunk| {
             let item = &chunk[..chunk.find("</item>")?];
             Some(AppcastItem {
-                build: element(item, "sparkle:version")?.parse().ok()?,
-                short_version: element(item, "sparkle:shortVersionString")?.to_string(),
+                build: field(item, "sparkle:version")?.parse().ok()?,
+                short_version: field(item, "sparkle:shortVersionString")?.to_string(),
                 minimum_system: element(item, "sparkle:minimumSystemVersion").map(str::to_string),
             })
         })
@@ -108,6 +133,72 @@ mod tests {
         assert!(os_at_least("13.0", "13"));
         assert!(!os_at_least("13.6", "14.0"));
         assert!(os_at_least("14.10", "14.9"));
+    }
+
+    /// Exactly what `packaging/macos/appcast.sh` prints.
+    const RELEASE_FEED: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>mbar</title>
+    <item>
+      <title>Version 0.3.0</title>
+      <pubDate>Wed, 07 Oct 2026 18:22:05 +0000</pubDate>
+      <sparkle:version>3000</sparkle:version>
+      <sparkle:shortVersionString>0.3.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <sparkle:releaseNotesLink>https://github.com/rubenvitt/mbar/releases/tag/v0.3.0</sparkle:releaseNotesLink>
+      <enclosure url="https://github.com/rubenvitt/mbar/releases/download/v0.3.0/mbar-0.3.0.zip" sparkle:edSignature="abc==" length="123" type="application/octet-stream"/>
+    </item>
+  </channel>
+</rss>
+"#;
+
+    #[test]
+    fn parses_release_feed() {
+        assert_eq!(
+            parse_appcast(RELEASE_FEED),
+            [AppcastItem {
+                build: 3000,
+                short_version: "0.3.0".into(),
+                minimum_system: Some("13.0".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_enclosure_attributes_and_cdata() {
+        let xml = r#"<rss><channel>
+<item><title><![CDATA[Version 1.2]]></title>
+  <description><![CDATA[<ul><li>fix</li></ul>]]></description>
+  <sparkle:minimumSystemVersion><![CDATA[ 14.0 ]]></sparkle:minimumSystemVersion>
+  <enclosure url="https://x/a.zip"
+    sparkle:version="1002000" sparkle:shortVersionString='1.2.0'
+    length="1" type="application/octet-stream" />
+</item>
+<item><sparkle:version>1001000</sparkle:version><enclosure url="https://x/b.zip" sparkle:version="9"/></item>
+</channel></rss>"#;
+        assert_eq!(
+            parse_appcast(xml),
+            [AppcastItem {
+                build: 1002000,
+                short_version: "1.2.0".into(),
+                minimum_system: Some("14.0".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn skips_incomplete_items_keeps_valid_ones() {
+        let xml = "<item><sparkle:version>abc</sparkle:version>\
+<sparkle:shortVersionString>x</sparkle:shortVersionString></item>\
+<item><sparkle:shortVersionString>0.1.0</sparkle:shortVersionString></item>\
+<item><sparkle:version>2000</sparkle:version>\
+<sparkle:shortVersionString>0.2.0</sparkle:shortVersionString></item>\
+<item><sparkle:version>5000</sparkle:version>";
+        let items = parse_appcast(xml);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].build, 2000);
+        assert_eq!(best_item(&items, "26.0").unwrap().build, 2000);
     }
 
     #[test]
