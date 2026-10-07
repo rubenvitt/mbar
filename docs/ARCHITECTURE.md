@@ -6,8 +6,11 @@ for macOS. Goals, in priority order:
 1. **Drop-in compatible** with SketchyBar configs: same command language
    (`--add/--set/--bar/--default/--subscribe/--trigger/--push/--query/--animate/...`),
    same property names, same events, same script environment, same query JSON.
-   Existing `sketchybarrc` files, plugins, the original `sketchybar` client binary and
-   SbarLua must keep working (mach IPC under the bootstrap name `git.felix.<bar_name>`).
+   Existing `sketchybarrc` files and plugins must keep working (plugins calling
+   `sketchybar` reach mbar through a `sketchybar -> mbar` symlink).
+   mbar has its **own** IPC identity: mach bootstrap name `dev.rubeen.<bar_name>`
+   (default bar name `mbar` → `dev.rubeen.mbar`); it does not register SketchyBar's
+   `git.felix.*` name.
 2. **Faster**: GPU (Metal) rendering, damage-driven redraw, frame-paced animations,
    cached text runs, coalesced updates, native data providers instead of
    fork/exec'ing shell scripts every few seconds.
@@ -82,9 +85,10 @@ Pure logic. No Apple types, no threads, no I/O except what is injected.
 * Unix domain socket `$TMPDIR/mbar_<user>_<bar_name>.socket`, frames:
   `u32 LE length` + payload. Request payload = argv joined by `\0`, terminated `\0\0`
   (same as SketchyBar's mach payload). Response = UTF-8 bytes (may be empty).
-* On macOS additionally a mach server registered as `git.felix.<bar_name>` that speaks
-  SketchyBar's exact OOL-descriptor message format, so the original `sketchybar` CLI
-  and SbarLua talk to mbar unchanged.
+* On macOS additionally a mach server registered as `dev.rubeen.<bar_name>`
+  (default `dev.rubeen.mbar`). Payload layout follows SketchyBar's OOL-descriptor
+  message format (argv joined by `\0`), so porting a SketchyBar client such as
+  SbarLua only requires changing the bootstrap name.
 
 ### mbar-macos
 
@@ -102,7 +106,7 @@ Pure logic. No Apple types, no threads, no I/O except what is injected.
 | `alias` | menu-extra discovery (CGWindowList) and capture |
 | `menus` | Accessibility: front app menu titles, open a menu (AXPress), hide native menu bar |
 | `providers` | native samples: cpu, memory, battery, network, disk, volume, wifi |
-| `mach` | SketchyBar-compatible mach server |
+| `mach` | mach server `dev.rubeen.<bar_name>` |
 
 ### mbar (binary)
 
