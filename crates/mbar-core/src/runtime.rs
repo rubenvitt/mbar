@@ -2166,9 +2166,6 @@ impl Runtime {
 
     /// `bar_manager_poll_active_display` before every input.
     fn poll_active_display(&mut self, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
-        if self.model.bars.is_empty() && self.started.is_none() {
-            return;
-        }
         if res.active_display() != self.model.active_adid {
             self.handle_display_change(effects, res);
         }
@@ -2258,7 +2255,7 @@ impl Runtime {
         };
         let (_, item) = self.click_target(m.point);
         let Some(id) = item else { return };
-        let mut env = event::click_env(button, button_code, m.modifiers);
+        let env = event::click_env(button, button_code, m.modifiers);
         let active = self.model.active_adid;
         let Some(it) = self.model.item_mut(id) else {
             return;
@@ -2291,8 +2288,6 @@ impl Runtime {
         self.run_click_script(id, click_env, effects);
         if subscribed {
             self.deliver(id, "mouse.clicked", true, Some(&env), effects);
-        } else {
-            env.clear();
         }
     }
 
@@ -2967,13 +2962,6 @@ impl Runtime {
             WindowHit::Item(id) => Some(id),
             _ => None,
         }
-    }
-
-    /// Whether an item type participates in alias recapture.
-    fn is_alias(&self, id: ItemId) -> bool {
-        self.model
-            .item(id)
-            .is_some_and(|i| i.item_type == ItemType::Alias)
     }
 
     /// Fills the derived fields of `stats` (`--query stats`, `--monitor stats`).

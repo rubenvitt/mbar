@@ -26,8 +26,8 @@ fn linear_animation_and_lock() {
     // The first stepped frame (in msg) has t = 0.
     assert_eq!(y_offset(&mut h, "a"), 0);
     step(&mut h, 250);
-    assert_eq!(y_offset(&mut h, "a"), 5);
     assert!(h.last_frame.windows.iter().any(|w| w.key == WindowKey::Bar(1)));
+    assert_eq!(y_offset(&mut h, "a"), 5);
     // A later animated set of the same property cancels the locked animation and starts
     // from the current intermediate value.
     h.msg(&["--animate", "linear", "60", "--set", "a", "y_offset=0"]);
@@ -129,7 +129,7 @@ fn batching_one_layout_and_dirty_windows() {
     let out = h.frame();
     assert_eq!(out.windows.len(), 1);
     let s1 = h.query(&["stats"])["frames"].as_u64().unwrap();
-    assert_eq!(s1 - s0, 1 + 1, "one frame for the batch (+1 from the stats query msg)");
+    assert_eq!(s1 - s0, 1, "one rendering frame for the batch");
     // blur_radius changes window props without a redraw request from the setter.
     h.msg(&["--bar", "blur_radius=20"]);
     assert!(h.last_frame.windows.iter().all(|w| w.blur_radius == 20));
