@@ -545,3 +545,31 @@ fn monitor_streams_events() {
     assert_eq!(v["type"], "event");
     assert_eq!(v["name"], "ping");
 }
+
+#[test]
+fn monitor_streams_stats() {
+    let sb = Sandbox::new();
+    let _d = sb.daemon();
+    let mut mon = sb
+        .command(Path::new(EXE))
+        .args(["--monitor", "stats"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out = mon.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(out).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    // Snapshots follow the 1 s routine clock.
+    let line = rx.recv_timeout(TIMEOUT).expect("no stats line");
+    let _ = mon.kill();
+    let _ = mon.wait();
+    let v: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line}"));
+    assert_eq!(v["type"], "stats");
+    assert!(v["uptime_s"].is_number(), "{line}");
+}

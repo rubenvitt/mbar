@@ -200,7 +200,7 @@ impl Driver {
         self.drain(res);
     }
 
-    /// Fires due timers (runtime, Lua, monitor stats), runs queued work and renders when
+    /// Fires due timers (runtime, Lua), runs queued work and renders when
     /// needed. Returns the frame for the platform to present.
     pub fn poll(&mut self, res: &mut dyn Resources) -> Option<FrameOutput> {
         let now = res.now();
@@ -268,7 +268,7 @@ impl Driver {
         }
     }
 
-    /// Runs a message synchronously and returns its reply (Lua `Host::command`, stats).
+    /// Runs a message synchronously and returns its reply (Lua `Host::command`).
     fn command_sync(&mut self, args: Vec<String>, res: &mut dyn Resources) -> String {
         if self.exit {
             return String::new();
@@ -502,6 +502,13 @@ impl Driver {
     }
 
     // ------------------------------------------------------------------ --monitor
+    //
+    // Contract with mbar-ui (`StreamDecoder`): the connection stays open after the request;
+    // the daemon writes length-prefixed frames (same framing as replies), each holding
+    // newline-terminated JSON lines (`docs/EXTENSIONS.md`). The first frame is the reply
+    // (empty when accepted; `[!] …` = error, then the connection closes). Event and stats
+    // lines come from the runtime (`Effect::Monitor`); subscribers that cannot be written
+    // to (gone, or stalled > 1 s) are dropped.
 
     fn start_monitor(&mut self, responder: Responder, mode: MonitorMode, text: String) {
         if mbar_ipc::is_error_response(&text) {
