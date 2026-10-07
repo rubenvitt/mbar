@@ -190,9 +190,8 @@ impl MouseMonitor {
                 ev.as_ptr()
             });
             // SAFETY: the handler returns the (unmodified) event, as required.
-            if let Some(mon) =
-                unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(m, &block) }
-            {
+            let mon = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(m, &block) };
+            if let Some(mon) = mon {
                 monitors.push(mon);
             }
         }
