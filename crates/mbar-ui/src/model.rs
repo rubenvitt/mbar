@@ -707,9 +707,10 @@ impl LuaTable {
             let rendered = if child.children.is_empty() {
                 child.leaf.clone().unwrap_or_else(|| "nil".into())
             } else if let Some(leaf) = &child.leaf {
-                // `icon=x` and `icon.color=y` together: SbarLua's `string` field.
+                // `icon=x` and `icon.color=y` together: the positional entry of a nested
+                // table is the key's own value (`{ "x", color = y }`, see mbar-lua).
                 let mut t = child.render_inner();
-                t.insert(0, format!("string = {leaf}"));
+                t.insert(0, leaf.clone());
                 format!("{{ {} }}", t.join(", "))
             } else {
                 child.render()
@@ -730,8 +731,8 @@ impl LuaTable {
     }
 }
 
-/// Lua (SbarLua-style API): `mbar.set("clock", { label = { color = 0xffffffff } })` or
-/// `mbar.bar({ height = 32 })`.
+/// Lua (mbar-lua, SbarLua-style API): `mbar.set("clock", { label = { color = 0xffffffff } })`
+/// or `mbar.bar({ height = 32 })`. Dotted keys become nested tables.
 pub fn lua_snippet(target: &Target, pairs: &[(String, String)]) -> String {
     let mut table = LuaTable::default();
     for (k, v) in pairs {
@@ -1389,7 +1390,7 @@ mod tests {
         ];
         assert_eq!(
             lua_snippet(&t, &mixed),
-            "mbar.set(\"clock\", { icon = { string = \"A\", color = 0x1 } })"
+            "mbar.set(\"clock\", { icon = { \"A\", color = 0x1 } })"
         );
         assert_eq!(shell_quote(""), "''");
         assert_eq!(shell_quote("a b"), "'a b'");
