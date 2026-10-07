@@ -165,7 +165,7 @@ impl Driver {
     /// the shell config's commands reach the daemon.
     pub fn start(&mut self, res: &mut dyn Resources) {
         let fx = self.rt.begin(res);
-        self.apply(fx, res);
+        self.apply(fx);
         self.deferred.push_back(Deferred::RunConfig(None));
         self.drain(res);
     }
@@ -184,7 +184,7 @@ impl Driver {
         match ev {
             Event::Input(input) => {
                 let fx = self.rt.handle(input, res);
-                self.apply(fx, res);
+                self.apply(fx);
             }
             Event::Request { args, responder } => self.request(args, responder, res),
             Event::LuaExecDone {
@@ -206,7 +206,7 @@ impl Driver {
         let now = res.now();
         if !self.exit && self.rt.next_deadline().is_some_and(|d| d <= now) {
             let fx = self.rt.handle(Input::Timer, res);
-            self.apply(fx, res);
+            self.apply(fx);
         }
         if !self.lua_timers.is_empty() {
             let mut due: Vec<_> = Vec::new();
@@ -260,7 +260,7 @@ impl Driver {
             }
         }
         let fx = self.rt.handle(Input::Message { args, reply: token }, res);
-        self.apply(fx, res);
+        self.apply(fx);
         // The runtime does not reply to an accepted `--monitor` (the connection stays
         // open); an error reply has already been delivered by `apply`.
         if let Some((r, mode)) = self.pending_monitors.remove(&token) {
@@ -283,7 +283,7 @@ impl Driver {
                 e => rest.push(e),
             }
         }
-        self.apply(rest, res);
+        self.apply(rest);
         response
     }
 
@@ -299,7 +299,7 @@ impl Driver {
 
     // ------------------------------------------------------------------ effects
 
-    fn apply(&mut self, effects: Vec<Effect>, res: &mut dyn Resources) {
+    fn apply(&mut self, effects: Vec<Effect>) {
         for e in effects {
             match e {
                 Effect::Reply { reply, text } => self.reply(reply, text),
