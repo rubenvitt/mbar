@@ -337,9 +337,9 @@ pub fn sys_event_to_input(ev: SysEvent) -> Option<Input> {
         SysEvent::MenuBarHidingChanged => Input::Event(OsEvent::MenuBarHiddenChanged),
         SysEvent::VolumeChange(v) => Input::Event(OsEvent::VolumeChanged(v)),
         SysEvent::BrightnessChange(v) => Input::Event(OsEvent::BrightnessChanged(v)),
-        SysEvent::PowerSourceChange(s) => Input::Event(OsEvent::PowerSourceChanged(
-            power_source(&s)?,
-        )),
+        SysEvent::PowerSourceChange(s) => {
+            Input::Event(OsEvent::PowerSourceChanged(power_source(&s)?))
+        }
         SysEvent::WifiChange(s) => Input::Event(OsEvent::WifiChanged(s)),
         SysEvent::MediaChange(s) => Input::Event(OsEvent::MediaChanged(s)),
         SysEvent::SystemWillSleep => Input::Event(OsEvent::SystemWillSleep),
@@ -475,7 +475,10 @@ mod tests {
             self.runs.get(&key.0).map(|r| TextRunId(*r))
         }
         fn image(&self, key: ImageKey) -> Option<ImageId> {
-            self.images.contains(&key.0).then(|| image_id(key)).flatten()
+            self.images
+                .contains(&key.0)
+                .then(|| image_id(key))
+                .flatten()
         }
     }
 
@@ -688,11 +691,14 @@ mod tests {
                 assert_eq!(*baseline, 20.0);
                 assert!(*fill);
                 assert_eq!(*line_width, 1.5);
-                assert_eq!(list.path_points(points), &[
-                    GPoint::new(0.0, 10.0),
-                    GPoint::new(0.0, 5.0),
-                    GPoint::new(1.0, 7.0)
-                ]);
+                assert_eq!(
+                    list.path_points(points),
+                    &[
+                        GPoint::new(0.0, 10.0),
+                        GPoint::new(0.0, 5.0),
+                        GPoint::new(1.0, 7.0)
+                    ]
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -894,11 +900,8 @@ mod tests {
 
     #[test]
     fn mouse_mapping() {
-        let up = monitor_mouse_input(
-            &sys_mouse(SysMouseKind::Up, 4, 1),
-            Some(WindowKey::Bar(1)),
-        )
-        .unwrap();
+        let up = monitor_mouse_input(&sys_mouse(SysMouseKind::Up, 4, 1), Some(WindowKey::Bar(1)))
+            .unwrap();
         assert_eq!(
             up,
             MouseInput {
@@ -925,10 +928,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sc.kind, MouseKind::Scrolled { delta: -2 });
-        assert_eq!(
-            button_of_cg_type(26),
-            MouseButton::Other
-        );
+        assert_eq!(button_of_cg_type(26), MouseButton::Other);
 
         let ev = WinMouse {
             kind: MouseEventKind::Moved,
@@ -939,8 +939,8 @@ mod tests {
             precise_scroll: false,
             click_count: 0,
         };
-        let m = window_mouse_input(WindowKey::Popup(ItemId(3)), Point::new(200.0, 30.0), &ev)
-            .unwrap();
+        let m =
+            window_mouse_input(WindowKey::Popup(ItemId(3)), Point::new(200.0, 30.0), &ev).unwrap();
         assert_eq!(m.kind, MouseKind::Moved);
         assert_eq!(m.point, Point::new(210.0, 33.0));
         assert_eq!(m.window, Some(WindowKey::Popup(ItemId(3))));

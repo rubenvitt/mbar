@@ -284,10 +284,12 @@ impl Renderer {
         let library = device
             .newLibraryWithSource_options_error(&NSString::from_str(shaders::SOURCE), None)
             .map_err(|e| RendererError::Shader(e.localizedDescription().to_string()))?;
-        let quad_pipeline = make_pipeline(&device, &library, "quad_vertex", "quad_fragment", false)?;
+        let quad_pipeline =
+            make_pipeline(&device, &library, "quad_vertex", "quad_fragment", false)?;
         let erase_pipeline =
             make_pipeline(&device, &library, "quad_vertex", "quad_fragment", true)?;
-        let path_pipeline = make_pipeline(&device, &library, "path_vertex", "path_fragment", false)?;
+        let path_pipeline =
+            make_pipeline(&device, &library, "path_vertex", "path_fragment", false)?;
         let nearest = make_sampler(&device, MTLSamplerMinMagFilter::Nearest)?;
         let linear = make_sampler(&device, MTLSamplerMinMagFilter::Linear)?;
         let dummy = gpu::new_texture(&device, MTLPixelFormat::R8Unorm, 1, 1)

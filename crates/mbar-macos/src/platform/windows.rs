@@ -171,15 +171,18 @@ impl WindowManager {
 
         let mut look = res.lookup();
         scene_to_drawlist(&m.scene, &mut self.list, &mut look);
-        m.win
-            .render(&self.list, &mut res.renderer, &mut res.text.system, &res.images.store);
+        m.win.render(
+            &self.list,
+            &mut res.renderer,
+            &mut res.text.system,
+            &res.images.store,
+        );
         let newly_shown = !m.shown;
         if newly_shown {
             m.win.show();
             m.shown = true;
         }
-        if m.blur != Some(u.blur_radius) && (m.win.set_blur(u.blur_radius) || u.blur_radius == 0)
-        {
+        if m.blur != Some(u.blur_radius) && (m.win.set_blur(u.blur_radius) || u.blur_radius == 0) {
             m.blur = Some(u.blur_radius);
         }
 
@@ -236,8 +239,12 @@ impl WindowManager {
             }
             let mut look = res.lookup();
             scene_to_drawlist(&m.scene, &mut self.list, &mut look);
-            m.win
-                .render(&self.list, &mut res.renderer, &mut res.text.system, &res.images.store);
+            m.win.render(
+                &self.list,
+                &mut res.renderer,
+                &mut res.text.system,
+                &res.images.store,
+            );
             for c in &mut m.children {
                 if c.win.needs_redraw() {
                     c.win.render(

@@ -218,9 +218,9 @@ impl Services {
                 return Translated::Request { args, reply };
             }
             SysEvent::Mouse(m) => {
-                let window = wm.key_for_window_number(m.window_number).or_else(|| {
-                    wm.key_at(Point::new(m.location.x as f32, m.location.y as f32))
-                });
+                let window = wm
+                    .key_for_window_number(m.window_number)
+                    .or_else(|| wm.key_at(Point::new(m.location.x as f32, m.location.y as f32)));
                 self.monitor_pending = match m.kind {
                     SysMouseKind::Up => Some(ClickTag::Up),
                     SysMouseKind::Scrolled { .. } => Some(ClickTag::Scroll),
@@ -241,7 +241,12 @@ impl Services {
 
     /// A bar/popup view mouse event. Releases and scrolls already reported (with exact CG
     /// data) by the NSEvent monitor are dropped; otherwise they are mapped approximately.
-    pub fn view_mouse(&mut self, key: WindowKey, ev: &ViewMouse, wm: &WindowManager) -> Option<Input> {
+    pub fn view_mouse(
+        &mut self,
+        key: WindowKey,
+        ev: &ViewMouse,
+        wm: &WindowManager,
+    ) -> Option<Input> {
         if monitored_kind(ev.kind) {
             let tag = if ev.kind == MouseEventKind::Up {
                 ClickTag::Up
@@ -280,7 +285,9 @@ impl Services {
                 forced,
             } => {
                 let sink = self.sink.clone();
-                let s = self.aliases.get_or_insert_with(|| AliasScheduler::new(sink));
+                let s = self
+                    .aliases
+                    .get_or_insert_with(|| AliasScheduler::new(sink));
                 s.set(item.0, &owner, name.as_deref(), 0);
                 s.refresh_now(item.0);
                 let f = self.alias_forced.entry(item.0).or_insert(false);

@@ -111,7 +111,8 @@ impl DeadlineTimer {
         let fire = CFAbsoluteTimeGetCurrent() + FAR_FUTURE;
         // SAFETY: default allocator; the block is copied by CF; a repeating timer with a
         // huge interval is never invalidated by firing, so it can be re-armed forever.
-        let timer = unsafe { CFRunLoopTimer::with_handler(None, fire, FAR_FUTURE, 0, 0, Some(&block)) }?;
+        let timer =
+            unsafe { CFRunLoopTimer::with_handler(None, fire, FAR_FUTURE, 0, 0, Some(&block)) }?;
         let rl = CFRunLoop::main()?;
         // SAFETY: reading an immutable CF constant.
         rl.add_timer(Some(&timer), unsafe { kCFRunLoopCommonModes });

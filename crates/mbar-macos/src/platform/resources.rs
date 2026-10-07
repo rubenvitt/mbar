@@ -20,8 +20,8 @@ use crate::sys::{alias, displays, events, menus, spaces};
 use mbar_core::components::{FontSpec, ImageSource};
 use mbar_core::geometry::{Rect, Size};
 use mbar_core::platform::{
-    DisplayInfo, ImageError, ImageInfo, ImageKey, MenuExtra, Resources, SpaceInfo,
-    SystemQuery, SystemValue, TextKey, TextMetrics,
+    DisplayInfo, ImageError, ImageInfo, ImageKey, MenuExtra, Resources, SpaceInfo, SystemQuery,
+    SystemValue, TextKey, TextMetrics,
 };
 use objc2::MainThreadMarker;
 use objc2_core_foundation::{CFRetained, CGRect};
@@ -261,10 +261,7 @@ impl ImageCache {
     pub fn load(&mut self, source: &ImageSource) -> Result<ImageInfo, ImageError> {
         match source {
             ImageSource::App(name) => {
-                let g = self
-                    .store
-                    .load_app_icon(name)
-                    .ok_or(ImageError::NotFound)?;
+                let g = self.store.load_app_icon(name).ok_or(ImageError::NotFound)?;
                 Ok(self.info(&g, hash_of(("app", g.id.0))))
             }
             ImageSource::File(path) => {
@@ -274,10 +271,7 @@ impl ImageCache {
                 }
                 // `CGDataProviderCreateWithFilename` fails on unreadable files.
                 std::fs::File::open(path).map_err(|_| ImageError::InvalidFormat)?;
-                let g = self
-                    .store
-                    .load_file(path)
-                    .ok_or(ImageError::DecodeFailed)?;
+                let g = self.store.load_file(path).ok_or(ImageError::DecodeFailed)?;
                 let mtime = meta
                     .modified()
                     .ok()

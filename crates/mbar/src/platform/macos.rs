@@ -19,13 +19,13 @@
 //! paused. Scripts and IPC never block the main thread (spawned/reaped and read on
 //! background threads by the driver and the IPC listener).
 
+use mbar_core::platform::{Input, WindowKey};
 use mbar_macos::gfx::window::MouseEvent as ViewMouse;
 use mbar_macos::platform::{
     App, DeadlineTimer, FramePacer, MacResources, MainThreadMarker, Services, Translated,
     ViewMouseSink, Waker, WindowManager,
 };
 use mbar_macos::sys::{Sink, SysEvent};
-use mbar_core::platform::{Input, WindowKey};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
