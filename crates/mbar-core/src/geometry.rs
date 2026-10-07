@@ -33,10 +33,20 @@ impl Size {
 }
 
 impl Rect {
-    pub const ZERO: Rect = Rect { x: 0.0, y: 0.0, width: 0.0, height: 0.0 };
+    pub const ZERO: Rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 0.0,
+        height: 0.0,
+    };
 
     pub const fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
-        Rect { x, y, width, height }
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
     }
     pub fn min_x(&self) -> f32 {
         self.x
@@ -72,7 +82,12 @@ impl Rect {
         Rect::new(self.x + dx, self.y + dy, self.width, self.height)
     }
     pub fn inset(&self, dx: f32, dy: f32) -> Rect {
-        Rect::new(self.x + dx, self.y + dy, self.width - 2.0 * dx, self.height - 2.0 * dy)
+        Rect::new(
+            self.x + dx,
+            self.y + dy,
+            self.width - 2.0 * dx,
+            self.height - 2.0 * dy,
+        )
     }
     /// Smallest rect containing both. Empty rects are ignored.
     pub fn union(&self, other: &Rect) -> Rect {

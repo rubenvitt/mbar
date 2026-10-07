@@ -232,7 +232,19 @@ while token non-empty:
     token = get_token()
 ```
 The list ends at end of message or at the first **following** token whose first
-character is `-`. A *value* that starts with `-` is fine (`y_offset=-5`) because
+character is `-`.
+
+**Quirk: the first token after the domain (or after the `--set` item name) is
+never checked for `-`.** A Mode A domain with no pairs therefore swallows the
+next command token as a malformed pair:
+- `--set foo --set bar label=x`:
+  1. `--set` is reported as `Expected <key>=<value> pair` for `foo`.
+  2. `bar` is not a `-` token, so it is reported the same way.
+  3. `label=x` is applied **to `foo`**.
+- `--bar --set foo x=1`:
+  1. `--bar` reports the `--set` token and breaks.
+  2. `foo` becomes the next command: `[!] Unknown domain 'foo'`.
+  3. The rest of the batch line is skipped. A *value* that starts with `-` is fine (`y_offset=-5`) because
 the token starts with the key. A token that is a bare `-5` ends the list and is
 then read as a command (`[!] Unknown domain '-5'`).
 
@@ -410,6 +422,18 @@ Booleans are serialized as `"on"`/`"off"` (`format_bool`).
 with `~` are rewritten to `$HOME` + rest (`resolve_path`). Only a leading `~` is
 handled, so `~user` becomes `$HOMEuser`. The path is capped at 511 bytes.
 
+### 4.5.1 Relative paths
+Every relative path is resolved by the **daemon** against **its** cwd, not the
+client's. After the first config run, that cwd is the config directory (§10.2).
+This applies to:
+- `--reload <path>` (`realpath` in the daemon);
+- `--load-font`;
+- relative image files;
+- relative paths inside `script` strings, which are run by `sh` in that cwd.
+
+`--config <path>` is the exception: it is resolved by the starting process,
+against the shell's cwd.
+
 ### 4.6 Dot notation (sub-domains)
 Property keys are resolved **recursively, one segment at a time**. Each level
 splits the remaining key at its first `.` (`get_key_value_pair(key, '.')`).
@@ -525,7 +549,9 @@ The first token is the *type*. `event` is handled before everything else
      continues.
    - Side effects for `space`:
      - If no script is set, `script = "sketchybar -m --set $NAME icon.highlight=$SELECTED"`.
-       It is literally `sketchybar`, not the bar name.
+       It is literally `sketchybar`, not the bar name. **Quirk:** "no script"
+       means none after inheriting from the default item, so a `--default script=…`
+       suppresses this built-in script.
      - `update_mask |= space_change`.
      - `updates = off`, and "when_shown" is cleared.
      - Env vars `SELECTED=false`, `SID=0`, `DID=0`.
@@ -1092,9 +1118,12 @@ None of these are animated. They always report a change.
   `space_change`.
 
 ### 7.4 `--trigger <event> [<KEY>=<value> ...]` (Mode B)
-- Every following token with `=` and a **non-empty** key and value becomes an env
-  var: split at the first `=`, later duplicates win. Other tokens are ignored
+- Every following token that contains `=` with a **non-empty value** becomes an
+  env var: split at the first `=`, later duplicates win. Other tokens are ignored
   silently.
+  - `=v` (empty key) is accepted, but the later `setenv("")` fails, so it has no
+    effect.
+  - `K=` (empty value) is dropped.
 - Built-in events with forced handlers. For these, the user env vars are
   **ignored**:
 
@@ -1892,3 +1921,72 @@ unprefixed text give exit 0.
 Here `%s` is `g_name`.
 
 ---
+## 14. Notes for the mbar implementation
+
+1. **Tokenizer.**
+   - Implement `get_token`, Mode A, Mode B and Mode C exactly as in §3.2,
+     including the `-` prefix rules. Scripts in the wild depend on
+     `--set a k=v --set b k=v` chaining.
+   - Fixing the "first token not checked" and "empty argv ends the message"
+     quirks is low-risk. If you fix them, document it here.
+2. **Atomicity.**
+   - One IPC request is one transaction: freeze, apply all commands in order,
+     lock animations, refresh once, reply.
+   - Requests are processed serially on the main loop.
+3. **Response contract.**
+   - Concatenate all messages in order.
+   - The client's exit code is decided by `rsp[1] == '!'` on the first message.
+   - The client prints to stderr on failure and to stdout otherwise, with no
+     added newline.
+   - Silent exit 0 if the daemon is not reachable. Consider an opt-in error
+     message, but keep exit 0 by default for compatibility.
+   - Keep the reply timeout (100 ms) or make it larger. **Recommendation:**
+     larger. 100 ms is easily exceeded by `--query` on a busy system, and then
+     queries come back empty.
+4. **Numbers.** Use C-compatible `strtol`/`strtoul`/`strtof` semantics: prefix
+   detection, partial parse, garbage gives 0, truncation to 32 bits (§4.1).
+   Colors depend on this.
+5. **Item store.**
+   - An ordered `Vec` of items (`bar_items` order matters for drawing order
+     inside each position, for regex iteration order, and for `--query bar`)
+     plus a name → index map.
+   - Store the default item as a full item value. Creation clones it, except for
+     the not-inherited fields listed in §6.3.
+6. **Event bits.** Keep the registration order of §7.1 so that `--query events`
+   bits and `update_mask` values match SketchyBar.
+7. **JSON output.** Reproduce the hand-formatted output byte-for-byte (tabs,
+   `0x%x`, `%f`, `(null)`, quoted graph floats, `modfier_code`). Third-party
+   tools parse it, sometimes with regex.
+8. **Env for children.** Build the env explicitly per spawn: daemon base env +
+   `BAR_NAME` + `CONFIG_DIR` + item vars + event vars + `SENDER`. Set cwd to the
+   config dir. Exec `/usr/bin/env sh -c <cmd>`. Apply a 60 s `alarm`/kill. Do
+   not wait, but reap children.
+
+## 15. Open questions / unverified points
+- **vfork env leakage (§12.1).** This assumes the Darwin `vfork` child shares
+  the parent's address space, so `setenv` in the child mutates the daemon's
+  `environ`. Verify empirically: does a script see an `INFO` that its event did
+  not set? Decide whether mbar replicates it. The recommendation is no.
+- **`--load-font`.** `CFURLCreateWithString` with a plain filesystem path
+  probably produces a relative URL that CoreText cannot load. It is unclear
+  whether this domain works at all with plain paths. mbar on Linux should
+  accept a file path and register it with fontconfig (`FcConfigAppFontAddFile`).
+- **Regex flavor.** Exact macOS BRE behavior for edge patterns (`//`, `\+`)
+  needs a test on a Mac. mbar needs a BRE→Rust-regex translator, or a decision
+  to use ERE.
+- **`display_change` INFO.** It is truncated to 2 chars (`char adid_str[3]`).
+  That is irrelevant in practice.
+- **Undefined behavior in C.** These paths should be specified by mbar instead
+  of copied:
+  - removing the bracket after a failed first member (use-after-free);
+  - `--move x before x`;
+  - `display=0` on the bar;
+  - more than 64 events;
+  - pushing to a 0-width graph;
+  - the shared graph buffer between clones.
+- **Clone of a popup child.** Should the clone be inserted into the host popup?
+  The C code doesn't insert it, but leaves `parent` set.
+- **Linux mapping of macOS-only sources.** Distributed notifications (`--add event
+  <name> <notification>`), `default_menu_items`, alias components, `space.<n>`
+  and `app.<name>` images, and `mach_helper` all need a Linux design decision.
+  The command syntax and query shapes should be kept regardless.

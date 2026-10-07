@@ -299,9 +299,13 @@ For each member token (the `<position>` token and all tokens after it):
 
 - Arguments are NUL-separated tokens. `--set <name|/regex/> k=v [k=v ...]`.
   Each token is split at the **first** `=`; the value may contain `=`.
-  - A token without `=`: respond
-    `[!] Set (<item>): Expected <key>=<value> pair, but got: '<tok>'\n` and
-    stop this `--set`.
+  - A token without `=` in `--set`: respond
+    `[!] Set (<item>): Expected <key>=<value> pair, but got: '<tok>'\n`
+    (once, naming the first matched item), **skip that token**, and continue
+    with the next one.
+  - In `--default` and `--bar`, the same error (`Set (default)` / `Bar`)
+    **ends** the domain instead. The token after it is then parsed as a new
+    command, which usually gives `[!] Unknown domain`.
   - `k=` (empty value) gives an empty value token.
 - Parsing of the `--set` ends when the next token starts with `-`.
 - An unknown item name responds `[!] Set: Item not found '<name>'\n` and skips

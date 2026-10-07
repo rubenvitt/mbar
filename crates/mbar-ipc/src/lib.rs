@@ -107,7 +107,13 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let args = vec!["--set".to_string(), "clock".into(), "label=".into(), "".into(), "x y".into()];
+        let args = vec![
+            "--set".to_string(),
+            "clock".into(),
+            "label=".into(),
+            "".into(),
+            "x y".into(),
+        ];
         let enc = encode_args(&args);
         assert_eq!(enc, b"--set\0clock\0label=\0\0x y\0\0");
         assert_eq!(decode_args(&enc), args);

@@ -19,7 +19,13 @@ impl Default for Color {
 }
 
 impl Color {
-    pub const TRANSPARENT: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0, hex: 0 };
+    pub const TRANSPARENT: Color = Color {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 0.0,
+        hex: 0,
+    };
 
     pub fn from_hex(hex: u32) -> Self {
         let mut c = Color::TRANSPARENT;

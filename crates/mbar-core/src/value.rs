@@ -13,7 +13,11 @@ pub fn parse_int(s: &str) -> i32 {
 /// `strtol(s, NULL, 0)` returning the full `i64` (C `long` on 64-bit macOS).
 pub fn parse_long(s: &str) -> i64 {
     let (neg, mag) = parse_unsigned_magnitude(s);
-    let mag = mag.min(if neg { i64::MAX as u128 + 1 } else { i64::MAX as u128 });
+    let mag = mag.min(if neg {
+        i64::MAX as u128 + 1
+    } else {
+        i64::MAX as u128
+    });
     if neg {
         (mag as i128).wrapping_neg() as i64
     } else {
@@ -53,7 +57,9 @@ fn parse_unsigned_magnitude(s: &str) -> (bool, u128) {
     }
     let mut v: u128 = 0;
     while i < b.len() {
-        let Some(d) = (b[i] as char).to_digit(radix) else { break };
+        let Some(d) = (b[i] as char).to_digit(radix) else {
+            break;
+        };
         v = v.saturating_mul(radix as u128).saturating_add(d as u128);
         i += 1;
     }

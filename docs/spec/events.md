@@ -274,8 +274,9 @@ for item in bar_items (array order = bar ordering):
 
 The same `env` object is passed to each item in turn and **mutated** by each (`env_vars_set` of the item's own vars,
 NAME, SENDER). Item N+1 therefore sees leftovers of item N's persistent vars (e.g. `SELECTED`, `SID`, `DID`,
-`PERCENTAGE` keys from a previous space/slider item) unless it defines the same keys itself (Quirk Q1). mbar should
-replicate by cloning nothing — i.e. use one mutable env map threaded through all recipients — or document deviation.
+`PERCENTAGE` keys from a previous space/slider item) unless it defines the same keys itself (Quirk Q1). Exact
+replication = one mutable env map threaded through all recipients in order; a per-recipient clone of the event env is
+a (documented) deviation that only removes the leftovers.
 
 ### 4.2 `bar_item_update(item, sender, forced, env)` — exact algorithm (`bar_item.c`)
 
@@ -391,8 +392,8 @@ subscription.
 | `brightness_change` | DisplayServices brightness notifications | Δ > 0.01 (global) | `"%d"` round(b·100) | — | yes |
 | `power_source_change` | IOPS power source notification | state change | `AC` / `BATTERY` | — | no |
 | `wifi_change` | SCDynamicStore `.*/Network/Global/IPv4` | none | SSID (raw bytes) or empty | — | no |
-| `media_change` | MediaRemote now-playing notifications | full JSON string compare | JSON (§5.9) | — | gate only |
-| `space_windows_change` | SLS window/space notify procs | none | JSON (§5.10) | — | yes |
+| `media_change` | MediaRemote now-playing notifications | full JSON string compare | JSON (§5.10) | — | gate only |
+| `space_windows_change` | SLS window/space notify procs | none | JSON (§5.11) | — | yes |
 | `mouse.clicked` | Carbon mouse up | — | JSON | `BUTTON`, `MODIFIER` | n/a |
 | `mouse.scrolled` | Carbon wheel/scroll | 150 ms throttle | JSON | `SCROLL_DELTA`, `MODIFIER` | n/a |
 | `mouse.scrolled.global` | same | same | JSON | `SCROLL_DELTA`, `DID`, `MODIFIER` | n/a |
@@ -774,6 +775,11 @@ if item:                                                  // bar_item_mouse_ente
         bar_item_update(item, "mouse.entered", forced=true, NULL)
     item.mouse_over = true
 ```
+
+Global enter/exit state is driven solely by enter/exit events whose `wid` is the bar or popup window itself;
+item windows sit above the bar window, so whether entering the bar directly onto an item window also produces a
+bar-window enter depends on SkyLight tracking-rect semantics (unverified, Open Question 9). The `mouse_over` flags
+of bars are reset to false whenever bars are recreated (display rebuild).
 
 ### 6.5 `mouse.exited` / `mouse.exited.global` (`event.c:event_mouse_exited`)
 
@@ -1363,3 +1369,8 @@ These animations are created outside a batch and stay unlocked until the next ba
 8. **MediaRemote availability.** Since macOS 15.4 the private API refuses non-entitled callers; `media_change` is
    effectively dead in SketchyBar. mbar may need an alternative provider (out of scope of 1:1 behavior; payload format
    in §5.10 should be kept).
+9. **Tracking rects of overlapping windows.** Whether the bar window receives enter/exit while the cursor moves
+   between the bar background and item windows stacked above it (SkyLight `SLSAddTrackingRect`). The 1-px inset
+   check in `event_mouse_exited` suggests the bar *does* get an exit when the cursor moves onto an item window; mbar
+   must reproduce the resulting `mouse.entered.global`/`mouse.exited.global` semantics (fire on entering/leaving the
+   union of bar + popups), not the raw window events.

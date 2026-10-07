@@ -6,7 +6,9 @@
 
 use mach2::bootstrap::bootstrap_look_up;
 use mach2::kern_return::KERN_SUCCESS;
-use mach2::mach_port::{mach_port_allocate, mach_port_deallocate, mach_port_insert_right, mach_port_mod_refs};
+use mach2::mach_port::{
+    mach_port_allocate, mach_port_deallocate, mach_port_insert_right, mach_port_mod_refs,
+};
 use mach2::message::*;
 use mach2::port::{mach_port_t, MACH_PORT_NULL, MACH_PORT_RIGHT_RECEIVE};
 use mach2::task::{task_get_special_port, TASK_BOOTSTRAP_PORT};
@@ -40,7 +42,8 @@ pub fn lookup(service: &str) -> Option<mach_port_t> {
             return None;
         }
         let mut port: mach_port_t = MACH_PORT_NULL;
-        if bootstrap_look_up(bs, name.as_ptr(), &mut port) != KERN_SUCCESS || port == MACH_PORT_NULL {
+        if bootstrap_look_up(bs, name.as_ptr(), &mut port) != KERN_SUCCESS || port == MACH_PORT_NULL
+        {
             return None;
         }
         Some(port)
@@ -57,7 +60,9 @@ pub fn send(service: &str, payload: &[u8]) -> Option<String> {
         if mach_port_allocate(task, MACH_PORT_RIGHT_RECEIVE, &mut response_port) != KERN_SUCCESS {
             return None;
         }
-        if mach_port_insert_right(task, response_port, response_port, MACH_MSG_TYPE_MAKE_SEND) != KERN_SUCCESS {
+        if mach_port_insert_right(task, response_port, response_port, MACH_MSG_TYPE_MAKE_SEND)
+            != KERN_SUCCESS
+        {
             return None;
         }
 
@@ -65,9 +70,8 @@ pub fn send(service: &str, payload: &[u8]) -> Option<String> {
         msg.header.msgh_remote_port = port;
         msg.header.msgh_local_port = response_port;
         msg.header.msgh_id = response_port as i32;
-        msg.header.msgh_bits = MACH_MSG_TYPE_COPY_SEND
-            | (MACH_MSG_TYPE_MAKE_SEND << 8)
-            | MACH_MSGH_BITS_COMPLEX;
+        msg.header.msgh_bits =
+            MACH_MSG_TYPE_COPY_SEND | (MACH_MSG_TYPE_MAKE_SEND << 8) | MACH_MSGH_BITS_COMPLEX;
         msg.header.msgh_size = std::mem::size_of::<MachMessage>() as mach_msg_size_t;
         msg.descriptor_count = 1;
         msg.descriptor = mach_msg_ool_descriptor_t::new(

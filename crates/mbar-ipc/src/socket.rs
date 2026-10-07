@@ -14,7 +14,8 @@ pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn write_frame(w: &mut impl Write, data: &[u8]) -> io::Result<()> {
-    let len = u32::try_from(data.len()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "frame too large"))?;
+    let len = u32::try_from(data.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "frame too large"))?;
     let mut buf = Vec::with_capacity(4 + data.len());
     buf.extend_from_slice(&len.to_le_bytes());
     buf.extend_from_slice(data);
@@ -27,7 +28,10 @@ pub fn read_frame(r: &mut impl Read) -> io::Result<Vec<u8>> {
     r.read_exact(&mut len)?;
     let len = u32::from_le_bytes(len) as usize;
     if len > MAX_FRAME {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "frame too large",
+        ));
     }
     let mut data = vec![0u8; len];
     r.read_exact(&mut data)?;
@@ -83,12 +87,18 @@ impl Server {
     pub fn bind(path: &Path) -> io::Result<Server> {
         if path.exists() {
             if UnixStream::connect(path).is_ok() {
-                return Err(io::Error::new(io::ErrorKind::AddrInUse, "another instance is running"));
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    "another instance is running",
+                ));
             }
             std::fs::remove_file(path)?;
         }
         let listener = UnixListener::bind(path)?;
-        Ok(Server { path: path.to_path_buf(), listener })
+        Ok(Server {
+            path: path.to_path_buf(),
+            listener,
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -104,17 +114,22 @@ impl Server {
         F: Fn(Request) + Send + Sync + 'static,
     {
         let on_request = std::sync::Arc::new(on_request);
-        std::thread::Builder::new().name("mbar-ipc".into()).spawn(move || {
-            let server = self;
-            for conn in server.listener.incoming() {
-                let Ok(mut stream) = conn else { continue };
-                let _ = stream.set_read_timeout(Some(CLIENT_TIMEOUT));
-                match read_frame(&mut stream) {
-                    Ok(payload) => on_request(Request { payload, stream: Some(stream) }),
-                    Err(e) => log::debug!("ipc: bad request: {e}"),
+        std::thread::Builder::new()
+            .name("mbar-ipc".into())
+            .spawn(move || {
+                let server = self;
+                for conn in server.listener.incoming() {
+                    let Ok(mut stream) = conn else { continue };
+                    let _ = stream.set_read_timeout(Some(CLIENT_TIMEOUT));
+                    match read_frame(&mut stream) {
+                        Ok(payload) => on_request(Request {
+                            payload,
+                            stream: Some(stream),
+                        }),
+                        Err(e) => log::debug!("ipc: bad request: {e}"),
+                    }
                 }
-            }
-        })
+            })
     }
 }
 
