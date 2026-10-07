@@ -18,8 +18,12 @@ use super::util::{self, cfstr, owned};
 use super::{events::Observer, Sink, SysEvent};
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSRunningApplication, NSWorkspace, NSWorkspaceDidActivateApplicationNotification};
-use objc2_application_services::{AXError, AXIsProcessTrusted, AXIsProcessTrustedWithOptions, AXObserver, AXUIElement};
+use objc2_app_kit::{
+    NSRunningApplication, NSWorkspace, NSWorkspaceDidActivateApplicationNotification,
+};
+use objc2_application_services::{
+    AXError, AXIsProcessTrusted, AXIsProcessTrustedWithOptions, AXObserver, AXUIElement,
+};
 use objc2_core_foundation::{
     kCFPreferencesAnyApplication, kCFRunLoopDefaultMode, CFArray, CFBoolean, CFDictionary,
     CFPreferencesAppSynchronize, CFPreferencesCopyAppValue, CFPreferencesSetAppValue, CFRetained,
@@ -79,7 +83,11 @@ pub fn all_menu_titles(pid: i32) -> Option<Vec<String>> {
     Some(
         menu_bar_items(pid)?
             .iter()
-            .map(|e| attr(e, "AXTitle").and_then(|t| util::cf_string(&t)).unwrap_or_default())
+            .map(|e| {
+                attr(e, "AXTitle")
+                    .and_then(|t| util::cf_string(&t))
+                    .unwrap_or_default()
+            })
             .collect(),
     )
 }
@@ -102,9 +110,13 @@ pub fn menu_titles(pid: i32, include_apple: bool) -> Option<Vec<String>> {
 /// `(localized name, pid)`.
 pub fn menu_bar_owner() -> Option<(String, i32)> {
     let ws = NSWorkspace::sharedWorkspace();
-    let app: Retained<NSRunningApplication> = ws.menuBarOwningApplication().or_else(|| ws.frontmostApplication())?;
+    let app: Retained<NSRunningApplication> = ws
+        .menuBarOwningApplication()
+        .or_else(|| ws.frontmostApplication())?;
     Some((
-        app.localizedName().map(|s| s.to_string()).unwrap_or_default(),
+        app.localizedName()
+            .map(|s| s.to_string())
+            .unwrap_or_default(),
         app.processIdentifier(),
     ))
 }
@@ -134,7 +146,11 @@ fn press(pid: i32, target: MenuTarget) {
         MenuTarget::Title(t) => {
             let titles: Vec<String> = items
                 .iter()
-                .map(|e| attr(e, "AXTitle").and_then(|t| util::cf_string(&t)).unwrap_or_default())
+                .map(|e| {
+                    attr(e, "AXTitle")
+                        .and_then(|t| util::cf_string(&t))
+                        .unwrap_or_default()
+                })
                 .collect();
             resolve_menu_target(&titles, &t)
         }
@@ -169,7 +185,9 @@ pub fn open_menu_titled(title: &str) {
 }
 
 fn open(target: MenuTarget) {
-    let Some((_, pid)) = menu_bar_owner() else { return };
+    let Some((_, pid)) = menu_bar_owner() else {
+        return;
+    };
     let _ = std::thread::Builder::new()
         .name("mbar-open-menu".into())
         .spawn(move || press(pid, target));
@@ -194,28 +212,37 @@ static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Re-reads the owner's titles on a background thread and posts them if they changed.
 fn refresh_async() {
-    let Some((app, pid)) = menu_bar_owner() else { return };
+    let Some((app, pid)) = menu_bar_owner() else {
+        return;
+    };
     let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-    let _ = std::thread::Builder::new().name("mbar-menus".into()).spawn(move || {
-        let include_apple = SHARED.lock().unwrap_or_else(|e| e.into_inner()).include_apple;
-        let Some(titles) = menu_titles(pid, include_apple) else { return };
-        if GENERATION.load(Ordering::SeqCst) != generation {
-            return; // superseded by a newer refresh
-        }
-        let sink = {
-            let mut s = SHARED.lock().unwrap_or_else(|e| e.into_inner());
-            let entry = (pid, titles.clone());
-            if s.last.as_ref() == Some(&entry) {
-                None
-            } else {
-                s.last = Some(entry);
-                s.sink.clone()
+    let _ = std::thread::Builder::new()
+        .name("mbar-menus".into())
+        .spawn(move || {
+            let include_apple = SHARED
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .include_apple;
+            let Some(titles) = menu_titles(pid, include_apple) else {
+                return;
+            };
+            if GENERATION.load(Ordering::SeqCst) != generation {
+                return; // superseded by a newer refresh
             }
-        };
-        if let Some(sink) = sink {
-            sink(SysEvent::MenusChanged { app, pid, titles });
-        }
-    });
+            let sink = {
+                let mut s = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+                let entry = (pid, titles.clone());
+                if s.last.as_ref() == Some(&entry) {
+                    None
+                } else {
+                    s.last = Some(entry);
+                    s.sink.clone()
+                }
+            };
+            if let Some(sink) = sink {
+                sink(SysEvent::MenusChanged { app, pid, titles });
+            }
+        });
 }
 
 unsafe extern "C-unwind" fn ax_callback(
@@ -398,7 +425,11 @@ mod tests {
 
     #[test]
     fn titles_selection() {
-        let all = vec!["Apple".to_string(), "Safari".to_string(), "File".to_string()];
+        let all = vec![
+            "Apple".to_string(),
+            "Safari".to_string(),
+            "File".to_string(),
+        ];
         assert_eq!(select_titles(all.clone(), false), vec!["Safari", "File"]);
         assert_eq!(select_titles(all.clone(), true).len(), 3);
         assert_eq!(resolve_menu_target(&all, "0"), Some(0));

@@ -39,7 +39,10 @@ pub enum MouseKind {
     Up,
     /// `delta` = `kCGScrollWheelEventDeltaAxis1` (integer lines, SketchyBar's value);
     /// `point_delta` = pixel delta for smooth scrolling.
-    Scrolled { delta: i32, point_delta: f64 },
+    Scrolled {
+        delta: i32,
+        point_delta: f64,
+    },
 }
 
 /// One monitored mouse event.
@@ -113,13 +116,18 @@ fn kind_of(event: &NSEvent, cg: Option<&CGEvent>) -> Option<MouseKind> {
     let t = event.r#type();
     Some(match t {
         NSEventType::MouseMoved => MouseKind::Moved,
-        NSEventType::LeftMouseDragged | NSEventType::RightMouseDragged | NSEventType::OtherMouseDragged => {
-            MouseKind::Dragged
+        NSEventType::LeftMouseDragged
+        | NSEventType::RightMouseDragged
+        | NSEventType::OtherMouseDragged => MouseKind::Dragged,
+        NSEventType::LeftMouseDown | NSEventType::RightMouseDown | NSEventType::OtherMouseDown => {
+            MouseKind::Down
         }
-        NSEventType::LeftMouseDown | NSEventType::RightMouseDown | NSEventType::OtherMouseDown => MouseKind::Down,
-        NSEventType::LeftMouseUp | NSEventType::RightMouseUp | NSEventType::OtherMouseUp => MouseKind::Up,
+        NSEventType::LeftMouseUp | NSEventType::RightMouseUp | NSEventType::OtherMouseUp => {
+            MouseKind::Up
+        }
         NSEventType::ScrollWheel => MouseKind::Scrolled {
-            delta: CGEvent::integer_value_field(cg, CGEventField::ScrollWheelEventDeltaAxis1) as i32,
+            delta: CGEvent::integer_value_field(cg, CGEventField::ScrollWheelEventDeltaAxis1)
+                as i32,
             point_delta: event.scrollingDeltaY(),
         },
         _ => return None,
@@ -130,7 +138,8 @@ fn kind_of(event: &NSEvent, cg: Option<&CGEvent>) -> Option<MouseKind> {
 pub fn convert(event: &NSEvent, global: bool, mtm: MainThreadMarker) -> Option<MouseEvent> {
     let cg = event.CGEvent();
     let kind = kind_of(event, cg.as_deref())?;
-    let window_number = NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(NSEvent::mouseLocation(), 0, mtm);
+    let window_number =
+        NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(NSEvent::mouseLocation(), 0, mtm);
     Some(MouseEvent {
         kind,
         location: CGEvent::location(cg.as_deref()),
@@ -181,7 +190,9 @@ impl MouseMonitor {
                 ev.as_ptr()
             });
             // SAFETY: the handler returns the (unmodified) event, as required.
-            if let Some(mon) = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(m, &block) } {
+            if let Some(mon) =
+                unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(m, &block) }
+            {
                 monitors.push(mon);
             }
         }
@@ -303,7 +314,10 @@ mod tests {
     fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
         CGRect {
             origin: CGPoint { x, y },
-            size: CGSize { width: w, height: h },
+            size: CGSize {
+                width: w,
+                height: h,
+            },
         }
     }
 
@@ -311,7 +325,10 @@ mod tests {
     fn modifiers() {
         assert_eq!(modifier_description(0x100), "none");
         assert_eq!(modifier_description(131072 | 1048576), "shift,cmd");
-        assert_eq!(modifier_description(8388608 | 524288 | 262144), "ctrl,alt,fn");
+        assert_eq!(
+            modifier_description(8388608 | 524288 | 262144),
+            "ctrl,alt,fn"
+        );
         assert_eq!(button_description(2), "left");
         assert_eq!(button_description(4), "right");
         assert_eq!(button_description(26), "other");
@@ -319,15 +336,24 @@ mod tests {
 
     #[test]
     fn hover() {
-        let wins = vec![("bar", rect(0.0, 0.0, 100.0, 30.0)), ("popup", rect(10.0, 30.0, 50.0, 50.0))];
+        let wins = vec![
+            ("bar", rect(0.0, 0.0, 100.0, 30.0)),
+            ("popup", rect(10.0, 30.0, 50.0, 50.0)),
+        ];
         let mut t = HoverTracker::new();
-        assert_eq!(t.update(CGPoint { x: 5.0, y: 5.0 }, &wins), vec![Hover::Entered("bar")]);
+        assert_eq!(
+            t.update(CGPoint { x: 5.0, y: 5.0 }, &wins),
+            vec![Hover::Entered("bar")]
+        );
         assert!(t.update(CGPoint { x: 6.0, y: 5.0 }, &wins).is_empty());
         assert_eq!(
             t.update(CGPoint { x: 20.0, y: 40.0 }, &wins),
             vec![Hover::Exited("bar"), Hover::Entered("popup")]
         );
-        assert_eq!(t.update(CGPoint { x: 500.0, y: 500.0 }, &wins), vec![Hover::Exited("popup")]);
+        assert_eq!(
+            t.update(CGPoint { x: 500.0, y: 500.0 }, &wins),
+            vec![Hover::Exited("popup")]
+        );
         assert_eq!(t.current(), None);
         // half-open edge
         assert!(t.update(CGPoint { x: 100.0, y: 5.0 }, &wins).is_empty());

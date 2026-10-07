@@ -6,7 +6,7 @@
 #![allow(non_snake_case)]
 
 use super::util::{private_fns, COLOR_SYNC, DISPLAY_SERVICES, SKYLIGHT};
-use objc2_core_foundation::{CFArray, CFString, CFType, CFUUID, CGRect};
+use objc2_core_foundation::{CFArray, CFString, CFType, CGRect, CFUUID};
 use objc2_core_graphics::CGImage;
 use std::ffi::c_void;
 

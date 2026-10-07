@@ -65,7 +65,10 @@ pub fn sort_menu_extras(items: &mut [MenuExtraWindow]) {
 }
 
 fn rect_from_bounds(d: &CFDictionary) -> Option<CGRect> {
-    let get = |k| util::dict_get(d, k).and_then(|v| util::cf_f64(&v).or_else(|| util::cf_i64(&v).map(|i| i as f64)));
+    let get = |k| {
+        util::dict_get(d, k)
+            .and_then(|v| util::cf_f64(&v).or_else(|| util::cf_i64(&v).map(|i| i as f64)))
+    };
     Some(CGRect {
         origin: CGPoint {
             x: get("X")?,
@@ -81,7 +84,9 @@ fn rect_from_bounds(d: &CFDictionary) -> Option<CGRect> {
 /// `get_menu_item_list`: every status-layer window (owner ≠ "Window Server") with all
 /// required keys, sorted rightmost first.
 pub fn list_menu_extras() -> Vec<MenuExtraWindow> {
-    let Some(list): Option<CFRetained<CFArray>> = CGWindowListCopyWindowInfo(CGWindowListOption::OptionAll, 0) else {
+    let Some(list): Option<CFRetained<CFArray>> =
+        CGWindowListCopyWindowInfo(CGWindowListOption::OptionAll, 0)
+    else {
         return Vec::new();
     };
     let mut items: Vec<MenuExtraWindow> = util::array_items(&list)
@@ -92,7 +97,8 @@ pub fn list_menu_extras() -> Vec<MenuExtraWindow> {
             let owner = util::dict_string(&d, "kCGWindowOwnerName")?;
             let pid = util::dict_i64(&d, "kCGWindowOwnerPID")?;
             let layer = util::dict_i64(&d, "kCGWindowLayer")?;
-            let bounds = util::dict_get(&d, "kCGWindowBounds").and_then(util::downcast::<CFDictionary>)?;
+            let bounds =
+                util::dict_get(&d, "kCGWindowBounds").and_then(util::downcast::<CFDictionary>)?;
             let wid = util::dict_i64(&d, "kCGWindowNumber")?;
             if layer != MENUBAR_LAYER || owner == "Window Server" {
                 return None;
@@ -129,7 +135,11 @@ pub const NO_PERMISSION_RESPONSE: &str =
     "[!] Query (default_menu_items): Screen Recording Permissions not given. Restart SketchyBar after granting permissions.\n";
 
 /// `alias_find_window` (`components.md` §9.5).
-pub fn find_window<'a>(items: &'a [MenuExtraWindow], owner: &str, name: Option<&str>) -> Option<&'a MenuExtraWindow> {
+pub fn find_window<'a>(
+    items: &'a [MenuExtraWindow],
+    owner: &str,
+    name: Option<&str>,
+) -> Option<&'a MenuExtraWindow> {
     items.iter().enumerate().find_map(|(i, it)| {
         if it.owner != owner {
             return None;
@@ -156,7 +166,10 @@ pub fn request_screen_capture() -> bool {
 #[derive(Debug)]
 pub enum Capture {
     /// Image plus logical frame (size from `SLSGetScreenRectForWindow`, width rounded).
-    Image { image: CFRetained<CGImage>, frame: CGRect },
+    Image {
+        image: CFRetained<CGImage>,
+        frame: CGRect,
+    },
     /// WindowServer suspended captures (1322/905); keep the old picture.
     Disabled,
     /// Capture failed (window gone, no permission).
@@ -200,7 +213,8 @@ pub fn capture_window(wid: u32) -> Capture {
     if image.is_none() {
         if let Some(f) = sls::SLSHWCaptureWindowList() {
             // SAFETY: one window id; Copy rule for the returned array.
-            let arr: Option<CFRetained<CFArray>> = unsafe { owned(f(sls::cid(), &wid, 1, (1 << 11) | (1 << 8))) };
+            let arr: Option<CFRetained<CFArray>> =
+                unsafe { owned(f(sls::cid(), &wid, 1, (1 << 11) | (1 << 8))) };
             image = arr
                 .and_then(|a| util::array_items(&a).into_iter().next())
                 .and_then(util::downcast::<CGImage>);
@@ -217,7 +231,9 @@ pub fn image_hash(image: &CGImage) -> u64 {
     let mut h = DefaultHasher::new();
     CGImage::width(Some(image)).hash(&mut h);
     CGImage::height(Some(image)).hash(&mut h);
-    if let Some(data) = CGImage::data_provider(Some(image)).and_then(|p| CGDataProvider::data(Some(&p))) {
+    if let Some(data) =
+        CGImage::data_provider(Some(image)).and_then(|p| CGDataProvider::data(Some(&p)))
+    {
         data.to_vec().hash(&mut h);
     }
     h.finish()
@@ -256,7 +272,11 @@ pub fn capture_alias(owner: &str, name: Option<&str>, cached_window_id: u32) -> 
         Capture::Image { image, frame: f } => AliasCapture {
             window_id: wid,
             frame: CGRect {
-                origin: if frame.size.width > 0.0 { frame.origin } else { f.origin },
+                origin: if frame.size.width > 0.0 {
+                    frame.origin
+                } else {
+                    f.origin
+                },
                 size: f.size,
             },
             image: Some(image),
@@ -353,7 +373,10 @@ impl AliasScheduler {
 
     pub fn remove(&self, id: u64) {
         let (lock, _) = &*self.shared;
-        lock.lock().unwrap_or_else(|e| e.into_inner()).entries.remove(&id);
+        lock.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entries
+            .remove(&id);
     }
 }
 
@@ -403,7 +426,12 @@ fn run(shared: Arc<(Mutex<Sched>, Condvar)>, sink: Sink) {
                             let e = s.entries.get_mut(&id)?;
                             let force = e.force;
                             e.force = false;
-                            e.next = now + if e.freq.is_zero() { Duration::from_secs(3600 * 24) } else { e.freq };
+                            e.next = now
+                                + if e.freq.is_zero() {
+                                    Duration::from_secs(3600 * 24)
+                                } else {
+                                    e.freq
+                                };
                             Some(Due {
                                 id,
                                 owner: e.owner.clone(),
@@ -422,7 +450,10 @@ fn run(shared: Arc<(Mutex<Sched>, Condvar)>, sink: Sink) {
                     .map(|e| e.next)
                     .min();
                 s = match next {
-                    Some(t) => cv.wait_timeout(s, t.saturating_duration_since(now)).map(|r| r.0).unwrap_or_else(|e| e.into_inner().0),
+                    Some(t) => cv
+                        .wait_timeout(s, t.saturating_duration_since(now))
+                        .map(|r| r.0)
+                        .unwrap_or_else(|e| e.into_inner().0),
                     None => cv.wait(s).unwrap_or_else(|e| e.into_inner()),
                 };
             }
@@ -485,7 +516,10 @@ mod tests {
 
     #[test]
     fn spec_parsing() {
-        assert_eq!(parse_alias_spec("Control Center,Battery"), ("Control Center".into(), Some("Battery".into())));
+        assert_eq!(
+            parse_alias_spec("Control Center,Battery"),
+            ("Control Center".into(), Some("Battery".into()))
+        );
         assert_eq!(parse_alias_spec("A,B,C"), ("A".into(), Some("B,C".into())));
         assert_eq!(parse_alias_spec("Owner"), ("Owner".into(), None));
         assert_eq!(parse_alias_spec("Owner,"), ("Owner,".into(), None));
@@ -493,7 +527,12 @@ mod tests {
 
     #[test]
     fn sorting() {
-        let mut v = vec![item("a", "1", 10.0), item("b", "2", 30.0), item("c", "3", 20.0), item("d", "4", 30.0)];
+        let mut v = vec![
+            item("a", "1", 10.0),
+            item("b", "2", 30.0),
+            item("c", "3", 20.0),
+            item("d", "4", 30.0),
+        ];
         sort_menu_extras(&mut v);
         let owners: Vec<&str> = v.iter().map(|i| i.owner.as_str()).collect();
         assert_eq!(owners, vec!["b", "d", "c", "a"]);
@@ -501,7 +540,11 @@ mod tests {
 
     #[test]
     fn sorting_quirk() {
-        let mut v = vec![item("a", "1", 10.0), item("b", "2", -10000.0), item("c", "3", -10000.0)];
+        let mut v = vec![
+            item("a", "1", 10.0),
+            item("b", "2", -10000.0),
+            item("c", "3", -10000.0),
+        ];
         sort_menu_extras(&mut v);
         // i=0: a; i=1: nothing > -9999 → swap(1, 0); i=2: swap(2, 0).
         let owners: Vec<&str> = v.iter().map(|i| i.owner.as_str()).collect();
@@ -510,7 +553,10 @@ mod tests {
 
     #[test]
     fn default_items_format() {
-        let v = vec![item("Control Center", "Battery", 30.0), item("Clock", "Clock", 20.0)];
+        let v = vec![
+            item("Control Center", "Battery", 30.0),
+            item("Clock", "Clock", 20.0),
+        ];
         assert_eq!(
             default_menu_items(&v),
             "[\n\t\"Control Center,Battery(1)\", \n\t\"Clock,Clock(2)\"\n]\n"
@@ -520,7 +566,11 @@ mod tests {
 
     #[test]
     fn lookup() {
-        let v = vec![item("CC", "Battery", 30.0), item("CC", "WiFi", 20.0), item("X", "", 10.0)];
+        let v = vec![
+            item("CC", "Battery", 30.0),
+            item("CC", "WiFi", 20.0),
+            item("X", "", 10.0),
+        ];
         assert_eq!(find_window(&v, "CC", Some("WiFi")).unwrap().name, "WiFi");
         assert_eq!(find_window(&v, "CC", Some("WiFi(2)")).unwrap().name, "WiFi");
         assert!(find_window(&v, "CC", Some("WiFi(1)")).is_none());

@@ -132,7 +132,8 @@ impl HotloadWatcher {
             unsafe { drop(Box::from_raw(ctx)) };
             return None;
         }
-        let main = dispatch2::DispatchQueue::main() as *const dispatch2::DispatchQueue as *const c_void;
+        let main =
+            dispatch2::DispatchQueue::main() as *const dispatch2::DispatchQueue as *const c_void;
         // SAFETY: freshly created stream; the main queue lives forever.
         unsafe {
             FSEventStreamSetDispatchQueue(stream, main);

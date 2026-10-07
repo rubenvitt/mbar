@@ -96,7 +96,11 @@ pub fn os_version() -> (i64, i64, i64) {
     static V: OnceLock<(i64, i64, i64)> = OnceLock::new();
     *V.get_or_init(|| {
         let v = NSProcessInfo::processInfo().operatingSystemVersion();
-        (v.majorVersion as i64, v.minorVersion as i64, v.patchVersion as i64)
+        (
+            v.majorVersion as i64,
+            v.minorVersion as i64,
+            v.patchVersion as i64,
+        )
     })
 }
 

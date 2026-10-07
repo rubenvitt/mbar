@@ -126,7 +126,11 @@ fn post() {
     }
 }
 
-unsafe extern "C" fn store_callback(_store: *const CFType, _keys: *const CFArray, _info: *mut c_void) {
+unsafe extern "C" fn store_callback(
+    _store: *const CFType,
+    _keys: *const CFArray,
+    _info: *mut c_void,
+) {
     post();
 }
 

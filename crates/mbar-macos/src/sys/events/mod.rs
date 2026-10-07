@@ -53,7 +53,8 @@ impl Observer {
         });
         // SAFETY: `name` is an NSString, no object filter, `None` queue = synchronous
         // delivery on the posting thread; the block is copied by the center.
-        let token = unsafe { center.addObserverForName_object_queue_usingBlock(name, None, None, &block) };
+        let token =
+            unsafe { center.addObserverForName_object_queue_usingBlock(name, None, None, &block) };
         Observer {
             center: center.retain(),
             token,
@@ -95,9 +96,11 @@ fn user_info_json(n: &NSNotification) -> Option<String> {
         if !NSJSONSerialization::isValidJSONObject(obj) {
             return None;
         }
-        let data =
-            NSJSONSerialization::dataWithJSONObject_options_error(obj, NSJSONWritingOptions::PrettyPrinted)
-                .ok()?;
+        let data = NSJSONSerialization::dataWithJSONObject_options_error(
+            obj,
+            NSJSONWritingOptions::PrettyPrinted,
+        )
+        .ok()?;
         let bytes = data.to_vec();
         if bytes.is_empty() {
             return None;
@@ -155,7 +158,9 @@ impl SystemEvents {
         }));
 
         let s = sink.clone();
-        observers.push(Observer::new(&ws_center, Some(sleep), move |_| s(SysEvent::SystemWillSleep)));
+        observers.push(Observer::new(&ws_center, Some(sleep), move |_| {
+            s(SysEvent::SystemWillSleep)
+        }));
         let s = sink.clone();
         observers.push(Observer::new(&ws_center, Some(wake), move |_| {
             s(SysEvent::SystemWoke {
@@ -167,11 +172,15 @@ impl SystemEvents {
         }));
         let s = sink.clone();
         let active_display = NSString::from_str("NSWorkspaceActiveDisplayDidChangeNotification");
-        observers.push(Observer::new(&ws_center, Some(&active_display), move |_| {
-            s(SysEvent::DisplayChange {
-                adid: displays::active_display_adid(),
-            })
-        }));
+        observers.push(Observer::new(
+            &ws_center,
+            Some(&active_display),
+            move |_| {
+                s(SysEvent::DisplayChange {
+                    adid: displays::active_display_adid(),
+                })
+            },
+        ));
 
         let s = sink.clone();
         let unlocked = NSString::from_str("com.apple.screenIsUnlocked");

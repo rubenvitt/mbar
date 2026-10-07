@@ -3,7 +3,9 @@
 
 use crate::sys::util;
 use crate::sys::{Sink, SysEvent};
-use objc2_core_foundation::{kCFRunLoopDefaultMode, CFDictionary, CFRetained, CFRunLoop, CFRunLoopSource};
+use objc2_core_foundation::{
+    kCFRunLoopDefaultMode, CFDictionary, CFRetained, CFRunLoop, CFRunLoopSource,
+};
 use objc2_io_kit::{
     IOPSCopyPowerSourcesInfo, IOPSCopyPowerSourcesList, IOPSGetPowerSourceDescription,
     IOPSGetProvidingPowerSourceType, IOPSNotificationCreateRunLoopSource,
@@ -69,7 +71,9 @@ pub fn battery_percent(current: i64, max: i64) -> u32 {
     if max <= 0 {
         return 0;
     }
-    (((current as f64 / max as f64) * 100.0).round().clamp(0.0, 100.0)) as u32
+    (((current as f64 / max as f64) * 100.0)
+        .round()
+        .clamp(0.0, 100.0)) as u32
 }
 
 struct State {
@@ -147,7 +151,10 @@ fn handle(force: bool) {
             }
             _ => false,
         };
-        (if post { s.sink.clone() } else { None }, s.listeners.clone())
+        (
+            if post { s.sink.clone() } else { None },
+            s.listeners.clone(),
+        )
     };
     if let (Some(sink), Some(n)) = (sink, new) {
         sink(SysEvent::PowerSourceChange(n.as_str().to_string()));
@@ -172,8 +179,9 @@ pub fn start(sink: Option<Sink>) {
         return;
     }
     // SAFETY: static callback without context.
-    let Some(source) = (unsafe { IOPSNotificationCreateRunLoopSource(Some(power_callback), std::ptr::null_mut()) })
-    else {
+    let Some(source) = (unsafe {
+        IOPSNotificationCreateRunLoopSource(Some(power_callback), std::ptr::null_mut())
+    }) else {
         log::warn!("IOPSNotificationCreateRunLoopSource failed");
         return;
     };
@@ -207,7 +215,10 @@ mod tests {
     #[test]
     fn power_types() {
         assert_eq!(PowerState::from_type("AC Power"), Some(PowerState::Ac));
-        assert_eq!(PowerState::from_type("Battery Power"), Some(PowerState::Battery));
+        assert_eq!(
+            PowerState::from_type("Battery Power"),
+            Some(PowerState::Battery)
+        );
         assert_eq!(PowerState::from_type("UPS Power"), None);
         assert_eq!(PowerState::Battery.as_str(), "BATTERY");
     }

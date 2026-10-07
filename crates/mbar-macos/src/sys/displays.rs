@@ -12,7 +12,7 @@ use objc2::rc::Retained;
 use objc2::runtime::NSObjectProtocol;
 use objc2::{sel, MainThreadMarker};
 use objc2_app_kit::NSScreen;
-use objc2_core_foundation::{CFArray, CFRetained, CFString, CFUUID, CGPoint, CGRect};
+use objc2_core_foundation::{CFArray, CFRetained, CFString, CGPoint, CGRect, CFUUID};
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGDisplayChangeSummaryFlags, CGDisplayIsBuiltin,
     CGDisplayRegisterReconfigurationCallback, CGDisplayRemoveReconfigurationCallback, CGEvent,

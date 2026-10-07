@@ -61,7 +61,10 @@ pub fn resolve_tilde(script: &str, home: Option<&str>) -> String {
 
 /// Fresh environment: `base` with `vars` applied in order (later keys replace earlier
 /// ones, keeping the replacing key's position at the end like `env_vars_set`).
-pub fn build_env(base: &[(OsString, OsString)], vars: &[(String, String)]) -> Vec<(OsString, OsString)> {
+pub fn build_env(
+    base: &[(OsString, OsString)],
+    vars: &[(String, String)],
+) -> Vec<(OsString, OsString)> {
     let mut env: Vec<(OsString, OsString)> = base.to_vec();
     for (k, v) in vars {
         let k = OsString::from(k);
@@ -119,11 +122,11 @@ fn watchdog_loop(w: &Watchdog) {
         });
         let next = entries.iter().map(|e| e.deadline).min();
         entries = match next {
-            Some(t) => w
-                .cv
-                .wait_timeout(entries, t.saturating_duration_since(Instant::now()))
-                .map(|r| r.0)
-                .unwrap_or_else(|e| e.into_inner().0),
+            Some(t) => {
+                w.cv.wait_timeout(entries, t.saturating_duration_since(Instant::now()))
+                    .map(|r| r.0)
+                    .unwrap_or_else(|e| e.into_inner().0)
+            }
             None => w.cv.wait(entries).unwrap_or_else(|e| e.into_inner()),
         };
     }
@@ -135,7 +138,14 @@ fn wait_exit_noreap(pid: u32) {
         // SAFETY: zeroed siginfo is a valid out buffer.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
         // SAFETY: valid id type/pid, out buffer and flags.
-        let r = unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT) };
+        let r = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
         if r == 0 || io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
             return;
         }
@@ -160,7 +170,11 @@ impl ScriptRunner {
     }
 
     /// Explicit base environment (e.g. startup env + `BAR_NAME`, `CONFIG_DIR`).
-    pub fn with_env(sink: Sink, cwd: Option<PathBuf>, base_env: Vec<(OsString, OsString)>) -> ScriptRunner {
+    pub fn with_env(
+        sink: Sink,
+        cwd: Option<PathBuf>,
+        base_env: Vec<(OsString, OsString)>,
+    ) -> ScriptRunner {
         ScriptRunner {
             sink,
             cwd,
@@ -189,7 +203,12 @@ impl ScriptRunner {
     }
 
     /// Spawns `script` with `vars`; returns the child pid.
-    pub fn spawn(&self, script: &str, vars: &[(String, String)], opts: SpawnOptions) -> io::Result<u32> {
+    pub fn spawn(
+        &self,
+        script: &str,
+        vars: &[(String, String)],
+        opts: SpawnOptions,
+    ) -> io::Result<u32> {
         let home = std::env::var("HOME").ok();
         let script = resolve_tilde(script, home.as_deref());
         let mut cmd = Command::new("/usr/bin/env");
@@ -200,7 +219,11 @@ impl ScriptRunner {
             cmd.current_dir(cwd);
         }
         cmd.stdin(Stdio::null());
-        cmd.stdout(if opts.capture_stdout { Stdio::piped() } else { Stdio::inherit() });
+        cmd.stdout(if opts.capture_stdout {
+            Stdio::piped()
+        } else {
+            Stdio::inherit()
+        });
         cmd.stderr(Stdio::inherit());
         cmd.process_group(0);
         let started = Instant::now();
@@ -219,7 +242,10 @@ impl ScriptRunner {
             wd.cv.notify_all();
         }
         self.running.fetch_add(1, Ordering::SeqCst);
-        self.pids.lock().unwrap_or_else(|e| e.into_inner()).push(pid);
+        self.pids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(pid);
 
         let sink = self.sink.clone();
         let running = self.running.clone();
@@ -252,11 +278,16 @@ impl ScriptRunner {
                 wait_exit_noreap(pid);
                 {
                     let wd = watchdog();
-                    wd.entries.lock().unwrap_or_else(|e| e.into_inner()).retain(|e| e.pid != pid);
+                    wd.entries
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .retain(|e| e.pid != pid);
                 }
                 let status = child.wait().ok();
                 running.fetch_sub(1, Ordering::SeqCst);
-                pids.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| *p != pid);
+                pids.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .retain(|p| *p != pid);
                 if opts.notify {
                     sink(SysEvent::ScriptFinished {
                         id: opts.id,
@@ -289,15 +320,27 @@ mod tests {
 
     #[test]
     fn tilde() {
-        assert_eq!(resolve_tilde("~/plugins/x.sh", Some("/Users/a")), "/Users/a/plugins/x.sh");
+        assert_eq!(
+            resolve_tilde("~/plugins/x.sh", Some("/Users/a")),
+            "/Users/a/plugins/x.sh"
+        );
         assert_eq!(resolve_tilde("echo ~", Some("/Users/a")), "echo ~");
         assert_eq!(resolve_tilde("~/x", None), "~/x");
     }
 
     #[test]
     fn env_building() {
-        let base = vec![("PATH".into(), "/bin".into()), ("INFO".into(), "old".into())];
-        let env = build_env(&base, &[("INFO".into(), "new".into()), ("NAME".into(), "clock".into())]);
+        let base = vec![
+            ("PATH".into(), "/bin".into()),
+            ("INFO".into(), "old".into()),
+        ];
+        let env = build_env(
+            &base,
+            &[
+                ("INFO".into(), "new".into()),
+                ("NAME".into(), "clock".into()),
+            ],
+        );
         assert_eq!(
             env,
             vec![

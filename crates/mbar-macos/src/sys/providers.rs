@@ -76,7 +76,10 @@ impl Kind {
 
     /// Event-driven providers ignore `provider.freq`.
     pub fn event_driven(self) -> bool {
-        matches!(self, Kind::Volume | Kind::Wifi | Kind::FrontApp | Kind::Media | Kind::Battery)
+        matches!(
+            self,
+            Kind::Volume | Kind::Wifi | Kind::FrontApp | Kind::Media | Kind::Battery
+        )
     }
 }
 
@@ -139,7 +142,9 @@ pub fn percent_of(part: u64, total: u64) -> u32 {
     if total == 0 {
         return 0;
     }
-    ((part as f64 / total as f64) * 100.0).round().clamp(0.0, 100.0) as u32
+    ((part as f64 / total as f64) * 100.0)
+        .round()
+        .clamp(0.0, 100.0) as u32
 }
 
 /// Activity-Monitor style "memory used" pages: app memory (internal − purgeable) + wired +
@@ -221,7 +226,15 @@ fn sysctl_u64(name: &str) -> Option<u64> {
     let mut v: u64 = 0;
     let mut len = std::mem::size_of::<u64>();
     // SAFETY: valid name, out buffer and length.
-    let r = unsafe { libc::sysctlbyname(c.as_ptr(), &mut v as *mut u64 as *mut _, &mut len, std::ptr::null_mut(), 0) };
+    let r = unsafe {
+        libc::sysctlbyname(
+            c.as_ptr(),
+            &mut v as *mut u64 as *mut _,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
     (r == 0).then_some(v)
 }
 
@@ -229,9 +242,17 @@ fn sysctl_u64(name: &str) -> Option<u64> {
 pub fn read_memory() -> Option<(u64, u64)> {
     let total = sysctl_u64("hw.memsize")?;
     let mut vm = VmStats64::default();
-    let mut count = (std::mem::size_of::<VmStats64>() / std::mem::size_of::<i32>()) as libc::mach_msg_type_number_t;
+    let mut count = (std::mem::size_of::<VmStats64>() / std::mem::size_of::<i32>())
+        as libc::mach_msg_type_number_t;
     // SAFETY: `vm` has room for `count` integers; the kernel fills at most that many.
-    let kr = unsafe { libc::host_statistics64(host(), libc::HOST_VM_INFO64, &mut vm as *mut _ as libc::host_info64_t, &mut count) };
+    let kr = unsafe {
+        libc::host_statistics64(
+            host(),
+            libc::HOST_VM_INFO64,
+            &mut vm as *mut _ as libc::host_info64_t,
+            &mut count,
+        )
+    };
     if kr != 0 {
         return None;
     }
@@ -243,7 +264,13 @@ pub fn read_memory() -> Option<(u64, u64)> {
         vm.wire_count as u64,
         vm.compressor_page_count as u64,
     ) * page;
-    let _ = (vm.free_count, vm.active_count, vm.inactive_count, vm.speculative_count, vm.external_page_count);
+    let _ = (
+        vm.free_count,
+        vm.active_count,
+        vm.inactive_count,
+        vm.speculative_count,
+        vm.external_page_count,
+    );
     Some((used.min(total), total))
 }
 
@@ -294,7 +321,9 @@ pub fn read_net_counters() -> HashMap<String, (u32, u32)> {
         // SAFETY: for AF_LINK entries `ifa_data` points to a `struct if_data`.
         let data = unsafe { &*(ifa.ifa_data as *const IfDataPrefix) };
         // SAFETY: NUL-terminated interface name.
-        let name = unsafe { CStr::from_ptr(ifa.ifa_name) }.to_string_lossy().into_owned();
+        let name = unsafe { CStr::from_ptr(ifa.ifa_name) }
+            .to_string_lossy()
+            .into_owned();
         let _ = (data.ifi_type, data.ifi_mtu, data.ifi_ipackets);
         out.insert(name, (data.ifi_ibytes, data.ifi_obytes));
     }
@@ -305,7 +334,11 @@ pub fn read_net_counters() -> HashMap<String, (u32, u32)> {
 
 /// Summed byte deltas between two counter snapshots for `iface` (all non-loopback
 /// interfaces when `None`).
-pub fn net_delta(prev: &HashMap<String, (u32, u32)>, cur: &HashMap<String, (u32, u32)>, iface: Option<&str>) -> (u64, u64) {
+pub fn net_delta(
+    prev: &HashMap<String, (u32, u32)>,
+    cur: &HashMap<String, (u32, u32)>,
+    iface: Option<&str>,
+) -> (u64, u64) {
     let mut down = 0;
     let mut up = 0;
     for (name, &(i, o)) in cur {
@@ -378,7 +411,10 @@ pub struct Providers {
 }
 
 fn values(pairs: &[(&str, String)]) -> Vec<(String, String)> {
-    pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+    pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect()
 }
 
 fn battery_values() -> Vec<(String, String)> {
@@ -395,17 +431,25 @@ fn battery_values() -> Vec<(String, String)> {
 fn volume_values(v: Option<f32>) -> Vec<(String, String)> {
     let (read, muted) = volume::read();
     let v = v.unwrap_or(read);
-    values(&[("percent", volume::percent(v).to_string()), ("muted", muted.to_string())])
+    values(&[
+        ("percent", volume::percent(v).to_string()),
+        ("muted", muted.to_string()),
+    ])
 }
 
 fn wifi_values(ssid: Option<String>) -> Vec<(String, String)> {
     let ssid = ssid.unwrap_or_else(wifi::current_ssid);
-    let rssi = wifi::current_rssi().map(|r| r.to_string()).unwrap_or_default();
+    let rssi = wifi::current_rssi()
+        .map(|r| r.to_string())
+        .unwrap_or_default();
     values(&[("ssid", ssid), ("rssi", rssi)])
 }
 
 fn front_app_values(name: Option<String>, bundle: Option<String>) -> Vec<(String, String)> {
-    values(&[("name", name.unwrap_or_default()), ("bundle_id", bundle.unwrap_or_default())])
+    values(&[
+        ("name", name.unwrap_or_default()),
+        ("bundle_id", bundle.unwrap_or_default()),
+    ])
 }
 
 fn media_values() -> Vec<(String, String)> {
@@ -465,7 +509,8 @@ fn sample(sub: &mut Sub) -> Option<Vec<(String, String)>> {
                 }
             }?;
             let dt = now.duration_since(prev.1).as_secs_f64().max(0.001);
-            let (down, up) = net_delta(&prev.0, &cur, sub.args.as_deref().filter(|a| !a.is_empty()));
+            let (down, up) =
+                net_delta(&prev.0, &cur, sub.args.as_deref().filter(|a| !a.is_empty()));
             let (down, up) = (down as f64 / dt, up as f64 / dt);
             Some(values(&[
                 ("down", human_rate(down)),
@@ -475,10 +520,17 @@ fn sample(sub: &mut Sub) -> Option<Vec<(String, String)>> {
             ]))
         }
         Kind::Disk => {
-            let path = sub.args.clone().filter(|a| !a.is_empty()).unwrap_or_else(|| "/".into());
+            let path = sub
+                .args
+                .clone()
+                .filter(|a| !a.is_empty())
+                .unwrap_or_else(|| "/".into());
             let (free, total) = read_disk(&path)?;
             Some(values(&[
-                ("percent", percent_of(total - free.min(total), total).to_string()),
+                (
+                    "percent",
+                    percent_of(total - free.min(total), total).to_string(),
+                ),
                 ("free_gb", format_gb(free)),
                 ("total_gb", format_gb(total)),
             ]))
@@ -537,7 +589,10 @@ fn run(shared: Shared, sink: Sink) {
         let wait = next.map(|t| t.saturating_duration_since(Instant::now()));
         guard = match wait {
             Some(d) if d.is_zero() => guard,
-            Some(d) => cv.wait_timeout(guard, d).map(|r| r.0).unwrap_or_else(|e| e.into_inner().0),
+            Some(d) => cv
+                .wait_timeout(guard, d)
+                .map(|r| r.0)
+                .unwrap_or_else(|e| e.into_inner().0),
             None => cv.wait(guard).unwrap_or_else(|e| e.into_inner()),
         };
     }
@@ -552,13 +607,23 @@ impl Providers {
             .name("mbar-providers".into())
             .spawn(move || run(s2, k2))
             .ok();
-        Providers { shared, sink, thread }
+        Providers {
+            shared,
+            sink,
+            thread,
+        }
     }
 
     /// (Re)configures provider `provider` for subscription `id` (`provider=`,
     /// `provider.freq=`, `provider.args=`). Samples immediately. Errors for unknown names and
     /// `clock` (formatted by the core).
-    pub fn subscribe(&self, id: u64, provider: &str, freq: Option<f32>, args: Option<String>) -> Result<(), String> {
+    pub fn subscribe(
+        &self,
+        id: u64,
+        provider: &str,
+        freq: Option<f32>,
+        args: Option<String>,
+    ) -> Result<(), String> {
         let kind = match provider {
             "clock" => return Err("provider 'clock' is handled by the core".into()),
             p => Kind::parse(p).ok_or_else(|| format!("unknown provider '{p}'"))?,
@@ -567,12 +632,18 @@ impl Providers {
             Kind::Volume => volume::start(self.sink.clone()),
             Kind::Media => media::start(self.sink.clone()),
             Kind::Battery => {
-                *BATTERY_TARGET.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::downgrade(&self.shared));
+                *BATTERY_TARGET.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(Arc::downgrade(&self.shared));
                 static HOOKED: std::sync::Once = std::sync::Once::new();
                 HOOKED.call_once(|| {
                     power::add_change_listener(Arc::new(|| {
-                        let target = BATTERY_TARGET.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                        let Some(shared) = target.and_then(|w| w.upgrade()) else { return };
+                        let target = BATTERY_TARGET
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clone();
+                        let Some(shared) = target.and_then(|w| w.upgrade()) else {
+                            return;
+                        };
                         let (lock, cv) = &*shared;
                         let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
                         let now = Instant::now();
@@ -588,7 +659,8 @@ impl Providers {
         let freq = if kind.event_driven() && kind != Kind::Battery {
             None
         } else {
-            freq.filter(|f| *f > 0.0).map(|f| Duration::from_secs_f32(f.max(0.1)))
+            freq.filter(|f| *f > 0.0)
+                .map(|f| Duration::from_secs_f32(f.max(0.1)))
         };
         let (lock, cv) = &*self.shared;
         let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -609,7 +681,10 @@ impl Providers {
     /// Removes subscription `id`.
     pub fn unsubscribe(&self, id: u64) {
         let (lock, _) = &*self.shared;
-        lock.lock().unwrap_or_else(|e| e.into_inner()).subs.remove(&id);
+        lock.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .subs
+            .remove(&id);
     }
 
     /// Samples `id` as soon as possible.
@@ -649,7 +724,11 @@ impl Providers {
         let ids: Vec<u64> = {
             let (lock, _) = &*self.shared;
             let s = lock.lock().unwrap_or_else(|e| e.into_inner());
-            s.subs.iter().filter(|(_, s)| s.kind == kind).map(|(id, _)| *id).collect()
+            s.subs
+                .iter()
+                .filter(|(_, s)| s.kind == kind)
+                .map(|(id, _)| *id)
+                .collect()
         };
         if ids.is_empty() {
             return;
@@ -657,7 +736,9 @@ impl Providers {
         let v = match ev {
             SysEvent::VolumeChange(v) => volume_values(Some(*v)),
             SysEvent::WifiChange(ssid) => wifi_values(Some(ssid.clone())),
-            SysEvent::FrontAppSwitched { name, bundle_id, .. } => front_app_values(name.clone(), bundle_id.clone()),
+            SysEvent::FrontAppSwitched {
+                name, bundle_id, ..
+            } => front_app_values(name.clone(), bundle_id.clone()),
             SysEvent::MediaChange(_) => media_values(),
             _ => battery_values(),
         };

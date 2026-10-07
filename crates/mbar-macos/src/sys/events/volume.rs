@@ -70,7 +70,12 @@ pub fn default_output_device() -> AudioObjectID {
 }
 
 /// The volume rule of `volume.c:handler`.
-pub fn effective_volume(muted_main: bool, muted_left: bool, volume_main: f32, volume_left: f32) -> f32 {
+pub fn effective_volume(
+    muted_main: bool,
+    muted_left: bool,
+    volume_main: f32,
+    volume_left: f32,
+) -> f32 {
     if volume_left > 0.0 {
         if muted_left || muted_main {
             0.0
@@ -97,8 +102,11 @@ pub fn percent(v: f32) -> i32 {
 /// Reads `(volume 0..1 with mute applied, muted)` from a device.
 pub fn read_device(device: AudioObjectID) -> (f32, bool) {
     let scope = kAudioObjectPropertyScopeOutput;
-    let mute = |el| get::<u32>(device, address(kAudioDevicePropertyMute, scope, el)).unwrap_or(0) != 0;
-    let vol = |el| get::<f32>(device, address(kAudioDevicePropertyVolumeScalar, scope, el)).unwrap_or(0.0);
+    let mute =
+        |el| get::<u32>(device, address(kAudioDevicePropertyMute, scope, el)).unwrap_or(0) != 0;
+    let vol = |el| {
+        get::<f32>(device, address(kAudioDevicePropertyVolumeScalar, scope, el)).unwrap_or(0.0)
+    };
     let (mm, ml, vm, vl) = (mute(0), mute(1), vol(0), vol(1));
     (effective_volume(mm, ml, vm, vl), mm || (vl > 0.0 && ml))
 }
@@ -156,9 +164,19 @@ fn attach(device: AudioObjectID, add: bool) {
         // SAFETY: valid address; the listener is a static function with no client data.
         unsafe {
             if add {
-                AudioObjectAddPropertyListener(device, NonNull::from(&addr), Some(volume_listener), std::ptr::null_mut());
+                AudioObjectAddPropertyListener(
+                    device,
+                    NonNull::from(&addr),
+                    Some(volume_listener),
+                    std::ptr::null_mut(),
+                );
             } else {
-                AudioObjectRemovePropertyListener(device, NonNull::from(&addr), Some(volume_listener), std::ptr::null_mut());
+                AudioObjectRemovePropertyListener(
+                    device,
+                    NonNull::from(&addr),
+                    Some(volume_listener),
+                    std::ptr::null_mut(),
+                );
             }
         }
     }

@@ -15,9 +15,10 @@ use mach2::bootstrap::{bootstrap_look_up, bootstrap_register};
 use mach2::kern_return::KERN_SUCCESS;
 use mach2::mach_port::{mach_port_allocate, mach_port_deallocate, mach_port_insert_right};
 use mach2::message::{
-    mach_msg, mach_msg_header_t, mach_msg_ool_descriptor_t, mach_msg_size_t, MACH_MSGH_BITS_COMPLEX,
-    MACH_MSG_OOL_DESCRIPTOR, MACH_MSG_SUCCESS, MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND,
-    MACH_MSG_TYPE_MOVE_SEND, MACH_MSG_VIRTUAL_COPY, MACH_SEND_MSG, MACH_SEND_TIMEOUT,
+    mach_msg, mach_msg_header_t, mach_msg_ool_descriptor_t, mach_msg_size_t,
+    MACH_MSGH_BITS_COMPLEX, MACH_MSG_OOL_DESCRIPTOR, MACH_MSG_SUCCESS, MACH_MSG_TYPE_COPY_SEND,
+    MACH_MSG_TYPE_MAKE_SEND, MACH_MSG_TYPE_MOVE_SEND, MACH_MSG_VIRTUAL_COPY, MACH_SEND_MSG,
+    MACH_SEND_TIMEOUT,
 };
 use mach2::port::{mach_port_t, MACH_PORT_NULL, MACH_PORT_RIGHT_RECEIVE};
 use mach2::task::{task_get_special_port, TASK_BOOTSTRAP_PORT};
@@ -112,7 +113,10 @@ pub struct MachReply {
 
 impl std::fmt::Debug for MachReply {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MachReply").field("port", &self.port).field("sent", &self.sent).finish()
+        f.debug_struct("MachReply")
+            .field("port", &self.port)
+            .field("sent", &self.sent)
+            .finish()
     }
 }
 
@@ -213,28 +217,36 @@ unsafe extern "C-unwind" fn mach_callback(
     size: CFIndex,
     info: *mut c_void,
 ) {
-    if msg.is_null() || info.is_null() || (size as usize) < std::mem::size_of::<mach_msg_header_t>() {
+    if msg.is_null() || info.is_null() || (size as usize) < std::mem::size_of::<mach_msg_header_t>()
+    {
         return;
     }
     // SAFETY: `info` is the leaked `Box<Sink>` owned by the `MachServer`.
     let sink = unsafe { &*(info as *const Sink) };
     // SAFETY: CF hands us the received message (`size` bytes).
-    let header: mach_msg_header_t = unsafe { std::ptr::read_unaligned(msg as *const mach_msg_header_t) };
+    let header: mach_msg_header_t =
+        unsafe { std::ptr::read_unaligned(msg as *const mach_msg_header_t) };
     let reply = MachReply {
         port: header.msgh_remote_port,
         sent: header.msgh_remote_port == MACH_PORT_NULL,
     };
     let mut payload = Vec::new();
-    if header.msgh_bits & MACH_MSGH_BITS_COMPLEX != 0 && (size as usize) >= std::mem::size_of::<WireMessage>() {
+    if header.msgh_bits & MACH_MSGH_BITS_COMPLEX != 0
+        && (size as usize) >= std::mem::size_of::<WireMessage>()
+    {
         // SAFETY: complex message of at least the wire size.
         let wire: WireMessage = unsafe { std::ptr::read_unaligned(msg as *const WireMessage) };
         let desc = wire.descriptor;
-        if wire.descriptor_count >= 1 && desc.type_ as u32 == MACH_MSG_OOL_DESCRIPTOR && !desc.address.is_null() {
+        if wire.descriptor_count >= 1
+            && desc.type_ as u32 == MACH_MSG_OOL_DESCRIPTOR
+            && !desc.address.is_null()
+        {
             let len = desc.size as usize;
             // SAFETY: the kernel mapped `len` bytes at `address` into our address space; we
             // copy them and then release the mapping (we own it after receive).
             unsafe {
-                payload.extend_from_slice(std::slice::from_raw_parts(desc.address as *const u8, len));
+                payload
+                    .extend_from_slice(std::slice::from_raw_parts(desc.address as *const u8, len));
                 mach2::vm::mach_vm_deallocate(mach_task_self(), desc.address as u64, len as u64);
             }
         }
@@ -292,7 +304,13 @@ pub fn start(bar_name: &str, sink: Sink) -> Result<MachServer, String> {
     };
     // SAFETY: `port` holds a receive right; the context pointer stays valid until Drop.
     let cf_port = unsafe {
-        CFMachPort::with_port(None, port, Some(mach_callback), &mut context, std::ptr::null_mut())
+        CFMachPort::with_port(
+            None,
+            port,
+            Some(mach_callback),
+            &mut context,
+            std::ptr::null_mut(),
+        )
     };
     let Some(cf_port) = cf_port else {
         // SAFETY: reclaim the leaked context on failure.

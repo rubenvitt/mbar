@@ -61,7 +61,13 @@ impl NowPlaying {
 
     /// The `media_change` INFO.
     pub fn info(&self) -> String {
-        media_info_json(self.playing, &self.title, &self.album, &self.artist, &self.app)
+        media_info_json(
+            self.playing,
+            &self.title,
+            &self.album,
+            &self.artist,
+            &self.app,
+        )
     }
 }
 
@@ -248,7 +254,8 @@ fn update(artwork: Option<CFRetained<CGImage>>) {
             album: s.album.clone().unwrap_or_default(),
             playing: s.playing,
         };
-        let complete = s.app.is_some() && s.title.is_some() && s.artist.is_some() && s.album.is_some();
+        let complete =
+            s.app.is_some() && s.title.is_some() && s.artist.is_some() && s.album.is_some();
         if !complete || !s.started {
             return (None, None);
         }
@@ -307,13 +314,14 @@ fn direct_fetch_info() {
         if title.is_none() || artist.is_none() || album.is_none() {
             return;
         }
-        let artwork = if util::dict_get(&dict, "kMRMediaRemoteNowPlayingInfoArtworkMIMEType").is_some() {
-            util::dict_get(&dict, "kMRMediaRemoteNowPlayingInfoArtworkData")
-                .and_then(util::downcast::<CFData>)
-                .and_then(|d| decode_image(&d.to_vec()))
-        } else {
-            None
-        };
+        let artwork =
+            if util::dict_get(&dict, "kMRMediaRemoteNowPlayingInfoArtworkMIMEType").is_some() {
+                util::dict_get(&dict, "kMRMediaRemoteNowPlayingInfoArtworkData")
+                    .and_then(util::downcast::<CFData>)
+                    .and_then(|d| decode_image(&d.to_vec()))
+            } else {
+                None
+            };
         with_state(|s| {
             s.title = title;
             s.artist = artist;
@@ -350,8 +358,14 @@ fn start_direct() {
     let center = NSNotificationCenter::defaultCenter();
     for (name, playing) in [
         ("kMRMediaRemoteNowPlayingInfoDidChangeNotification", false),
-        ("kMRMediaRemoteNowPlayingApplicationDidChangeNotification", false),
-        ("kMRMediaRemoteNowPlayingApplicationIsPlayingDidChangeNotification", true),
+        (
+            "kMRMediaRemoteNowPlayingApplicationDidChangeNotification",
+            false,
+        ),
+        (
+            "kMRMediaRemoteNowPlayingApplicationIsPlayingDidChangeNotification",
+            true,
+        ),
     ] {
         let obs = super::Observer::new(&center, Some(&NSString::from_str(name)), move |_| {
             if playing {
@@ -515,8 +529,10 @@ mod tests {
 
     #[test]
     fn helper_line() {
-        let s = parse_helper_line(r#"{"playing":true,"app":"Music","title":"A","artist":"B","album":"C"}"#)
-            .unwrap();
+        let s = parse_helper_line(
+            r#"{"playing":true,"app":"Music","title":"A","artist":"B","album":"C"}"#,
+        )
+        .unwrap();
         assert!(s.playing);
         assert_eq!(s.app.as_deref(), Some("Music"));
         assert_eq!(s.artwork, None);

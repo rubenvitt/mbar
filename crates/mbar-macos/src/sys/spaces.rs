@@ -257,7 +257,10 @@ pub fn space_windows_info(space_index: u32, apps: &[(String, u32)]) -> String {
 
 /// Groups window owner pids (in window order) into `(app name, count)`: grouped by pid in
 /// first-seen order, pids without a name skipped, identical names merged into the first.
-pub fn group_app_windows(pids: &[i32], name_of: impl Fn(i32) -> Option<String>) -> Vec<(String, u32)> {
+pub fn group_app_windows(
+    pids: &[i32],
+    name_of: impl Fn(i32) -> Option<String>,
+) -> Vec<(String, u32)> {
     let mut by_pid: Vec<(i32, u32)> = Vec::new();
     for &pid in pids {
         match by_pid.iter_mut().find(|(p, _)| *p == pid) {
@@ -445,7 +448,12 @@ fn register(ids: &[u32]) {
         log::warn!("SLSRegisterNotifyProc unavailable");
         return;
     };
-    let todo: Vec<u32> = with_state(|s| ids.iter().copied().filter(|id| s.registered.insert(*id)).collect());
+    let todo: Vec<u32> = with_state(|s| {
+        ids.iter()
+            .copied()
+            .filter(|id| s.registered.insert(*id))
+            .collect()
+    });
     for id in todo {
         // SAFETY: `notify_proc` matches SkyLight's handler signature and lives forever.
         let err = unsafe { reg(notify_proc, id, std::ptr::null_mut()) };
@@ -539,7 +547,12 @@ fn update_space(sid: u64, silent: bool) -> Option<String> {
         for &(wid, pid) in &found {
             s.windows.push(TrackedWindow { wid, sid, pid });
         }
-        let pids: Vec<i32> = s.windows.iter().filter(|w| w.sid == sid).map(|w| w.pid).collect();
+        let pids: Vec<i32> = s
+            .windows
+            .iter()
+            .filter(|w| w.sid == sid)
+            .map(|w| w.pid)
+            .collect();
         let wids: Vec<u32> = s
             .windows
             .iter()
@@ -724,7 +737,10 @@ mod tests {
             "{\n\t\"display-1\": 2,\n\t\"display-2\": 5\n}"
         );
         assert_eq!(space_change_info(&[]), "{\n}");
-        assert_eq!(space_change_info(&[(12, 345)]), "{\n\t\"display-12\": 345\n}");
+        assert_eq!(
+            space_change_info(&[(12, 345)]),
+            "{\n\t\"display-12\": 345\n}"
+        );
     }
 
     #[test]
