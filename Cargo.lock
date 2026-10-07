@@ -138,6 +138,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mbar"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "log",
+ "mbar-core",
+ "mbar-ipc",
+ "mbar-lua",
+ "serde_json",
+]
+
+[[package]]
 name = "mbar-core"
 version = "0.1.0"
 dependencies = [

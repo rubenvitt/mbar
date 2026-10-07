@@ -5,7 +5,8 @@
 //! * [`Animator`] queueing semantics (`animator_add` chaining, `animator_cancel_locked`,
 //!   `animator_cancel` with snap, `animator_lock`, D18 cancel-on-remove) are complete because
 //!   the property layer depends on them.
-//! * Frame stepping ([`Animator::step`], [`Animator::next_deadline`]) is WP-D.
+//! * Frame stepping ([`Animator::step`], [`Animator::next_deadline`]) and the marquee
+//!   ([`marquee`]) implement `events.md` §10.3–10.6/§10.9.
 //!
 //! Time base (D12): duration `n` = `n/60` s of wall-clock time measured with
 //! [`Instant`]s supplied by the runtime; frames are produced at the display refresh rate.
@@ -295,8 +296,42 @@ impl Animator {
     ///
     /// Returns the steps in order; the runtime applies them (`Runtime::apply_anim_steps`).
     pub fn step(&mut self, now: Instant) -> Vec<AnimStep> {
-        let _ = now;
-        todo!("WP-D: events.md §10.3–10.6")
+        let mut steps = Vec::new();
+        let mut finished: Vec<u64> = Vec::new();
+        // Index loop: releasing a successor mutates a later element of the same vector.
+        for i in 0..self.animations.len() {
+            let a = &mut self.animations[i];
+            if a.waiting {
+                continue;
+            }
+            let start = *a.start.get_or_insert(now);
+            let t = if a.duration > 0 {
+                let elapsed = now.saturating_duration_since(start).as_secs_f64();
+                elapsed / (a.duration as f64 / 60.0)
+            } else {
+                1.0
+            };
+            let final_frame = t >= 1.0;
+            let t = t.clamp(0.0, 1.0);
+            let s = if final_frame { 1.0 } else { a.curve.eval(t) };
+            steps.push(AnimStep {
+                target: a.target,
+                path: a.path.clone(),
+                value: interpolate(a.from, a.to, s, final_frame),
+            });
+            if final_frame {
+                finished.push(a.id);
+                if let Some(next) = a.next.take() {
+                    if let Some(n) = self.animations.iter_mut().find(|n| n.id == next) {
+                        n.waiting = false;
+                    }
+                }
+            }
+        }
+        if !finished.is_empty() {
+            self.animations.retain(|a| !finished.contains(&a.id));
+        }
+        steps
     }
 
     /// True while any animation exists (the platform should deliver display-synced frames).
@@ -304,11 +339,21 @@ impl Animator {
         !self.animations.is_empty()
     }
 
-    /// Next instant a frame is needed: `Some(now)`-ish while animating (display-link pacing
-    /// is the platform's job), `None` when idle. WP-D.
+    /// Next instant a frame is needed: `Some(now)` while any animation exists (every frame
+    /// may change a value; display-link pacing at the refresh rate is the platform's job,
+    /// D12), `None` when idle (`animator_update` destroys the display link once the list is
+    /// empty).
     pub fn next_deadline(&self, now: Instant) -> Option<Instant> {
-        let _ = now;
-        todo!("WP-D")
+        if self.animations.is_empty() {
+            None
+        } else {
+            Some(now)
+        }
+    }
+
+    /// True while any animation is in flight (alias of [`Animator::needs_frame`]).
+    pub fn is_active(&self) -> bool {
+        self.needs_frame()
     }
 }
 
@@ -325,8 +370,34 @@ pub fn marquee(
     prefix: &str,
     text: &crate::components::Text,
 ) -> Option<Vec<PendingAnim>> {
-    let _ = (target, prefix, text);
-    todo!("WP-D: components.md §4.10")
+    if text.max_chars == 0 || text.scroll != 0.0 {
+        return None;
+    }
+    if text.has_const_width && text.custom_width < text.width {
+        return None;
+    }
+    let width = text.width as f64;
+    let full = text.bounds.width as f64;
+    if text.width == 0 || width == full {
+        return None;
+    }
+    let path = format!("{prefix}scroll");
+    let anim = |from: f32, to: f32, duration: u32| PendingAnim {
+        target,
+        path: path.clone(),
+        from: AnimValue::Float(from),
+        to: AnimValue::Float(to),
+        duration,
+        curve: Curve::Linear,
+    };
+    // C: `(uint32_t)(scroll_duration * (bounds.size.width / width))` in double.
+    let out_frames = (text.scroll_duration as f64 * (full / width)) as u32;
+    let neg = -(text.width as f32);
+    Some(vec![
+        anim(text.scroll, text.bounds.width, out_frames),
+        anim(text.bounds.width, neg, 0),
+        anim(neg, 0.0, text.scroll_duration),
+    ])
 }
 
 #[cfg(test)]

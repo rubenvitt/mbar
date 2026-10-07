@@ -61,6 +61,30 @@ sample in `INFO` as JSON, so scripts can post-process cheaply.
 | `front_app` | `name`, `bundle_id` |
 | `media` | `title`, `artist`, `album`, `app`, `state` |
 
+### Provider defaults
+
+| Provider | default `provider.format` | default `provider.freq` (s) | default `provider.args` |
+|---|---|---|---|
+| `clock` | `{time}` | 1 | `%H:%M` |
+| `cpu` | `{percent}%` | 2 | |
+| `memory` | `{percent}%` | 5 | |
+| `network` | `↓{down} ↑{up}` | 2 | default interface |
+| `disk` | `{percent}%` | 60 | `/` |
+| `battery` | `{percent}%` | event-driven | |
+| `volume` | `{percent}%` | event-driven | |
+| `wifi` | `{ssid}` | event-driven | |
+| `front_app` | `{name}` | event-driven | |
+| `media` | `{title}` | event-driven | |
+
+Template rules: unknown keys expand to an empty string; `{{` and `}}` are literal braces;
+malformed braces are copied verbatim. An empty `provider.format=""` leaves the label
+untouched (the sample then only reaches the script via `INFO`). `INFO` uses SketchyBar's
+payload layout (`{\n\t"k": "v",\n…\n}`, all values strings).
+
+The `clock` format is a pure-Rust `strftime` (C locale): `%a %A %b %B %c %C %d %D %e %F %H
+%I %j %k %l %m %M %n %p %R %S %t %T %u %w %x %X %y %Y %z %Z %%`, with the padding flags
+`-`, `_` and `0`. Network rates use base 1024 (`512 B/s`, `12.3 KB/s`).
+
 ## Item type `app_menu`
 
 `--add app_menu <name> <position>` — draws the front application's menu bar (app name in

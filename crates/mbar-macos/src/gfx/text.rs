@@ -24,20 +24,21 @@ use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 use objc2::runtime::ProtocolObject;
+use objc2::Message;
 use objc2_core_foundation::{
-    CFArray, CFAttributedString, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString,
-    CFType, CFURL,
+    CFArray, CFAttributedString, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType,
+    CFURL,
 };
 use objc2_core_graphics::{
-    CGBitmapContextCreate, CGBitmapInfo, CGColorSpace, CGContext, CGImageAlphaInfo,
+    CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo, CGImageByteOrderInfo,
 };
 use objc2_core_text::{
     kCTFontAttributeName, kCTFontFamilyNameAttribute, kCTFontFeatureSelectorIdentifierKey,
-    kCTFontFeatureSettingsAttribute, kCTFontFeatureTypeIdentifierKey,
-    kCTFontOpenTypeFeatureTag, kCTFontOpenTypeFeatureValue, kCTFontSizeAttribute,
-    kCTFontStyleNameAttribute, kCTForegroundColorFromContextAttributeName, CTFont,
-    CTFontDescriptor, CTFontManagerRegisterFontsForURL, CTFontManagerScope,
-    CTFontSymbolicTraits, CTLine, CTLineBoundsOptions, CTRun,
+    kCTFontFeatureSettingsAttribute, kCTFontFeatureTypeIdentifierKey, kCTFontOpenTypeFeatureTag,
+    kCTFontOpenTypeFeatureValue, kCTFontSizeAttribute, kCTFontStyleNameAttribute,
+    kCTForegroundColorFromContextAttributeName, CTFont, CTFontDescriptor,
+    CTFontManagerRegisterFontsForURL, CTFontManagerScope, CTFontSymbolicTraits, CTLine,
+    CTLineBoundsOptions, CTRun,
 };
 use objc2_metal::{MTLDevice, MTLPixelFormat, MTLTexture};
 
@@ -153,7 +154,12 @@ fn font_hash(family: &str, style: &str, size: f32, features: Option<&str>) -> u6
 }
 
 /// `font.c:font_create_ctfont`.
-fn create_ct_font(family: &str, style: &str, size: f32, features: Option<&str>) -> CFRetained<CTFont> {
+fn create_ct_font(
+    family: &str,
+    style: &str,
+    size: f32,
+    features: Option<&str>,
+) -> CFRetained<CTFont> {
     let family_s = CFString::from_str(family);
     let style_s = CFString::from_str(style);
     let size_n = CFNumber::new_f32(size);
@@ -181,15 +187,20 @@ fn create_ct_font(family: &str, style: &str, size: f32, features: Option<&str>) 
                     let n = CFNumber::new_i32(kind);
                     let m = CFNumber::new_i32(selector);
                     // SAFETY: CoreText constant keys (see above).
-                    let (kt, ks) =
-                        unsafe { (kCTFontFeatureTypeIdentifierKey, kCTFontFeatureSelectorIdentifierKey) };
+                    let (kt, ks) = unsafe {
+                        (
+                            kCTFontFeatureTypeIdentifierKey,
+                            kCTFontFeatureSelectorIdentifierKey,
+                        )
+                    };
                     CFDictionary::<CFString, CFType>::from_slices(&[kt, ks], &[&n, &m])
                 }
                 FontFeature::OpenType { tag, value } => {
                     let tag = CFString::from_str(&String::from_utf8_lossy(&tag));
                     let v = CFNumber::new_i32(value);
                     // SAFETY: CoreText constant keys (see above).
-                    let (kt, kv) = unsafe { (kCTFontOpenTypeFeatureTag, kCTFontOpenTypeFeatureValue) };
+                    let (kt, kv) =
+                        unsafe { (kCTFontOpenTypeFeatureTag, kCTFontOpenTypeFeatureValue) };
                     CFDictionary::<CFString, CFType>::from_slices(&[kt, kv], &[&tag, &v])
                 }
             };
@@ -366,7 +377,13 @@ impl TextSystem {
         };
         let Some(url) = url else { return false };
         // SAFETY: `url` is a valid CFURL; a null error out-pointer is allowed.
-        unsafe { CTFontManagerRegisterFontsForURL(&url, CTFontManagerScope::Process, std::ptr::null_mut()) }
+        unsafe {
+            CTFontManagerRegisterFontsForURL(
+                &url,
+                CTFontManagerScope::Process,
+                std::ptr::null_mut(),
+            )
+        }
     }
 
     fn create_run(&mut self, font: FontId, text: &str, clock: u64) -> TextLayout {
@@ -380,13 +397,19 @@ impl TextSystem {
         };
         let string = CFString::from_str(text);
         // SAFETY: CoreText constant keys.
-        let (k_font, k_ctx) = unsafe { (kCTFontAttributeName, kCTForegroundColorFromContextAttributeName) };
+        let (k_font, k_ctx) = unsafe {
+            (
+                kCTFontAttributeName,
+                kCTForegroundColorFromContextAttributeName,
+            )
+        };
         let attrs = CFDictionary::<CFString, CFType>::from_slices(
             &[k_font, k_ctx],
             &[&ct_font, CFBoolean::new(true)],
         );
         // SAFETY: valid string and attribute dictionary; default allocator.
-        let attributed = unsafe { CFAttributedString::new(None, Some(&string), Some(attrs.as_opaque())) };
+        let attributed =
+            unsafe { CFAttributedString::new(None, Some(&string), Some(attrs.as_opaque())) };
         let line = match attributed {
             // SAFETY: valid attributed string.
             Some(a) => unsafe { CTLine::with_attributed_string(&a) },
@@ -394,8 +417,9 @@ impl TextSystem {
                 // Allocation failure; build an empty line instead.
                 let empty = CFString::from_str("");
                 // SAFETY: as above.
-                let a = unsafe { CFAttributedString::new(None, Some(&empty), Some(attrs.as_opaque())) }
-                    .expect("CFAttributedStringCreate failed");
+                let a =
+                    unsafe { CFAttributedString::new(None, Some(&empty), Some(attrs.as_opaque())) }
+                        .expect("CFAttributedStringCreate failed");
                 // SAFETY: valid attributed string.
                 unsafe { CTLine::with_attributed_string(&a) }
             }
@@ -403,7 +427,8 @@ impl TextSystem {
         let mut ascent: f64 = 0.0;
         let mut descent: f64 = 0.0;
         // SAFETY: the out-pointers are valid for writes; leading may be null.
-        let typo_w = unsafe { line.typographic_bounds(&mut ascent, &mut descent, std::ptr::null_mut()) };
+        let typo_w =
+            unsafe { line.typographic_bounds(&mut ascent, &mut descent, std::ptr::null_mut()) };
         // SAFETY: valid line.
         let ink = unsafe { line.bounds_with_options(CTLineBoundsOptions::UseGlyphPathBounds) };
         let has_color = line_has_color_glyphs(&line);
@@ -422,7 +447,10 @@ impl TextSystem {
             has_color_glyphs: has_color,
         };
         let text: Rc<str> = Rc::from(text);
-        self.layouts.entry(font).or_default().insert(text.clone(), id);
+        self.layouts
+            .entry(font)
+            .or_default()
+            .insert(text.clone(), id);
         self.runs.insert(
             id,
             Run {
@@ -466,8 +494,16 @@ impl TextSystem {
     }
 
     /// Texture of an atlas page.
-    pub(crate) fn page_texture(&self, color: bool, page: u32) -> Option<&ProtocolObject<dyn MTLTexture>> {
-        let pages = if color { &self.color_pages } else { &self.mask_pages };
+    pub(crate) fn page_texture(
+        &self,
+        color: bool,
+        page: u32,
+    ) -> Option<&ProtocolObject<dyn MTLTexture>> {
+        let pages = if color {
+            &self.color_pages
+        } else {
+            &self.mask_pages
+        };
         pages.get(page as usize).and_then(|p| p.as_deref())
     }
 
@@ -611,7 +647,7 @@ fn rasterize_line(
     let (space, info) = if is_color {
         (
             CGColorSpace::new_device_rgb(),
-            CGImageAlphaInfo::PremultipliedFirst.0 | CGBitmapInfo::ByteOrder32Little.0,
+            CGImageAlphaInfo::PremultipliedFirst.0 | CGImageByteOrderInfo::Order32Little.0,
         )
     } else {
         (None, CGImageAlphaInfo::Only.0)

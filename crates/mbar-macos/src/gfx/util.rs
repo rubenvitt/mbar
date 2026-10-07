@@ -241,7 +241,8 @@ pub fn raster_bounds(
     scale: f64,
 ) -> Option<PixelBounds> {
     let finite = |v: f64| if v.is_finite() { v } else { 0.0 };
-    let (mut lx, mut ly, mut hx, mut hy) = (0.0f64, -finite(descent), finite(advance), finite(ascent));
+    let (mut lx, mut ly, mut hx, mut hy) =
+        (0.0f64, -finite(descent), finite(advance), finite(ascent));
     let ink_valid = ink_x.is_finite() && ink_y.is_finite() && ink_w > 0.0 && ink_h > 0.0;
     if ink_valid {
         lx = lx.min(ink_x);
@@ -258,7 +259,11 @@ pub fn raster_bounds(
         x1: ((hx + pad) * scale).ceil() as i32,
         y1: ((hy + pad) * scale).ceil() as i32,
     };
-    if b.width() == 0 || b.height() == 0 || b.width() > MAX_RUN_PIXELS || b.height() > MAX_RUN_PIXELS {
+    if b.width() == 0
+        || b.height() == 0
+        || b.width() > MAX_RUN_PIXELS
+        || b.height() > MAX_RUN_PIXELS
+    {
         return None;
     }
     Some(b)
@@ -290,6 +295,8 @@ pub fn unpremultiply(c: [f32; 4]) -> [f32; 4] {
 /// One tessellated vertex of a graph path. `dist` is the signed distance from the centre
 /// line (points) for stroke vertices; `half_width` the stroke half width (a huge value
 /// marks fill vertices, which are always fully covered).
+/// `#[repr(C)]`: uploaded verbatim as the shader's `PathVertex` (32 bytes).
+#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct PathVertex {
     pub pos: [f32; 2],
@@ -362,7 +369,16 @@ pub fn tessellate_stroke(
         i = j;
     }
     if let Some((pa, pn, p_start)) = prev {
-        emit_quad(pa, points[i], p_start, [pn[0] * w, pn[1] * w], w, hw, color, out);
+        emit_quad(
+            pa,
+            points[i],
+            p_start,
+            [pn[0] * w, pn[1] * w],
+            w,
+            hw,
+            color,
+            out,
+        );
     }
 }
 
@@ -414,7 +430,12 @@ fn emit_quad(
 
 /// Triangulate the area between an x-monotone polyline and the horizontal line
 /// `y = baseline` (trapezoid strips). Appends a triangle list to `out`.
-pub fn tessellate_fill(points: &[Point], baseline: f32, color: [f32; 4], out: &mut Vec<PathVertex>) {
+pub fn tessellate_fill(
+    points: &[Point],
+    baseline: f32,
+    color: [f32; 4],
+    out: &mut Vec<PathVertex>,
+) {
     if color[3] <= 0.0 {
         return;
     }
@@ -508,17 +529,44 @@ mod tests {
         assert_eq!(
             f,
             vec![
-                FontFeature::OpenType { tag: *b"tnum", value: 1 },
-                FontFeature::OpenType { tag: *b"liga", value: 0 },
-                FontFeature::Aat { kind: 1, selector: 0 },
-                FontFeature::OpenType { tag: *b"smcp", value: 1 },
+                FontFeature::OpenType {
+                    tag: *b"tnum",
+                    value: 1
+                },
+                FontFeature::OpenType {
+                    tag: *b"liga",
+                    value: 0
+                },
+                FontFeature::Aat {
+                    kind: 1,
+                    selector: 0
+                },
+                FontFeature::OpenType {
+                    tag: *b"smcp",
+                    value: 1
+                },
                 // "3:x" fails %d:%d and is 3 bytes → skipped; " 4:5abc" matches %d:%d.
-                FontFeature::Aat { kind: 4, selector: 5 },
+                FontFeature::Aat {
+                    kind: 4,
+                    selector: 5
+                },
             ]
         );
-        assert_eq!(parse_feature("-3:-2"), Some(FontFeature::Aat { kind: -3, selector: -2 }));
+        assert_eq!(
+            parse_feature("-3:-2"),
+            Some(FontFeature::Aat {
+                kind: -3,
+                selector: -2
+            })
+        );
         assert_eq!(parse_feature("1:"), None);
-        assert_eq!(parse_feature("1:ab"), Some(FontFeature::OpenType { tag: *b"1:ab", value: 1 }));
+        assert_eq!(
+            parse_feature("1:ab"),
+            Some(FontFeature::OpenType {
+                tag: *b"1:ab",
+                value: 1
+            })
+        );
         assert_eq!(parse_feature(""), None);
     }
 
@@ -526,9 +574,28 @@ mod tests {
     fn raster_bounds_union() {
         // Ink inside the typographic box.
         let b = raster_bounds(1.0, 0.0, 8.0, 10.0, 10.0, 12.0, 3.0, 1.0, 2.0).unwrap();
-        assert_eq!(b, PixelBounds { x0: -2, y0: -8, x1: 22, y1: 26 });
+        assert_eq!(
+            b,
+            PixelBounds {
+                x0: -2,
+                y0: -8,
+                x1: 22,
+                y1: 26
+            }
+        );
         // Emoji-like: no ink, typographic box only.
-        let b = raster_bounds(f64::INFINITY, f64::INFINITY, 0.0, 0.0, 10.0, 10.0, 2.0, 0.0, 1.0).unwrap();
+        let b = raster_bounds(
+            f64::INFINITY,
+            f64::INFINITY,
+            0.0,
+            0.0,
+            10.0,
+            10.0,
+            2.0,
+            0.0,
+            1.0,
+        )
+        .unwrap();
         assert_eq!((b.width(), b.height()), (10, 12));
         assert!(raster_bounds(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0).is_none());
         assert!(raster_bounds(0.0, 0.0, 1.0e6, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0).is_none());
@@ -544,7 +611,11 @@ mod tests {
     #[test]
     fn stroke_straight_line() {
         let mut out = Vec::new();
-        let pts = [Point::new(0.0, 0.0), Point::new(10.0, 0.0), Point::new(10.0, 0.0)];
+        let pts = [
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 0.0),
+        ];
         tessellate_stroke(&pts, 2.0, 0.5, [1.0; 4], &mut out);
         assert_eq!(out.len(), 6);
         // Normal of +x direction is (0, 1); width incl. AA is 1.5.
@@ -558,7 +629,11 @@ mod tests {
     #[test]
     fn stroke_miter_join() {
         let mut out = Vec::new();
-        let pts = [Point::new(0.0, 0.0), Point::new(10.0, 0.0), Point::new(10.0, 10.0)];
+        let pts = [
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 10.0),
+        ];
         tessellate_stroke(&pts, 2.0, 0.0, [1.0; 4], &mut out);
         assert_eq!(out.len(), 12);
         // End of segment 0 and start of segment 1 share the miter vertex.
@@ -573,7 +648,11 @@ mod tests {
     fn stroke_spike_falls_back_unjoined() {
         let mut out = Vec::new();
         // Nearly reversing direction: miter far beyond the limit.
-        let pts = [Point::new(0.0, 0.0), Point::new(10.0, 0.0), Point::new(0.0, 0.1)];
+        let pts = [
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(0.0, 0.1),
+        ];
         tessellate_stroke(&pts, 2.0, 0.0, [1.0; 4], &mut out);
         assert_eq!(out.len(), 12);
         for v in &out {
@@ -585,9 +664,27 @@ mod tests {
     fn stroke_degenerate() {
         let mut out = Vec::new();
         tessellate_stroke(&[Point::new(1.0, 1.0)], 1.0, 0.5, [1.0; 4], &mut out);
-        tessellate_stroke(&[Point::new(1.0, 1.0), Point::new(1.0, 1.0)], 1.0, 0.5, [1.0; 4], &mut out);
-        tessellate_stroke(&[Point::new(0.0, 0.0), Point::new(1.0, 1.0)], 0.0, 0.5, [1.0; 4], &mut out);
-        tessellate_stroke(&[Point::new(0.0, 0.0), Point::new(1.0, 1.0)], 1.0, 0.5, [0.0; 4], &mut out);
+        tessellate_stroke(
+            &[Point::new(1.0, 1.0), Point::new(1.0, 1.0)],
+            1.0,
+            0.5,
+            [1.0; 4],
+            &mut out,
+        );
+        tessellate_stroke(
+            &[Point::new(0.0, 0.0), Point::new(1.0, 1.0)],
+            0.0,
+            0.5,
+            [1.0; 4],
+            &mut out,
+        );
+        tessellate_stroke(
+            &[Point::new(0.0, 0.0), Point::new(1.0, 1.0)],
+            1.0,
+            0.5,
+            [0.0; 4],
+            &mut out,
+        );
         assert!(out.is_empty());
     }
 

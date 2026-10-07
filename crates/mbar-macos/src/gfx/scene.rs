@@ -283,7 +283,14 @@ mod tests {
             1.0,
             true,
         );
-        l.push_path([Point::new(2.0, 2.0)], 5.0, TRANSPARENT, TRANSPARENT, 1.0, false);
+        l.push_path(
+            [Point::new(2.0, 2.0)],
+            5.0,
+            TRANSPARENT,
+            TRANSPARENT,
+            1.0,
+            false,
+        );
         match &l.items[1] {
             DrawCmd::Path { points, .. } => {
                 assert_eq!(l.path_points(points), &[Point::new(2.0, 2.0)]);

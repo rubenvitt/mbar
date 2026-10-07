@@ -172,7 +172,7 @@ pub(crate) fn library(path: &'static str) -> Option<&'static Library> {
 macro_rules! private_fns {
     ($lib:expr => $( fn $name:ident ( $($arg:ty),* $(,)? ) -> $ret:ty ; )* ) => {
         $(
-            #[allow(non_snake_case, dead_code)]
+            #[allow(non_snake_case, dead_code, clippy::unused_unit)]
             pub(crate) fn $name() -> Option<unsafe extern "C" fn($($arg),*) -> $ret> {
                 static SYM: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
                 let addr = (*SYM.get_or_init(|| {

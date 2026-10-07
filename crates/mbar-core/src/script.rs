@@ -8,7 +8,9 @@
 //! item's persistent env, so a later `click_script` sees it.
 //!
 //! [`EnvVars`] (complete) is the ordered map used for item persistent envs and event envs.
-//! The builders below are WP-D.
+//! The builders below produce the per-run env; the runtime decides *whether* a run happens
+//! (gating, `script`/`mach_helper` present) and only then calls [`build_update_env`], so the
+//! Q3 `SENDER` leak happens exactly when SketchyBar would write it.
 
 /// `struct env_vars`: ordered map where `set` removes an existing key and appends the new
 /// pair at the end (`env_vars_set`).
@@ -111,23 +113,44 @@ pub fn build_update_env(
     name: Option<&str>,
     sender: &Sender,
 ) -> EnvVars {
-    let _ = (persistent, event_env, name, sender);
-    todo!("WP-D: events.md §4.2/§4.4")
+    match event_env {
+        None => {
+            persistent.set("SENDER", sender.as_str());
+            persistent.clone()
+        }
+        Some(ev) => {
+            let mut env = ev.clone();
+            env.extend_from(persistent);
+            if let Some(n) = name {
+                env.set("NAME", n);
+            }
+            env.set("SENDER", sender.as_str());
+            env
+        }
+    }
 }
 
 /// Env of a `click_script` run (`bar_item_on_click`, `events.md` §6.2): the click env
 /// (`INFO`, `BUTTON`, `MODIFIER`) with the item's persistent vars copied in (no explicit
 /// `NAME`/`SENDER`; `SENDER` may be stale from the persistent env).
 pub fn build_click_script_env(click_env: &EnvVars, persistent: &EnvVars) -> EnvVars {
-    let _ = (click_env, persistent);
-    todo!("WP-D: events.md §6.2")
+    let mut env = click_env.clone();
+    env.extend_from(persistent);
+    env
 }
 
 /// `env_vars_copy_serialized_representation`: `k\0v\0…` plus one extra `\0` (mach helper
 /// payload, `events.md` §4.6).
 pub fn serialize_for_mach(env: &EnvVars) -> Vec<u8> {
-    let _ = env;
-    todo!("WP-D: events.md §4.6")
+    let mut out = Vec::new();
+    for (k, v) in env.iter() {
+        out.extend_from_slice(k.as_bytes());
+        out.push(0);
+        out.extend_from_slice(v.as_bytes());
+        out.push(0);
+    }
+    out.push(0);
+    out
 }
 
 /// The 2-byte `"k\0"` message every mach helper gets on exit/reload.

@@ -223,10 +223,7 @@ impl<K: Hash + Eq + Clone> Atlas<K> {
                     self.clear_page(i);
                     outcome.cleared = Some(i as u32);
                     let page = self.pages[i].as_mut().expect("live page");
-                    let (x, y) = page
-                        .packer
-                        .alloc(w, h)
-                        .expect("fits an empty regular page");
+                    let (x, y) = page.packer.alloc(w, h).expect("fits an empty regular page");
                     let pl = Placement {
                         page: i as u32,
                         x,
@@ -344,7 +341,15 @@ mod tests {
     fn shelf_no_overlap() {
         let mut p = ShelfPacker::new(256, 256);
         let mut rects = Vec::new();
-        let sizes = [(30, 12), (7, 20), (100, 9), (50, 50), (3, 3), (80, 14), (12, 12)];
+        let sizes = [
+            (30, 12),
+            (7, 20),
+            (100, 9),
+            (50, 50),
+            (3, 3),
+            (80, 14),
+            (12, 12),
+        ];
         for i in 0..200 {
             let (w, h) = sizes[i % sizes.len()];
             if let Some((x, y)) = p.alloc(w, h) {
@@ -354,7 +359,8 @@ mod tests {
         }
         for (i, a) in rects.iter().enumerate() {
             for b in &rects[i + 1..] {
-                let disjoint = a.0 + a.2 <= b.0 || b.0 + b.2 <= a.0 || a.1 + a.3 <= b.1 || b.1 + b.3 <= a.1;
+                let disjoint =
+                    a.0 + a.2 <= b.0 || b.0 + b.2 <= a.0 || a.1 + a.3 <= b.1 || b.1 + b.3 <= a.1;
                 assert!(disjoint, "{a:?} overlaps {b:?}");
             }
         }
@@ -380,7 +386,7 @@ mod tests {
         a.insert(1, 31, 31, 1, 0).unwrap(); // page 0, used at 1
         a.insert(2, 31, 31, 2, 0).unwrap(); // page 1, used at 2
         a.get(&1, 3); // page 0 now used at 3
-        // Budget reached, GPU completed frame 2 → page 1 (last used 2) is evictable.
+                      // Budget reached, GPU completed frame 2 → page 1 (last used 2) is evictable.
         let (p, o) = a.insert(3, 31, 31, 4, 2).unwrap();
         assert_eq!(o.cleared, Some(1));
         assert_eq!(o.added, None);

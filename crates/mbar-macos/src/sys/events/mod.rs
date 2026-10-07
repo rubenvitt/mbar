@@ -18,7 +18,7 @@ use super::{displays, spaces, Sink, SysEvent};
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
-use objc2::MainThreadMarker;
+use objc2::{MainThreadMarker, Message};
 use objc2_app_kit::{
     NSRunningApplication, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification,
     NSWorkspaceApplicationKey, NSWorkspaceDidActivateApplicationNotification,

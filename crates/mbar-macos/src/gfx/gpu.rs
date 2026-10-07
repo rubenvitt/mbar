@@ -52,6 +52,7 @@ pub fn new_texture(
 /// region at `(x, y)`.
 ///
 /// Returns `false` (and does nothing) when `bytes` is too short for the region.
+#[allow(clippy::too_many_arguments)]
 pub fn upload(
     texture: &ProtocolObject<dyn MTLTexture>,
     x: u32,
@@ -69,7 +70,9 @@ pub fn upload(
     let needed = bytes_per_row * (h as usize - 1) + row;
     if bytes_per_row < row
         || bytes.len() < needed
-        || x + w > texture.width() as u32 || y + h > texture.height() as u32 {
+        || x + w > texture.width() as u32
+        || y + h > texture.height() as u32
+    {
         return false;
     }
     let region = MTLRegion {
@@ -88,6 +91,8 @@ pub fn upload(
     // SAFETY: the region lies inside the texture and `bytes` holds at least
     // `bytes_per_row * (h - 1) + w * bytes_per_pixel` bytes (both checked above), which is
     // exactly what `replaceRegion` reads for this region. It only reads from the pointer.
-    unsafe { texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(region, 0, ptr, bytes_per_row) };
+    unsafe {
+        texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(region, 0, ptr, bytes_per_row)
+    };
     true
 }

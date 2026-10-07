@@ -4,9 +4,11 @@
 //! * [`EventKind`], [`EventMask`] and the [`CustomEvents`] registry core are complete
 //!   (the property layer, `--subscribe`, `--query events` and the runtime all depend on the
 //!   bit layout).
-//! * INFO/env builders are WP-D.
+//! * INFO/env builders reproduce SketchyBar's payload bytes (`events.md` §5–§7) and the
+//!   scroll throttle (§6.3).
 
 use crate::script::EnvVars;
+use std::fmt::Write;
 
 /// The 18 built-in events, in registration order; the discriminant is the bit index
 /// (`custom_events.c:custom_events_init`). Custom events get bits 18..63.
@@ -217,28 +219,57 @@ pub struct BarSpace {
 /// joined with ",\n" + "\n}"` — no trailing newline; zero bars → `"{\n}"`. Full string, no
 /// truncation (B2).
 pub fn space_change_info(bars: &[BarSpace]) -> String {
-    let _ = bars;
-    todo!("WP-D: events.md §5.2")
+    let mut out = String::from("{\n");
+    for (i, b) in bars.iter().enumerate() {
+        let sep = if i + 1 < bars.len() { "," } else { "" };
+        let _ = write!(out, "\t\"display-{}\": {}{}\n", b.adid, b.sid, sep);
+    }
+    out.push('}');
+    out
 }
 
 /// `display_change` INFO: active adid as decimal (no 2-char truncation, B3).
 pub fn display_change_info(active_adid: u32) -> String {
-    let _ = active_adid;
-    todo!("WP-D: events.md §5.3")
+    active_adid.to_string()
 }
 
 /// `volume_change` / `brightness_change` INFO: `(int)(v*100 + 0.5)`.
 pub fn level_info(v: f32) -> String {
-    let _ = v;
-    todo!("WP-D: events.md §5.6/§5.7")
+    // C: `(int)(v*100.0 + 0.5)` — float promoted to double, truncation toward zero.
+    ((v as f64 * 100.0 + 0.5) as i32).to_string()
 }
 
 /// `get_modifier_description`: comma-joined subset of `shift,ctrl,alt,cmd,fn` for
 /// `kCGEventFlagMaskShift (0x20000)`, `Control (0x40000)`, `Alternate (0x80000)`,
 /// `Command (0x100000)`, `SecondaryFn (0x800000)`, or `none`.
 pub fn modifier_description(flags: u32) -> String {
-    let _ = flags;
-    todo!("WP-D: events.md §6.2")
+    const MODS: [(u32, &str); 5] = [
+        (0x20000, "shift"),
+        (0x40000, "ctrl"),
+        (0x80000, "alt"),
+        (0x100000, "cmd"),
+        (0x800000, "fn"),
+    ];
+    let parts: Vec<&str> = MODS
+        .iter()
+        .filter(|(m, _)| flags & m != 0)
+        .map(|(_, n)| *n)
+        .collect();
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(",")
+    }
+}
+
+/// `get_type_description`: `left`, `right` or `other`.
+pub fn button_description(button: crate::platform::MouseButton) -> &'static str {
+    use crate::platform::MouseButton;
+    match button {
+        MouseButton::Left => "left",
+        MouseButton::Right => "right",
+        MouseButton::Other => "other",
+    }
 }
 
 /// Env of a click (`bar_item_on_click`, `events.md` §6.2), in order `INFO`, `BUTTON`,
@@ -246,29 +277,62 @@ pub fn modifier_description(flags: u32) -> String {
 /// `"{\n\t\"button\": \"<b>\",\n\t\"button_code\": <n>,\n\t\"modifier\": \"<m>\",\n\t\"modfier_code\": <flags>\n}\n"`
 /// (typo `modfier_code` is part of the format).
 pub fn click_env(button: crate::platform::MouseButton, button_code: u32, flags: u32) -> EnvVars {
-    let _ = (button, button_code, flags);
-    todo!("WP-D: events.md §6.2")
+    let b = button_description(button);
+    let m = modifier_description(flags);
+    let mut env = EnvVars::new();
+    env.set(
+        "INFO",
+        format!(
+            "{{\n\t\"button\": \"{b}\",\n\t\"button_code\": {button_code},\n\t\"modifier\": \"{m}\",\n\t\"modfier_code\": {flags}\n}}\n"
+        ),
+    );
+    env.set("BUTTON", b);
+    env.set("MODIFIER", m);
+    env
+}
+
+/// INFO of item and global scrolls.
+fn scroll_info(delta: i32, m: &str, flags: u32) -> String {
+    format!(
+        "{{\n\t\"delta\": {delta},\n\t\"modifier\": \"{m}\",\n\t\"modfier_code\": {flags}\n}}\n"
+    )
 }
 
 /// Env of an item scroll (`bar_item_on_scroll`): `INFO`, `SCROLL_DELTA`, `MODIFIER`, INFO
 /// `"{\n\t\"delta\": <d>,\n\t\"modifier\": \"<m>\",\n\t\"modfier_code\": <flags>\n}\n"`.
 pub fn scroll_env(delta: i32, flags: u32) -> EnvVars {
-    let _ = (delta, flags);
-    todo!("WP-D: events.md §6.3")
+    let m = modifier_description(flags);
+    let mut env = EnvVars::new();
+    env.set("INFO", scroll_info(delta, &m, flags));
+    env.set("SCROLL_DELTA", delta.to_string());
+    env.set("MODIFIER", m);
+    env
 }
 
 /// Env of `mouse.scrolled.global`: `SCROLL_DELTA`, `INFO` (same format), `DID=<adid>`,
 /// `MODIFIER`.
 pub fn scroll_global_env(delta: i32, adid: u32, flags: u32) -> EnvVars {
-    let _ = (delta, adid, flags);
-    todo!("WP-D: events.md §6.3")
+    let m = modifier_description(flags);
+    let mut env = EnvVars::new();
+    env.set("SCROLL_DELTA", delta.to_string());
+    env.set("INFO", scroll_info(delta, &m, flags));
+    env.set("DID", adid.to_string());
+    env.set("MODIFIER", m);
+    env
 }
 
 /// `--trigger <event> K=V…` env: tokens with `=` and a **non-empty** value, split at the
 /// first `=`, later duplicates win (`events.md` §7).
 pub fn trigger_env(tokens: &[String]) -> EnvVars {
-    let _ = tokens;
-    todo!("WP-D: events.md §7")
+    let mut env = EnvVars::new();
+    for t in tokens {
+        if let Some((k, v)) = t.split_once('=') {
+            if !v.is_empty() {
+                env.set(k, v);
+            }
+        }
+    }
+    env
 }
 
 /// Event names whose `--trigger` runs the forced OS handler and ignores the passed vars
@@ -286,6 +350,11 @@ pub fn is_forced_trigger(name: &str) -> bool {
     )
 }
 
+/// Scroll throttle window (`TIMEOUT`, 150 ms).
+pub const SCROLL_THROTTLE: std::time::Duration = std::time::Duration::from_millis(150);
+/// Age after which a swallowed accumulation is dropped (`2 * TIMEOUT`).
+pub const SCROLL_STALE: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// Scroll coalescing state (`events.md` §6.3): 150 ms leading-edge throttle, an
 /// accumulation older than 300 ms is dropped.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -295,11 +364,30 @@ pub struct ScrollThrottle {
 }
 
 impl ScrollThrottle {
-    /// Returns `Some(total)` when the event is delivered (the caller resets `acc = 0` after
-    /// dispatch via [`ScrollThrottle::reset`]), `None` when it was swallowed.
+    /// Leading-edge throttle (`event_mouse_scrolled`): within 150 ms of the last delivered
+    /// scroll the delta is accumulated and `None` returned; otherwise an accumulation older
+    /// than 300 ms is dropped, the event is delivered with `delta + acc` and the
+    /// accumulation is cleared (C clears `acc` on every path after dispatch; calling
+    /// [`ScrollThrottle::reset`] afterwards is harmless). Boundaries: exactly 150 ms after
+    /// the last delivery delivers, exactly 300 ms keeps the accumulation.
     pub fn feed(&mut self, delta: i32, now: std::time::Instant) -> Option<i32> {
-        let _ = (delta, now);
-        todo!("WP-D: events.md §6.3")
+        if let Some(ts) = self.last {
+            let since = now.saturating_duration_since(ts);
+            if now < ts || since < SCROLL_THROTTLE {
+                self.acc = self.acc.wrapping_add(delta);
+                return None;
+            }
+            if since > SCROLL_STALE {
+                self.acc = 0;
+            }
+        } else {
+            // C: ts == 0 → the accumulation is always stale.
+            self.acc = 0;
+        }
+        self.last = Some(now);
+        let total = delta.wrapping_add(self.acc);
+        self.acc = 0;
+        Some(total)
     }
 
     pub fn reset(&mut self) {
