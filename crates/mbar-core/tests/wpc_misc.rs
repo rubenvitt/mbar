@@ -46,7 +46,13 @@ fn bar_windows_follow_displays() {
 #[test]
 fn window_properties() {
     let mut h = H::new();
-    h.msg(&["--bar", "topmost=on", "shadow=on", "sticky=off", "font_smoothing=on"]);
+    h.msg(&[
+        "--bar",
+        "topmost=on",
+        "shadow=on",
+        "sticky=off",
+        "font_smoothing=on",
+    ]);
     let w = &h.last_frame.windows[0];
     assert_eq!(w.level, mbar_core::platform::level::STATUS);
     assert!(w.shadow && !w.sticky && w.font_smoothing);
@@ -57,7 +63,14 @@ fn window_properties() {
 #[test]
 fn platform_commands() {
     let mut h = H::new();
-    let (rsp, fx) = h.msg_fx(&["--hotload", "on", "--load-font", "/f.ttf", "--menubar", "hide"]);
+    let (rsp, fx) = h.msg_fx(&[
+        "--hotload",
+        "on",
+        "--load-font",
+        "/f.ttf",
+        "--menubar",
+        "hide",
+    ]);
     assert_eq!(rsp.as_deref(), Some(""));
     let p = platform(&fx);
     assert_eq!(
@@ -72,12 +85,28 @@ fn platform_commands() {
     assert!(platform(&fx).contains(&PlatformRequest::SetMenuBarHidden(true)));
     let (_, fx) = h.msg_fx(&["--menu", "0"]);
     assert!(platform(&fx).contains(&PlatformRequest::OpenMenu { index: 0 }));
-    assert_eq!(h.msg(&["--menu", "Nope"]), "[!] Menu: Menu 'Nope' not found\n");
+    assert_eq!(
+        h.msg(&["--menu", "Nope"]),
+        "[!] Menu: Menu 'Nope' not found\n"
+    );
     // --monitor keeps the connection open (no reply) and streams events.
     let (rsp, _) = h.msg_fx(&["--monitor", "all"]);
     assert!(rsp.is_none());
-    h.msg(&["--add", "item", "a", "left", "--set", "a", "script=a.sh", "--add", "event", "e",
-        "--subscribe", "a", "e"]);
+    h.msg(&[
+        "--add",
+        "item",
+        "a",
+        "left",
+        "--set",
+        "a",
+        "script=a.sh",
+        "--add",
+        "event",
+        "e",
+        "--subscribe",
+        "a",
+        "e",
+    ]);
     let fx = h.msg_fx(&["--trigger", "e", "INFO=[1,2]"]).1;
     let line = fx
         .iter()
@@ -92,18 +121,34 @@ fn platform_commands() {
     assert_eq!(v["info"], serde_json::json!([1, 2]));
     assert_eq!(v["items"], serde_json::json!(["a"]));
     let fx = h.advance(Duration::from_millis(1100));
-    assert!(fx.iter().any(|e| matches!(e, Effect::Monitor(l) if l.starts_with("{\"type\":\"stats\""))));
+    assert!(fx
+        .iter()
+        .any(|e| matches!(e, Effect::Monitor(l) if l.starts_with("{\"type\":\"stats\""))));
 }
 
 #[test]
 fn scroll_texts_marquee() {
     let mut h = H::new();
-    h.msg(&["--add", "item", "m", "left", "--set", "m", "label=abcdefghijklmnop",
-        "label.max_chars=4", "scroll_texts=on"]);
+    h.msg(&[
+        "--add",
+        "item",
+        "m",
+        "left",
+        "--set",
+        "m",
+        "label=abcdefghijklmnop",
+        "label.max_chars=4",
+        "scroll_texts=on",
+    ]);
     // counter % 15 == 0 on the first routine tick: the marquee starts.
     h.advance(Duration::from_millis(1050));
     assert_eq!(h.rt.animator.len(), 3);
-    assert!(h.rt.animator.animations().iter().all(|a| a.path == "label.scroll"));
+    assert!(h
+        .rt
+        .animator
+        .animations()
+        .iter()
+        .all(|a| a.path == "label.scroll"));
     h.advance_by(Duration::from_secs(1), Duration::from_millis(16));
     let item = h.rt.model.item(h.rt.model.find("m").unwrap()).unwrap();
     assert!(item.label.scroll > 0.0);
@@ -112,9 +157,22 @@ fn scroll_texts_marquee() {
 #[test]
 fn script_stats() {
     let mut h = H::new();
-    h.msg(&["--add", "item", "a", "left", "--set", "a", "script=a.sh", "--update"]);
+    h.msg(&[
+        "--add",
+        "item",
+        "a",
+        "left",
+        "--set",
+        "a",
+        "script=a.sh",
+        "--update",
+    ]);
     h.res.now += Duration::from_millis(20);
-    h.input(Input::ScriptFinished { pid: 1, item: Some("a".into()), output: None });
+    h.input(Input::ScriptFinished {
+        pid: 1,
+        item: Some("a".into()),
+        output: None,
+    });
     let st = h.query(&["stats"]);
     assert_eq!(st["scripts"]["spawned"], 1);
     assert_eq!(st["scripts"]["running"], 0);
