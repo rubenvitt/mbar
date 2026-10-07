@@ -287,7 +287,7 @@ impl Driver {
         response
     }
 
-    fn reply(&mut self, token: ReplyToken, text: String, res: &mut dyn Resources) {
+    fn reply(&mut self, token: ReplyToken, text: String) {
         if let Some(r) = self.pending.remove(&token) {
             r.respond(&text);
         } else if let Some((r, mode)) = self.pending_monitors.remove(&token) {
@@ -302,7 +302,7 @@ impl Driver {
     fn apply(&mut self, effects: Vec<Effect>, res: &mut dyn Resources) {
         for e in effects {
             match e {
-                Effect::Reply { reply, text } => self.reply(reply, text, res),
+                Effect::Reply { reply, text } => self.reply(reply, text),
                 Effect::RunScript { script, env, item } => match mbar_lua::parse_script(&script) {
                     Some(id) => self.deferred.push_back(Deferred::Handler {
                         generation: self.lua_generation,

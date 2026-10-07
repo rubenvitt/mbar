@@ -169,6 +169,13 @@ fn stock_config_state() {
 #[test]
 fn stock_update() {
     let mut h = H::new();
+    h.res.spaces = (1..=10)
+        .map(|i| mbar_core::platform::SpaceInfo {
+            id: i,
+            display: 1,
+            fullscreen: false,
+        })
+        .collect();
     stock(&mut h);
     h.res
         .system
@@ -195,6 +202,8 @@ fn stock_update() {
     let s2 = runs_of(&fx, "space.2");
     assert_eq!(s2[0].sender(), Some("space_change"));
     assert_eq!(s2[0].get("SELECTED"), Some("false"));
+    // D1: no variables leak from space.1 into later items.
+    assert_eq!(runs_of(&fx, "front_app")[0].get("SID"), None);
     let front = runs_of(&fx, "front_app");
     assert_eq!(front[0].sender(), Some("front_app_switched"));
     assert_eq!(front[0].get("INFO"), Some("Safari"));
