@@ -228,7 +228,8 @@ impl AppView {
         let bar_handle = bar.clone();
         subs.push(cx.observe(&system, move |_, system, cx| {
             let status = system.read(cx).status().clone();
-            if status == DaemonStatus::Connected && last != DaemonStatus::Connected {
+            let was_down = matches!(last, DaemonStatus::NotRunning | DaemonStatus::Error(_));
+            if status == DaemonStatus::Connected && was_down {
                 inspector_handle.update(cx, |v, cx| v.refresh(cx));
                 bar_handle.update(cx, |v, cx| v.refresh(cx));
             }

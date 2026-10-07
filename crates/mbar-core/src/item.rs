@@ -1070,7 +1070,8 @@ mod tests {
             let mut c = cx(&mut res, &mut an);
             assert!(it.set_prop("width", "dynamic", &mut c).unwrap());
         }
-        assert_eq!(it.custom_width, 36 + 10);
+        // length(true) = max(custom_width 100, content 36) = 100, plus both paddings.
+        assert_eq!(it.custom_width, 110);
         assert_eq!(an.len(), 1, "chained -1 step");
         assert!(it.anim_set("width", AnimValue::Int(-1), &mut PropEffects::default()));
         assert!(!it.has_const_width);
