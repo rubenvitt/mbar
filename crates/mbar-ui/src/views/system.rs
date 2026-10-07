@@ -72,7 +72,7 @@ impl SystemView {
             reloading: false,
             permissions: None,
             menubar_hidden: None,
-            launch_agent: sys::launch_agent_installed(),
+            launch_agent: sys::launch_agent_path().is_some_and(|p| p.exists()),
             _poll: poll,
         };
         view.check_status(cx);
@@ -192,20 +192,13 @@ impl SystemView {
         );
     }
 
-    fn set_launch_agent(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let result = if on {
-            sys::install_launch_agent().map(|p| format!("Wrote {}", p.display()))
-        } else {
-            sys::remove_launch_agent().map(|_| "Removed the launch agent".to_string())
-        };
-        self.launch_agent = sys::launch_agent_installed();
-        match result {
-            Ok(msg) => window.push_notification(Notification::success(msg), cx),
-            Err(e) => window.push_notification(
-                Notification::error(e.to_string()).title("Launch at login"),
-                cx,
-            ),
-        }
+    // TODO(Task 12/16, macOS): replaced by the SMAppService login item (`set_login_item`).
+    // Until then the switch only reports the legacy agent; setup manages launch at login.
+    fn set_launch_agent(&mut self, _on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        window.push_notification(
+            Notification::info("Login item is managed by onboarding").title("Launch at login"),
+            cx,
+        );
         cx.notify();
     }
 
@@ -375,9 +368,13 @@ impl Render for SystemView {
             .unwrap_or_else(|| "~/Library/LaunchAgents/dev.rubeen.mbar.plist".into());
         let login = section("Launch at login", cx).child(setting_row(
             "Start mbar when you log in",
-            format!("Launch agent: {login_path}"),
+            format!(
+                "Managed by setup; from a source build use `make install-agent` \
+                 (launch agent: {login_path})"
+            ),
             Switch::new("launch-at-login")
                 .checked(self.launch_agent)
+                .disabled(true)
                 .on_change(cx.listener(|this, on: &bool, window, cx| {
                     this.set_launch_agent(*on, window, cx)
                 })),

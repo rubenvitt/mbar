@@ -13,8 +13,8 @@ use mbar_ui_model::model::parse_cli_args;
 actions!(mbar_ui, [Quit]);
 
 fn main() {
-    let bar_name = match parse_cli_args(std::env::args().skip(1)) {
-        Ok(name) => name,
+    let args = match parse_cli_args(std::env::args().skip(1)) {
+        Ok(a) => a,
         Err(msg) => {
             let help = msg.starts_with("usage");
             if help {
@@ -25,6 +25,7 @@ fn main() {
             std::process::exit(2);
         }
     };
+    let bar_name = args.bar_name.clone();
 
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
@@ -54,6 +55,17 @@ fn main() {
                 }),
                 ..Default::default()
             };
+            // Daemon version sync: inside mbar.app, restart a running daemon whose version
+            // differs from the bundle's. A no-op outside a bundle (dev builds, Linux).
+            if let Some(bundle) = mbar_ui_model::system::current_bundle() {
+                let client = Client::new(bar_name.clone());
+                cx.background_executor()
+                    .spawn(async move {
+                        mbar_ui_model::system::sync_daemon_version(&client, &bundle.short_version);
+                    })
+                    .detach();
+            }
+
             let client = Client::new(bar_name.clone());
             gpui_kit::open_window(options, cx, |window, cx| {
                 // Light/dark follows the system; AppView keeps it in sync afterwards.

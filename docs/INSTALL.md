@@ -206,7 +206,8 @@ This fills in `packaging/dev.rubeen.mbar.plist`, writes it to
 `launchctl bootstrap`. The agent:
 
 - uses the label `dev.rubeen.mbar`, the same label as the app's login item,
-  so the two never start two daemons.
+  so the two never start two daemons. The management UI no longer writes this
+  file; use `make install-agent`.
 - starts at login (`RunAtLoad`) and restarts mbar if it crashes
   (`KeepAlive` → `SuccessfulExit=false`). `mbar --exit` exits with status 0, so
   it stays stopped.

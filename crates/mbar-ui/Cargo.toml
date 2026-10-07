@@ -27,6 +27,7 @@ required-features = ["gui"]
 
 [dependencies]
 mbar-ipc = { path = "../mbar-ipc" }
+mbar-app = { path = "../mbar-app" }
 # preserve_order: property tables keep the daemon's field order.
 serde_json = { version = "1", features = ["preserve_order"] }
 gpui-kit = { version = "0.7.1", optional = true }

@@ -1,5 +1,5 @@
-//! System integration helpers for the "System" page: starting the daemon, the launch
-//! agent, permission probes and the native menu bar state. Blocking functions here run
+//! System integration helpers for the "System" page: starting and kickstarting the
+//! daemon, permission probes and the native menu bar state. Blocking functions here run
 //! on the background executor.
 
 use std::io;
@@ -15,18 +15,14 @@ pub const ACCESSIBILITY_SETTINGS_URL: &str =
 pub const SCREEN_RECORDING_SETTINGS_URL: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 
-/// PATH given to the daemon started by launchd (which otherwise only has the system
-/// directories), so scripts find Homebrew tools like they do from a shell.
-const LAUNCH_AGENT_PATH: &str =
-    "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
-
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
 }
 
-/// `~/Library/LaunchAgents/dev.rubeen.mbar.plist`.
+/// `~/Library/LaunchAgents/dev.rubeen.mbar.plist`, the legacy agent written by
+/// `make install-agent` (onboarding boots it out and removes it).
 pub fn launch_agent_path() -> Option<PathBuf> {
     home_dir().map(|h| {
         h.join("Library/LaunchAgents")
@@ -99,87 +95,77 @@ pub fn start_daemon(bar_name: &str) -> io::Result<PathBuf> {
     Ok(bin)
 }
 
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
-/// `ProgramArguments` for the launch agent: the absolute daemon path when known,
-/// otherwise a login shell resolving `mbar` from the user's `$PATH`.
-pub fn launch_agent_program(daemon: Option<&Path>) -> Vec<String> {
-    match daemon {
-        Some(p) => vec![p.to_string_lossy().into_owned()],
-        None => vec!["/bin/sh".into(), "-lc".into(), "exec mbar".into()],
+/// Restarts the daemon through launchd (the bundled login item `dev.rubeen.mbar`), e.g.
+/// after a permission grant that only takes effect in a new process.
+pub fn kickstart_daemon() -> io::Result<()> {
+    let uid = current_uid();
+    let status = Command::new("/bin/launchctl")
+        .args([
+            "kickstart",
+            "-k",
+            &format!("gui/{uid}/{LAUNCH_AGENT_LABEL}"),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("launchctl exited with {status}")))
     }
 }
 
-pub fn launch_agent_plist(program: &[String]) -> String {
-    let args: String = program
-        .iter()
-        .map(|a| format!("\t\t<string>{}</string>\n", xml_escape(a)))
-        .collect();
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key>
-	<string>{label}</string>
-	<key>ProgramArguments</key>
-	<array>
-{args}	</array>
-	<key>EnvironmentVariables</key>
-	<dict>
-		<key>PATH</key>
-		<string>{path}</string>
-	</dict>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>KeepAlive</key>
-	<dict>
-		<key>SuccessfulExit</key>
-		<false/>
-	</dict>
-	<key>ProcessType</key>
-	<string>Interactive</string>
-</dict>
-</plist>
-"#,
-        label = LAUNCH_AGENT_LABEL,
-        path = LAUNCH_AGENT_PATH,
-    )
+/// The daemon version from `--query stats` output (`version` field, added together with
+/// app distribution). `None` for unparsable output or an older daemon without the field.
+pub fn daemon_version_from_stats(json: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(json).ok()?["version"]
+        .as_str()
+        .map(str::to_string)
 }
 
-pub fn launch_agent_installed() -> bool {
-    launch_agent_path().map(|p| p.exists()).unwrap_or(false)
+/// Whether the running daemon differs from the installed bundle's version. A daemon
+/// without a version (`None`) predates the field and is therefore older than the bundle.
+pub fn needs_daemon_restart(running: Option<&str>, bundle: &str) -> bool {
+    running != Some(bundle)
 }
 
-/// Writes the launch agent running `mbar` (takes effect at the next login).
-pub fn install_launch_agent() -> io::Result<PathBuf> {
-    let path = launch_agent_path()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "$HOME is not set"))?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+/// The `mbar.app` this binary runs from (`…/mbar.app/Contents/MacOS/mbar-ui`), with its
+/// `Info.plist` values; `None` outside a bundle (e.g. a `cargo run` or Linux build).
+/// Canonicalized like the daemon's lookup: `current_exe` on macOS is the path that was
+/// exec'd, so a start via a symlink would otherwise not be recognised as the bundle.
+pub fn current_bundle() -> Option<mbar_app::bundle::AppBundle> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let root = mbar_app::bundle::bundle_root_from_exe(&exe)?;
+    mbar_app::bundle::read_bundle(&root)
+}
+
+/// Restarts the daemon through launchd when it answers but reports a version other than
+/// the installed bundle's (e.g. after a Sparkle update while the daemon kept running).
+/// A stopped daemon is left alone: onboarding and the System page handle that. Blocking;
+/// run it on the background executor. Returns whether a restart was requested.
+///
+/// Only for the default bar: the launchd job `dev.rubeen.mbar` runs that one, so a
+/// mismatch on another bar (`mbar-ui --bar-name x`) must not restart the default daemon.
+pub fn sync_daemon_version(client: &Client, bundle_version: &str) -> bool {
+    if client.bar_name() != mbar_ipc::DEFAULT_BAR_NAME {
+        return false;
     }
-    let daemon = find_executable("mbar");
-    std::fs::write(
-        &path,
-        launch_agent_plist(&launch_agent_program(daemon.as_deref())),
-    )?;
-    Ok(path)
+    let Ok(stats) = client.send_strs(&["--query", "stats"]) else {
+        return false;
+    };
+    let running = daemon_version_from_stats(&stats);
+    needs_daemon_restart(running.as_deref(), bundle_version) && kickstart_daemon().is_ok()
 }
 
-pub fn remove_launch_agent() -> io::Result<()> {
-    match launch_agent_path() {
-        Some(p) => match std::fs::remove_file(&p) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            other => other,
-        },
-        None => Ok(()),
+/// The real user id of this process (the launchd `gui/<uid>` domain).
+pub fn current_uid() -> u32 {
+    extern "C" {
+        fn getuid() -> u32;
     }
+    // SAFETY: getuid has no preconditions and cannot fail.
+    unsafe { getuid() }
 }
 
 /// Opens a URL (e.g. a System Settings pane) with `open` (macOS) / `xdg-open`.
@@ -277,21 +263,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plist_contents() {
-        let p = launch_agent_plist(&launch_agent_program(Some(Path::new(
-            "/opt/homebrew/bin/mbar",
-        ))));
-        assert!(p.contains("<string>dev.rubeen.mbar</string>"));
-        assert!(p.contains("\t\t<string>/opt/homebrew/bin/mbar</string>\n\t</array>"));
-        assert!(p.contains("<key>RunAtLoad</key>\n\t<true/>"));
-        let fallback = launch_agent_plist(&launch_agent_program(None));
-        assert!(fallback.contains("<string>/bin/sh</string>"));
-        assert!(fallback.contains("<string>exec mbar</string>"));
-        let esc = launch_agent_plist(&["/a&b/<mbar>".to_string()]);
-        assert!(esc.contains("<string>/a&amp;b/&lt;mbar&gt;</string>"));
-    }
-
-    #[test]
     fn launch_agent_path_under_home() {
         if let Some(p) = launch_agent_path() {
             assert!(p.ends_with("Library/LaunchAgents/dev.rubeen.mbar.plist"));
@@ -332,6 +303,56 @@ mod tests {
         assert_eq!(parse_defaults_bool("0"), Some(false));
         assert_eq!(parse_defaults_bool("YES"), Some(true));
         assert_eq!(parse_defaults_bool("maybe"), None);
+    }
+
+    #[test]
+    fn uid_matches_id_command() {
+        let out = Command::new("id").arg("-u").output().unwrap();
+        let id: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+        assert_eq!(current_uid(), id);
+    }
+
+    #[test]
+    fn daemon_version_parsing() {
+        assert_eq!(
+            daemon_version_from_stats("{\n\t\"items\": 3,\n\t\"version\": \"0.2.0\"\n}\n")
+                .as_deref(),
+            Some("0.2.0")
+        );
+        assert_eq!(daemon_version_from_stats("{\"items\": 3}"), None);
+        assert!(needs_daemon_restart(Some("0.1.0"), "0.2.0"));
+        assert!(!needs_daemon_restart(Some("0.2.0"), "0.2.0"));
+        // An old daemon without the field is older than any bundle with this feature.
+        assert!(needs_daemon_restart(None, "0.2.0"));
+    }
+
+    #[test]
+    fn version_sync_ignores_other_bars() {
+        // A non-default bar is not run by `dev.rubeen.mbar`: it is never queried (and so
+        // never triggers a kickstart of the default bar's daemon).
+        let bar_name = format!("mbar-ui-test-sync-{}", std::process::id());
+        let path = mbar_ipc::socket_path(&bar_name);
+        let _ = std::fs::remove_file(&path);
+        let server = mbar_ipc::socket::Server::bind(&path).unwrap();
+        let queried = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let q = queried.clone();
+        server
+            .spawn(move |req| {
+                q.store(true, std::sync::atomic::Ordering::SeqCst);
+                req.respond("{\"version\": \"0.0.1\"}\n");
+            })
+            .unwrap();
+        assert!(!sync_daemon_version(
+            &Client::new(bar_name.clone()),
+            "9.9.9"
+        ));
+        assert!(!queried.load(std::sync::atomic::Ordering::SeqCst));
+        // Control: the fake daemon answers, so the guard (not a dead socket) skipped it.
+        assert!(Client::new(bar_name)
+            .send_strs(&["--query", "stats"])
+            .is_ok());
+        assert!(queried.load(std::sync::atomic::Ordering::SeqCst));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
