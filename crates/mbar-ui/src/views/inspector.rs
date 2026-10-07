@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui_kit::component::{
     button::Button,
@@ -42,7 +42,6 @@ pub struct InspectorView {
     editor: Entity<PropertyEditor>,
     loading: bool,
     error: Option<String>,
-    last_refresh: Option<Instant>,
     auto_refresh: bool,
     _auto_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -137,7 +136,6 @@ impl InspectorView {
             editor,
             loading: false,
             error: None,
-            last_refresh: None,
             auto_refresh: false,
             _auto_task: None,
             _subscriptions: subs,
@@ -157,7 +155,6 @@ impl InspectorView {
             |client| client.fetch_snapshot(),
             |this, result, cx| {
                 this.loading = false;
-                this.last_refresh = Some(Instant::now());
                 match result {
                     Ok(snapshot) => {
                         this.error = None;
@@ -285,18 +282,18 @@ impl InspectorView {
 
 impl Render for InspectorView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let subtitle = match (&self.snapshot, self.last_refresh) {
-            (Some(s), Some(at)) => format!(
-                "{} items · updated {}s ago{}",
+        let subtitle = match &self.snapshot {
+            Some(s) => format!(
+                "{} items{}{}",
                 s.items.len(),
-                at.elapsed().as_secs(),
                 if s.errors.is_empty() {
                     String::new()
                 } else {
                     format!(" · {} could not be queried", s.errors.len())
-                }
+                },
+                if self.loading { " · refreshing…" } else { "" }
             ),
-            _ => "Live tree of bars, items, popups and brackets".to_string(),
+            None => "Live tree of bars, items, popups and brackets".to_string(),
         };
         let controls = h_flex()
             .gap_3()
