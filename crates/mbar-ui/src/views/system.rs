@@ -3,7 +3,6 @@
 
 use std::time::Duration;
 
-use gpui_kit::component::StyledExt as _;
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -14,10 +13,10 @@ use gpui_kit::component::{
 use gpui_kit::*;
 use mbar_ui_model::ipc::DaemonStatus;
 use mbar_ui_model::system::{
-    self as sys, Permission, Permissions, ACCESSIBILITY_SETTINGS_URL, SCREEN_RECORDING_SETTINGS_URL,
+    self as sys, Permissions, ACCESSIBILITY_SETTINGS_URL, SCREEN_RECORDING_SETTINGS_URL,
 };
 
-use super::{interval, page_header, section, status_color, status_text, Shared};
+use super::{interval, page_header, permission_row, section, status_color, status_text, Shared};
 
 /// Title and (truncated) description on the left, a control on the right.
 fn setting_row(
@@ -47,6 +46,11 @@ fn setting_row(
         .child(div().flex_shrink_0().child(control))
 }
 
+/// Asks the window to show the Setup page ("Run setup again").
+pub struct ShowSetup;
+
+impl EventEmitter<ShowSetup> for SystemView {}
+
 pub struct SystemView {
     shared: Shared,
     status: DaemonStatus,
@@ -56,7 +60,27 @@ pub struct SystemView {
     permissions: Option<Permissions>,
     menubar_hidden: Option<bool>,
     launch_agent: bool,
+    /// Running from mbar.app on macOS: login item, updates and setup instead of the
+    /// source-build hints.
+    #[cfg(target_os = "macos")]
+    app: Option<AppState>,
     _poll: Task<()>,
+}
+
+#[cfg(target_os = "macos")]
+struct AppState {
+    bundle: mbar_app::bundle::AppBundle,
+    login: crate::mac::login_item::LoginItem,
+    paths_d: mbar_ui_model::onboarding::PathsD,
+    fixing_paths: bool,
+}
+
+#[cfg(target_os = "macos")]
+fn read_paths_d(bin: &std::path::Path) -> mbar_ui_model::onboarding::PathsD {
+    mbar_ui_model::onboarding::paths_d_state(
+        std::fs::read_to_string("/etc/paths.d/mbar").ok().as_deref(),
+        bin,
+    )
 }
 
 impl SystemView {
@@ -73,6 +97,13 @@ impl SystemView {
             permissions: None,
             menubar_hidden: None,
             launch_agent: sys::launch_agent_path().is_some_and(|p| p.exists()),
+            #[cfg(target_os = "macos")]
+            app: sys::current_bundle().map(|bundle| AppState {
+                login: crate::mac::login_item::status(),
+                paths_d: read_paths_d(&bundle.bin_dir()),
+                bundle,
+                fixing_paths: false,
+            }),
             _poll: poll,
         };
         view.check_status(cx);
@@ -192,75 +223,147 @@ impl SystemView {
         );
     }
 
-    // TODO(Task 12/16, macOS): replaced by the SMAppService login item (`set_login_item`).
-    // Until then the switch only reports the legacy agent; setup manages launch at login.
-    fn set_launch_agent(&mut self, _on: bool, window: &mut Window, cx: &mut Context<Self>) {
-        window.push_notification(
-            Notification::info("Login item is managed by onboarding").title("Launch at login"),
-            cx,
-        );
+    #[cfg(target_os = "macos")]
+    fn set_login_item(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::mac::login_item;
+        let result = if on {
+            login_item::register()
+        } else {
+            login_item::unregister()
+        };
+        let status = login_item::status();
+        if let Some(app) = &mut self.app {
+            app.login = status;
+        }
+        if let Err(e) = result {
+            window.push_notification(Notification::error(e).title("Launch at login"), cx);
+        } else if status == login_item::LoginItem::RequiresApproval {
+            login_item::open_settings();
+        }
         cx.notify();
     }
 
-    fn open_settings(url: &'static str, window: &mut Window, cx: &mut App) {
-        if let Err(e) = sys::open_url(url) {
-            window.push_notification(
-                Notification::error(e.to_string()).title("Could not open System Settings"),
-                cx,
-            );
-        }
+    #[cfg(target_os = "macos")]
+    fn fix_paths_d(&mut self, cx: &mut Context<Self>) {
+        let Some(app) = &mut self.app else { return };
+        app.fixing_paths = true;
+        let bin = app.bundle.bin_dir();
+        cx.notify();
+        self.shared.spawn_blocking(
+            cx,
+            move |_| super::onboarding::install_command_line(&bin, &[]),
+            |this, result, cx| {
+                if let Some(app) = &mut this.app {
+                    app.fixing_paths = false;
+                    app.paths_d = read_paths_d(&app.bundle.bin_dir());
+                }
+                cx.notify();
+                Some(match result {
+                    Ok(msg) => Notification::success(msg),
+                    Err(e) => Notification::error(e).title("Command line"),
+                })
+            },
+        );
     }
 
-    fn permission_row(
-        &self,
-        id: &'static str,
-        title: &'static str,
-        purpose: &'static str,
-        state: Option<&Permission>,
-        url: &'static str,
-        cx: &App,
-    ) -> impl IntoElement {
-        let theme = cx.theme();
-        let (text, color) = match state {
-            Some(Permission::Granted) => ("Granted".to_string(), theme.green),
-            Some(Permission::Missing) => ("Not granted".to_string(), theme.red),
-            Some(Permission::Unknown(why)) => (format!("Unknown ({why})"), theme.muted_foreground),
-            None => (
-                "Unknown (mbar not running)".to_string(),
-                theme.muted_foreground,
-            ),
+    /// Login item, `/etc/paths.d`, updates and "Run setup again" (mbar.app only).
+    #[cfg(target_os = "macos")]
+    fn app_sections(&self, cx: &mut Context<Self>) -> Option<Vec<Div>> {
+        use crate::mac::login_item::LoginItem;
+        use mbar_ui_model::onboarding::PathsD;
+        let app = self.app.as_ref()?;
+        let login = section("Launch at login", cx).child(setting_row(
+            "Start mbar at login",
+            match app.login {
+                LoginItem::Enabled => "Registered as a login item (dev.rubeen.mbar)",
+                LoginItem::RequiresApproval => {
+                    "Waiting for approval in System Settings → General → Login Items"
+                }
+                _ => "Not registered",
+            },
+            Switch::new("launch-at-login")
+                .checked(app.login == LoginItem::Enabled)
+                .on_change(
+                    cx.listener(|this, on: &bool, window, cx| this.set_login_item(*on, window, cx)),
+                ),
+            cx,
+        ));
+        let (paths_text, needs_fix) = match &app.paths_d {
+            PathsD::Current => ("/etc/paths.d/mbar points to this app".to_string(), false),
+            PathsD::Missing => ("/etc/paths.d/mbar is missing".to_string(), true),
+            PathsD::Stale(old) => (format!("/etc/paths.d/mbar is stale ({old})"), true),
         };
-        h_flex()
-            .w_full()
-            .gap_3()
-            .py_1()
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .child(div().text_sm().font_semibold().child(title))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(purpose),
-                    ),
-            )
+        let command_line = section("Command line", cx).child(setting_row(
+            "`mbar` and `sketchybar` in new terminals",
+            paths_text,
+            Button::new("fix-paths-d")
+                .small()
+                .outline()
+                .label("Fix")
+                .loading(app.fixing_paths)
+                .disabled(!needs_fix || app.fixing_paths)
+                .on_click(cx.listener(|this, _, _, cx| this.fix_paths_d(cx))),
+            cx,
+        ));
+        let updater = cx
+            .try_global::<crate::mac::UpdaterGlobal>()
+            .map(|g| g.0.clone())
+            .filter(|u| u.is_some());
+        let auto = updater
+            .as_ref()
+            .and_then(|u| u.as_ref().as_ref().map(|u| u.auto_checks()))
+            .unwrap_or(false);
+        let available = updater.is_some();
+        let toggle = updater.clone();
+        let check = updater.clone();
+        let updates = section("Updates", cx)
+            .child(setting_row(
+                "Automatically check for updates",
+                format!(
+                    "mbar {} · {}",
+                    app.bundle.short_version,
+                    if available {
+                        "once a day"
+                    } else {
+                        "updater unavailable (see log)"
+                    }
+                ),
+                Switch::new("auto-updates")
+                    .checked(auto)
+                    .disabled(!available)
+                    .on_change(cx.listener(move |_, on: &bool, _, cx| {
+                        if let Some(u) = toggle.as_ref().and_then(|u| u.as_ref().as_ref()) {
+                            u.set_auto_checks(*on);
+                        }
+                        cx.notify();
+                    })),
+                cx,
+            ))
             .child(
                 h_flex()
-                    .gap_1()
-                    .text_sm()
-                    .child(div().size_2().rounded_full().bg(color))
-                    .child(text),
-            )
-            .child(
-                Button::new(id)
-                    .small()
-                    .outline()
-                    .icon(IconName::ExternalLink)
-                    .label("Open Settings")
-                    .on_click(move |_, window, cx| Self::open_settings(url, window, cx)),
-            )
+                    .gap_2()
+                    .child(
+                        Button::new("check-updates")
+                            .small()
+                            .outline()
+                            .icon(IconName::RefreshCw)
+                            .label("Check for Updates…")
+                            .disabled(!available)
+                            .on_click(move |_, _, _| {
+                                if let Some(u) = check.as_ref().and_then(|u| u.as_ref().as_ref()) {
+                                    u.check_now();
+                                }
+                            }),
+                    )
+                    .child(
+                        Button::new("run-setup")
+                            .small()
+                            .ghost()
+                            .label("Run setup again")
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(ShowSetup))),
+                    ),
+            );
+        Some(vec![login, command_line, updates])
     }
 }
 
@@ -335,7 +438,7 @@ impl Render for SystemView {
 
         let perms = self.permissions.as_ref();
         let permissions = section("Permissions", cx)
-            .child(self.permission_row(
+            .child(permission_row(
                 "open-accessibility",
                 "Accessibility",
                 "Needed by `app_menu` items to read and open the front app's menus.",
@@ -343,7 +446,7 @@ impl Render for SystemView {
                 ACCESSIBILITY_SETTINGS_URL,
                 cx,
             ))
-            .child(self.permission_row(
+            .child(permission_row(
                 "open-screen-recording",
                 "Screen Recording",
                 "Needed by alias items to capture menu bar extras.",
@@ -363,23 +466,30 @@ impl Render for SystemView {
                 ),
             );
 
-        let login_path = sys::launch_agent_path()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "~/Library/LaunchAgents/dev.rubeen.mbar.plist".into());
-        let login = section("Launch at login", cx).child(setting_row(
-            "Start mbar when you log in",
-            format!(
-                "Managed by setup; from a source build use `make install-agent` \
-                 (launch agent: {login_path})"
-            ),
-            Switch::new("launch-at-login")
-                .checked(self.launch_agent)
-                .disabled(true)
-                .on_change(cx.listener(|this, on: &bool, window, cx| {
-                    this.set_launch_agent(*on, window, cx)
-                })),
-            cx,
-        ));
+        #[cfg(target_os = "macos")]
+        let app_sections = self.app_sections(cx);
+        #[cfg(not(target_os = "macos"))]
+        let app_sections: Option<Vec<Div>> = None;
+        let tail = match app_sections {
+            Some(sections) => sections,
+            None => {
+                let login_path = sys::launch_agent_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "~/Library/LaunchAgents/dev.rubeen.mbar.plist".into());
+                let legacy_login = section("Launch at login", cx).child(setting_row(
+                    "Start mbar when you log in",
+                    format!(
+                        "Managed by setup; from a source build use `make install-agent` \
+                         (launch agent: {login_path})"
+                    ),
+                    Switch::new("launch-at-login")
+                        .checked(self.launch_agent)
+                        .disabled(true),
+                    cx,
+                ));
+                vec![legacy_login]
+            }
+        };
 
         v_flex()
             .size_full()
@@ -399,7 +509,7 @@ impl Render for SystemView {
                     .child(daemon)
                     .child(menubar)
                     .child(permissions)
-                    .child(login),
+                    .children(tail),
             )
     }
 }

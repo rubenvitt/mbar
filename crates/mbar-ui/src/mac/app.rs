@@ -8,12 +8,6 @@ use objc2::MainThreadMarker;
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 use objc2_foundation::{NSDistributedNotificationCenter, NSNotification, NSString};
 
-pub fn bundle() -> Option<mbar_app::bundle::AppBundle> {
-    let exe = std::env::current_exe().ok()?;
-    let root = mbar_app::bundle::bundle_root_from_exe(&exe)?;
-    mbar_app::bundle::read_bundle(&root)
-}
-
 /// No Dock icon / menu bar while only the Sparkle dialog is shown.
 pub fn set_accessory(accessory: bool) {
     let Some(mtm) = MainThreadMarker::new() else {

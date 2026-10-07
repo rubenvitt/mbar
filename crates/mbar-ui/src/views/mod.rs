@@ -3,6 +3,8 @@
 mod bar;
 mod events;
 mod inspector;
+#[cfg(target_os = "macos")]
+pub mod onboarding;
 mod perf;
 mod props;
 mod system;
@@ -11,6 +13,7 @@ use std::time::Duration;
 
 use gpui_kit::component::StyledExt as _;
 use gpui_kit::component::{
+    button::Button,
     h_flex,
     notification::Notification,
     sidebar::{Sidebar, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuItem},
@@ -18,12 +21,13 @@ use gpui_kit::component::{
 };
 use gpui_kit::*;
 use mbar_ui_model::ipc::{Client, DaemonStatus};
+use mbar_ui_model::system::{self as sys, Permission};
 
 pub use bar::BarView;
 pub use events::EventsView;
 pub use inspector::InspectorView;
 pub use perf::PerfView;
-pub use system::SystemView;
+pub use system::{ShowSetup, SystemView};
 
 /// What every page needs: the IPC client and the window (for notifications pushed
 /// from background completions).
@@ -153,8 +157,71 @@ pub fn status_text(status: &DaemonStatus) -> String {
     }
 }
 
+fn open_settings(url: &'static str, window: &mut Window, cx: &mut App) {
+    if let Err(e) = sys::open_url(url) {
+        window.push_notification(
+            Notification::error(e.to_string()).title("Could not open System Settings"),
+            cx,
+        );
+    }
+}
+
+/// One permission: title and purpose, its state and a button to the settings pane.
+pub fn permission_row(
+    id: &'static str,
+    title: &'static str,
+    purpose: &'static str,
+    state: Option<&Permission>,
+    url: &'static str,
+    cx: &App,
+) -> impl IntoElement {
+    let theme = cx.theme();
+    let (text, color) = match state {
+        Some(Permission::Granted) => ("Granted".to_string(), theme.green),
+        Some(Permission::Missing) => ("Not granted".to_string(), theme.red),
+        Some(Permission::Unknown(why)) => (format!("Unknown ({why})"), theme.muted_foreground),
+        None => (
+            "Unknown (mbar not running)".to_string(),
+            theme.muted_foreground,
+        ),
+    };
+    h_flex()
+        .w_full()
+        .gap_3()
+        .py_1()
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(div().text_sm().font_semibold().child(title))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(purpose),
+                ),
+        )
+        .child(
+            h_flex()
+                .gap_1()
+                .text_sm()
+                .child(div().size_2().rounded_full().bg(color))
+                .child(text),
+        )
+        .child(
+            Button::new(id)
+                .small()
+                .outline()
+                .icon(IconName::ExternalLink)
+                .label("Open Settings")
+                .on_click(move |_, window, cx| open_settings(url, window, cx)),
+        )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page {
+    /// First-launch setup; only inside mbar.app on macOS.
+    Setup,
     Inspector,
     Bar,
     Events,
@@ -163,7 +230,8 @@ enum Page {
 }
 
 impl Page {
-    const ALL: [Page; 5] = [
+    const ALL: [Page; 6] = [
+        Page::Setup,
         Page::Inspector,
         Page::Bar,
         Page::Events,
@@ -173,6 +241,7 @@ impl Page {
 
     fn label(self) -> &'static str {
         match self {
+            Page::Setup => "Setup",
             Page::Inspector => "Inspector",
             Page::Bar => "Bar",
             Page::Events => "Events",
@@ -183,6 +252,7 @@ impl Page {
 
     fn icon(self) -> IconName {
         match self {
+            Page::Setup => IconName::CircleCheck,
             Page::Inspector => IconName::Inspector,
             Page::Bar => IconName::PanelBottom,
             Page::Events => IconName::Bell,
@@ -200,6 +270,8 @@ pub struct AppView {
     events: Entity<EventsView>,
     perf: Entity<PerfView>,
     system: Entity<SystemView>,
+    #[cfg(target_os = "macos")]
+    setup: Option<Entity<onboarding::SetupView>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -214,6 +286,19 @@ impl AppView {
         let events = cx.new(|cx| EventsView::new(shared.clone(), window, cx));
         let perf = cx.new(|cx| PerfView::new(shared.clone(), window, cx));
         let system = cx.new(|cx| SystemView::new(shared.clone(), window, cx));
+        // Setup exists only when running from mbar.app; it opens first until finished.
+        #[cfg(target_os = "macos")]
+        let setup = sys::current_bundle()
+            .is_some()
+            .then(|| cx.new(|cx| onboarding::SetupView::new(shared.clone(), window, cx)));
+        #[cfg(target_os = "macos")]
+        let first = if setup.is_some() && !onboarding::completed() {
+            Page::Setup
+        } else {
+            Page::Inspector
+        };
+        #[cfg(not(target_os = "macos"))]
+        let first = Page::Inspector;
 
         let mut subs = vec![
             cx.observe_window_appearance(window, |_, window, cx| {
@@ -221,6 +306,12 @@ impl AppView {
             }),
             // Status shown in the sidebar footer.
             cx.observe(&system, |_, _, cx| cx.notify()),
+            cx.subscribe(&system, |this, _, _: &ShowSetup, cx| {
+                if this.has_page(Page::Setup) {
+                    this.page = Page::Setup;
+                    cx.notify();
+                }
+            }),
         ];
         // Reconnect: refresh what depends on the daemon once it is reachable again.
         let mut last = DaemonStatus::Unknown;
@@ -238,20 +329,33 @@ impl AppView {
 
         AppView {
             shared,
-            page: Page::Inspector,
+            page: first,
             inspector,
             bar,
             events,
             perf,
             system,
+            #[cfg(target_os = "macos")]
+            setup,
             _subscriptions: subs,
+        }
+    }
+
+    fn has_page(&self, page: Page) -> bool {
+        match page {
+            #[cfg(target_os = "macos")]
+            Page::Setup => self.setup.is_some(),
+            #[cfg(not(target_os = "macos"))]
+            Page::Setup => false,
+            _ => true,
         }
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let status = self.system.read(cx).status().clone();
         let color = status_color(&status, cx);
-        let menu = SidebarMenu::new().children(Page::ALL.map(|page| {
+        let pages = Page::ALL.into_iter().filter(|p| self.has_page(*p));
+        let menu = SidebarMenu::new().children(pages.map(|page| {
             SidebarMenuItem::new(page.label())
                 .icon(page.icon())
                 .active(self.page == page)
@@ -307,6 +411,13 @@ impl AppView {
 impl Render for AppView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content: AnyView = match self.page {
+            #[cfg(target_os = "macos")]
+            Page::Setup => match &self.setup {
+                Some(setup) => setup.clone().into(),
+                None => self.inspector.clone().into(),
+            },
+            #[cfg(not(target_os = "macos"))]
+            Page::Setup => self.inspector.clone().into(),
             Page::Inspector => self.inspector.clone().into(),
             Page::Bar => self.bar.clone().into(),
             Page::Events => self.events.clone().into(),

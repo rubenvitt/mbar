@@ -260,8 +260,7 @@ impl SetupStep {
 /// item shares. When the login item was already registered before the cleanup ran
 /// (setup run again, or the cleanup retried after `LoginItem`), the executor must
 /// register it again afterwards; `SetupStep::ALL` keeps the first run safe.
-// TODO(Task 12/16, macOS): when this is true and `login_item::status()` was `Enabled`
-// before the cleanup, call `login_item::register()` again once `run_commands` returns.
+// The setup view re-registers the login item after such a cleanup when it was enabled.
 pub fn cleanup_stops_login_item(items: &[OldInstall]) -> bool {
     items.iter().any(|i| i.kind == OldKind::LaunchAgent)
 }
