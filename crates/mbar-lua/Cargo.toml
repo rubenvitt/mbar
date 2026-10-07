@@ -1,0 +1,12 @@
+[package]
+name = "mbar-lua"
+description = "mbar embedded Lua 5.4 configuration and in-process event handlers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+serde_json = { workspace = true }
+log = { workspace = true }

@@ -1,0 +1,31 @@
+[package]
+name = "mbar-ui"
+description = "mbar management app (GPUI + gpui-kit)"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+repository = "https://github.com/rubenvitt/mbar"
+publish = false
+
+# Standalone workspace: GPUI is heavy, so mbar-ui is kept out of the root workspace.
+[workspace]
+
+[features]
+default = ["gui"]
+# The GUI binary. Without it only the `mbar_ui_model` library (pure data, IPC helpers)
+# builds, which is what the unit tests cover.
+gui = ["dep:gpui-kit"]
+
+[lib]
+name = "mbar_ui_model"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mbar-ui"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[dependencies]
+mbar-ipc = { path = "../mbar-ipc" }
+serde_json = "1"
+gpui-kit = { version = "0.7.1", optional = true }
