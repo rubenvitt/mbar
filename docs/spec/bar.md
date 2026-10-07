@@ -382,7 +382,12 @@ sync with the new shape. That is why `bar_draw` skips `window_flush` when `resiz
    * Else: `window_order(w, previous ? previous : bar.window, W_ABOVE)`; `previous = w`.
 
 Result: bar window at the bottom, items stacked in list order (later items above earlier), each bracket just
-below the first item window. Ordering runs from `bar_manager_refresh` only for bars that are redrawn while
+below the first item window.
+
+Windows created by `window_open` are never explicitly ordered in there; they become visible only when
+`bar_order_item_windows` (or `popup_order_windows` for popups) orders them `W_ABOVE`. That is why window
+creation, `bar_manager_begin`, item add/move/reorder and a bar becoming `shown` all set `needs_ordering`.
+Ordering is skipped for bars that are not `shown`, so their (re)created windows stay invisible until shown. Ordering runs from `bar_manager_refresh` only for bars that are redrawn while
 `needs_ordering` is set.
 
 ## 4. Geometry and layout
@@ -696,7 +701,7 @@ single transaction (§3.6); (c) animations run at display-link rate.
 | `display_arrangement_display_id(n)` | `CGDisplayGetDisplayIDFromUUID(CFUUIDCreateFromString(SLSCopyManagedDisplays(cid)[n-1]))`; 0 if out of range. |
 | `display_active_display_id()` | 1 display: that one. Else UUID from `display_active_display_uuid()` → did. |
 | `display_active_display_adid()` | 1 display: 1. Else index (1-based) of `display_active_display_uuid()` in `SLSCopyManagedDisplays`; 0 on failure. |
-| `display_active_display_uuid()` | If `g_space_management_mode != 1` ("Displays have separate Spaces" off): display whose `CGDisplayBounds` contains the cursor (`CGEventGetLocation(CGEventCreate(NULL))`), first match in active list; no match → `display_uuid(0)` (NULL). If mode == 1: `SLSCopyActiveMenuBarDisplayIdentifier(cid)`. |
+| `display_active_display_uuid()` | If `g_space_management_mode != 1` (1 = "Displays have separate Spaces" enabled, per the yabai convention; so: setting off): display whose `CGDisplayBounds` contains the cursor (`CGEventGetLocation(CGEventCreate(NULL))`), first match in active list; no match → `display_uuid(0)` (NULL). If mode == 1: `SLSCopyActiveMenuBarDisplayIdentifier(cid)`. |
 | `display_menu_bar_visible()` | `SLSGetMenuBarAutohideEnabled(cid, &s)`; visible = `!s`. |
 | `display_menu_bar_rect(did)` | see §6.2. |
 | `display_begin()` | `CGDisplayRegisterReconfigurationCallback(display_handler, NULL)`. |
@@ -722,8 +727,8 @@ drawn.
 `active_adid` is refreshed in `bar_manager_begin`, `bar_manager_display_changed` and
 `bar_manager_handle_display_change`. When `g_space_management_mode != 1`, `event.c:event_execute` calls
 `bar_manager_poll_active_display` before **every** event: if `display_active_display_adid() != active_adid` →
-`bar_manager_handle_display_change`. (The 1 s clock event guarantees polling at least once per second; mouse
-events poll as the cursor moves between displays.) `NSWorkspaceActiveDisplayDidChangeNotification` also posts
+`bar_manager_handle_display_change`. (The 1 s clock event guarantees polling at least once per second; any other event — e.g. a mouse event on a
+bar window, a client message — polls too. There is no global mouse-move monitoring.) `NSWorkspaceActiveDisplayDidChangeNotification` also posts
 `DISPLAY_CHANGED` → `bar_manager_handle_display_change`.
 
 `bar_manager_handle_display_change`: `active_adid = display_active_display_adid()`; trigger custom event
@@ -735,7 +740,7 @@ on the active display's bar), `hidden=current`.
 
 Triggered by `SPACE_CHANGED` (from `NSWorkspaceActiveSpaceDidChangeNotification` and SkyLight notifications
 1327/1328 on macOS ≥ 13, `sketchybar.c:space_events`), by `--update`/`bar_manager_update(true)`, by `--trigger space_change` and by
-`bar_manager_display_changed` (all with `forced = true`). Steps:
+`bar_manager_display_changed` (the notification path uses `forced = false`, the other three `forced = true`). Steps:
 ```
 freeze manager
 force_refresh = false

@@ -312,7 +312,15 @@ Consequences (must be reproduced):
 * Width is the **ink** width: leading/trailing spaces do not add width unless
   `font.typographical_width=on`; the ink's left bearing (`bounds.x` from step 6) is *not*
   compensated when drawing (text is drawn at the pen origin).
-* Empty string: ink box is empty → `width = 1`, `bounds.h = 1` (typographical: `width = 0`).
+* Empty string: ink box is empty → `width = 1`, `bounds.h = 1` (typographical: `width = 0`)
+  (Q7). Every regular item reaches this state because item creation inherits from the default
+  item via `text_copy`, which force-lays-out the (empty) string; an empty `icon`/`label` with
+  `drawing=on` therefore occupies 1 pt + paddings.
+* `text_init` itself does **not** lay out: it calls `text_set_string` with the identical
+  pointer, which is a no-op, so a never-inherited text (the `--default` item's) keeps
+  `width = 0`, `bounds = 0`, no CTLine until its string changes.
+* The default text background height is the **ink** height + 1.5, so it varies with the glyphs
+  of the string (e.g. `ace` vs `Ag`) unless `background.height` is set.
 * `ascent`/`descent` are typographic (font-wide), independent of the string's glyphs.
 
 ### 4.4 Length and height
@@ -485,7 +493,7 @@ Used by: item (`background.*`, the item's own `padding_left/right` live here), `
 | `border_width` | u32 | 0 | `border_width` |
 | `bounds.size.height` + `overrides_height` | f64 / bool | 0 / false | `height` |
 | `corner_radius` | u32 | 0 | `corner_radius` |
-| `padding_left` / `padding_right` | i32 | 0 / 0 | `padding_left` / `padding_right` |
+| `padding_left` / `padding_right` | i32 | 0 / 0 | `padding_left` / `padding_right` (only read by item/bar/popup layout; stored and serialized but **without effect** on text, knob and slider backgrounds) |
 | `x_offset` / `y_offset` | i32 | 0 / 0 | `x_offset` / `y_offset` |
 | `clip` | f32 | 0.0 | `clip` |
 | `shadow` | shadow | §2.1 | `shadow.*` |
@@ -837,7 +845,7 @@ text_calculate_bounds(knob, x + knob_offset, y)
 | `highlight_color` | u32 | BYTES | `foreground_color = c`; `background_set_color(fill, c)` (enables fill) |
 | `width` | u32 | INT | **ignored while dragging**; track width |
 | `knob` | string | – | knob text string (same as `slider.knob.string`) |
-| `background.<p>` | | | applied to the **fill first**, then fill colour reset to `foreground_color`, then applied to the **track**; return value is the track's. So `height`, `corner_radius`, `border_*`, offsets, `drawing`, `shadow`, `image` are shared; `color` only affects the track |
+| `background.<p>` | | | applied to the **fill first**, then fill colour reset to `foreground_color`, then applied to the **track**; return value is the track's. So `height`, `corner_radius`, `border_*`, offsets, `drawing`, `shadow`, `image` are shared; `color` only affects the track (quirk: inside `--animate`, the fill's queued colour animation is not undone by the immediate reset, so the fill animates to the track colour) |
 | `knob.<p>` | | | any text property (§4.2), e.g. `knob.font`, `knob.color`, `knob.drawing` |
 | other `x.y` | | | `[!] Slider: Invalid subdomain '<x>' \n` |
 | other | | | `[!] Slider: Invalid property '<p>'\n` |

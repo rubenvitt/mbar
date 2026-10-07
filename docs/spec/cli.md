@@ -1795,3 +1795,100 @@ On every `space_change`:
   it. Either way it must accept the key.
 
 ---
+## 13. Message catalog (exact strings)
+
+### 13.1 Response messages
+These go into the response and are also logged with a timestamp. `%s` is the
+argument shown in the Meaning column. For the nested property errors (Text,
+Background, Shadow, Image, Popup, Graph, Slider, Alias, Color), `%s` is the
+**remaining key at that nesting level**: `icon.foo=1` produces
+`[!] Text: Invalid property 'foo'`, and `icon.foo.bar=1` produces
+`[!] Text: Invalid subdomain 'foo' `.
+
+The client prefix rule: `[!]` gives exit 1 (if it comes first). `[?]` and
+unprefixed text give exit 0.
+
+| String | Meaning |
+|---|---|
+| `[!] Unknown domain '%s'\n` | Unknown command token |
+| `[!] Set: Item not found '%s'\n` | `--set` target missing |
+| `[!] Set (%s): Expected <key>=<value> pair, but got: '%s'\n` | item name, token |
+| `[!] Set (default): Expected <key>=<value> pair, but got: '%s'\n` | `--default` |
+| `[!] Bar: Expected <key>=<value> pair, but got: '%s'\n` | `--bar` |
+| `[!] Bar: Invalid property 'clip'\n` | `--bar clip=…` |
+| `[!] Regex: Could not compile regex '%s'\n` | the full `/…/` token |
+| `[!] Regex: Regex match failed '%s'\n` | `regerror` text |
+| `[?] Regex: No match found for regex '%s'\n` | the full `/…/` token |
+| `[?] Add: Item '%s' already exists\n` | |
+| `[?] Add %s: Invalid type '%s', assuming 'item'\n` | name, type |
+| `[!] Add %s: Illegal position '%s'\n` | name, position |
+| `[!] Add: Illegal name '%s'\n` | |
+| `[?] Add (Group) %s: Failed to add member '%s', item not found\n` | bracket, member |
+| `[!] Add (Popup) %s: Item '%s' is not a valid popup host\n` | item, host |
+| `[!] Item Position (%s): Item '%s' is not a valid popup host\n` | item, host |
+| `[!] Item (%s): Invalid property '%s' \n` | item, key |
+| `[!] Item (%s): Invalid subdomain '%s'\n` | item, segment |
+| `[!] Item (%s): Trying to set a graph property on a non-graph item\n` | |
+| `[!] Item (%s): Trying to set an alias property on a non-alias item\n` | |
+| `[!] Item (%s): Trying to set a slider property on a non-slider item\n` | |
+| `[!] Text: Invalid property '%s'\n` | Text and font leaves |
+| `[!] Text: Invalid subdomain '%s' \n` | |
+| `[!] Background: Invalid property '%s'\n` | |
+| `[!] Background: Invalid subdomain '%s'\n` | |
+| `[!] Shadow: Invalid property '%s'\n` | |
+| `[!] Shadow: Invalid subdomain '%s'\n` | |
+| `[?] Image: Unknown property: %s \n` | No quotes. |
+| `[?] Image: Invalid subdomain: %s \n` | No quotes. |
+| `[!] Image: Invalid application name: '%s'\n` | |
+| `[!] Image: Invalid Space ID: '%s'\n` | |
+| `[!] Image: Invalid Image Format: '%s'\n` | |
+| `[!] Image: File '%s' not found\n` | Resolved path. |
+| `Could not open image file at: %s\n` | No prefix. Exit 0. |
+| `[!] Popup: Invalid property '%s'\n` | |
+| `[!] Popup: Invalid subdomain '%s'\n` | |
+| `[!] Graph: Invalid property '%s'\n` | |
+| `[!] Graph: Invalid subdomain '%s'\n` | |
+| `[!] Slider: Invalid property '%s'\n` | |
+| `[!] Slider: Invalid subdomain '%s' \n` | |
+| `[!] Alias: Invalid property '%s' \n` | |
+| `[!] Alias: Invalid subdomain '%s'\n` | |
+| `[?] Color: Invalid property '%s'\n` | |
+| `[!] Subscribe: Item not found '%s'\n` | |
+| `[?] Event: '%s' not found\n` | `--subscribe` with an unknown event |
+| `[!] Push: Item '%s' not found\n` | |
+| `[!] Push: Item '%s' not a graph\n` | |
+| `[!] Rename: Failed to rename item: %s -> %s\n` | |
+| `[!] Clone: Parent Item '%s' not found\n` | |
+| `[?] Clone: Item '%s' already exists\n` | |
+| `[!] Remove: Item '%s' not found\n` | |
+| `[!] Move: Item '%s' or '%s' not found\n` | |
+| `[!] Order: Item '%s' not found\n` | `--reorder` |
+| `[!] Query: Item '%s' not found\n` | `--query item x` |
+| `[!] Query: Invalid query, or item '%s' not found \n` | `--query x` |
+| `[!] Query (default_menu_items): Screen Recording Permissions not given. Restart SketchyBar after granting permissions.\n` | |
+| `[?] Reload: Invalid config path '%s'\n` | |
+
+### 13.2 Daemon-log-only messages (stdout)
+- `No bar on display %u \n`
+- `could not locate config file..\n`
+- `file '%s' does not exist..\n`
+- `could not set the executable permission bit for '%s'\n`
+- `failed to execute file '%s'\n`
+- `ERROR (id): No active display detected!\n` (`display.c`)
+
+### 13.3 Process-level messages
+| Stream | String | Exit |
+|---|---|---|
+| stderr | `%s: running as root is not allowed! abort..\n` | 1 |
+| stderr | `sketchybar-msg: 'env USER' not set! abort..\n` (client mode; literal `sketchybar-msg`) | 1 |
+| stderr | `%s: 'env USER' not set! abort..\n` (daemon) | 1 |
+| stderr | `%s: could not create lock-file! abort..\n` | 1 |
+| stderr | `%s: could not acquire lock-file... already running?\n` | 1 |
+| stderr | `%s: could not initialize daemon! abort..\n` | 1 |
+| stdout | `[!] Error: Too few arguments for argument 'config'.\n` | 1 |
+| stdout | `[!] Error: Specified config file path invalid.\n` | 1 |
+| stdout | `sketchybar-v2.24.0\n` | 0 |
+
+Here `%s` is `g_name`.
+
+---
