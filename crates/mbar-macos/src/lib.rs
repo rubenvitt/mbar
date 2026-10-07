@@ -9,3 +9,6 @@ pub mod gfx;
 
 // System integration (owned by the system work package)
 pub mod sys;
+
+// Integration with mbar-core (Resources, scene mapping, windows, services, run loop)
+pub mod platform;
