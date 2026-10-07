@@ -933,6 +933,10 @@ animator_destroy_display_link()          // animations freeze where they are (no
 sleeps = true                            // routine ticks and --update become no-ops
 ```
 
+`sleeps` only gates `bar_manager_update` (routine ticks and `--update`). All other events (space/front-app/display,
+mouse, `--trigger`, custom notifications) are still delivered while sleeping. A hotload during sleep re-inits
+`sleeps = false`, so the following wake does not schedule the +500 ms re-post.
+
 ### 9.2 `system_woke` (`bar_manager_handle_system_woke`)
 
 ```

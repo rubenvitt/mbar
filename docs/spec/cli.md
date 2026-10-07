@@ -1044,7 +1044,8 @@ Alias window matching (`alias_find_window`):
 | other with `.` | | | `[!] Graph: Invalid subdomain '<seg>'\n` |
 | other | | | `[!] Graph: Invalid property '<key>'\n` |
 
-None of these are animated. They always report a change.
+None of these are animated. The color setters report a change only when the
+value differs. `line_width` always reports a change.
 
 #### 6.11.9 Slider (`slider.c:slider_parse_sub_domain`)
 | Key | Value | Default | Anim | Semantics |
@@ -1067,26 +1068,28 @@ None of these are animated. They always report a change.
 - The built-in events are registered at init in this fixed order. The indices
   must match (`custom_events.h`):
 
-| Bit index | Name | Source / INFO (§12.2) |
+| Bit index | Name | `bit` value in `--query events` |
 |---|---|---|
-| 0 | `front_app_switched` | |
-| 1 | `space_change` | |
-| 2 | `display_change` | |
-| 3 | `system_woke` | |
-| 4 | `mouse.entered` | |
-| 5 | `mouse.exited` | |
-| 6 | `mouse.clicked` | |
-| 7 | `mouse.scrolled` | |
-| 8 | `system_will_sleep` | |
-| 9 | `mouse.entered.global` | |
-| 10 | `mouse.exited.global` | |
-| 11 | `mouse.scrolled.global` | |
-| 12 | `volume_change` | |
-| 13 | `brightness_change` | |
-| 14 | `power_source_change` | |
-| 15 | `wifi_change` | |
-| 16 | `media_change` | |
-| 17 | `space_windows_change` | |
+| 0 | `front_app_switched` | 1 |
+| 1 | `space_change` | 2 |
+| 2 | `display_change` | 4 |
+| 3 | `system_woke` | 8 |
+| 4 | `mouse.entered` | 16 |
+| 5 | `mouse.exited` | 32 |
+| 6 | `mouse.clicked` | 64 |
+| 7 | `mouse.scrolled` | 128 |
+| 8 | `system_will_sleep` | 256 |
+| 9 | `mouse.entered.global` | 512 |
+| 10 | `mouse.exited.global` | 1024 |
+| 11 | `mouse.scrolled.global` | 2048 |
+| 12 | `volume_change` | 4096 |
+| 13 | `brightness_change` | 8192 |
+| 14 | `power_source_change` | 16384 |
+| 15 | `wifi_change` | 32768 |
+| 16 | `media_change` | 65536 |
+| 17 | `space_windows_change` | 131072 |
+
+INFO payloads per event are in §12.2.
 
 - Custom events are appended after these, starting at index 18.
 - **Limit:** 64 events in total, because of the 64-bit mask. Index ≥ 64 is UB
@@ -1137,9 +1140,9 @@ None of these are animated. They always report a change.
 |---|---|
 | `space_change` | `handle_space_change(forced=true)`: recompute spaces, update space items (forced `SELECTED` refresh), fire `space_change` with the computed INFO. |
 | `display_change` | Fire `display_change` with INFO = active display index. |
-| `space_windows_change` | Recompute and fire for the current space. |
-| `volume_change` | Re-read the volume and fire. |
-| `media_change` | Re-emit the current media info. |
+| `space_windows_change` | Only if the window listener is active (some item subscribed): recompute all spaces and fire for each. Otherwise nothing. |
+| `volume_change` | Reset the cached volume and re-read it, so it always fires. |
+| `media_change` | Clear the cached media info and re-query now-playing. Fires if info is available. |
 | `wifi_change` | Re-read the SSID and fire. |
 | `power_source_change` | Reset the cached source, re-read it and fire. |
 
