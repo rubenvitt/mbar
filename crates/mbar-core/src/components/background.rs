@@ -203,7 +203,9 @@ impl Background {
                     return cx.scoped("color", |cx| color_set_prop(&mut self.color, rest, v, cx))
                 }
                 KeySplit::Sub("border_color", rest) => {
-                    return cx.scoped("border_color", |cx| color_set_prop(&mut self.border_color, rest, v, cx))
+                    return cx.scoped("border_color", |cx| {
+                        color_set_prop(&mut self.border_color, rest, v, cx)
+                    })
                 }
                 KeySplit::Sub(sub, _) => {
                     return Err(PropError::BackgroundInvalidSubdomain(sub.to_string()))
@@ -234,7 +236,9 @@ impl Background {
                 KeySplit::Sub("shadow", rest) => self.shadow.anim_set(rest, v, fx),
                 KeySplit::Sub("image", rest) => self.image.anim_set(rest, v, fx),
                 KeySplit::Sub("color", rest) => color_anim_set(&mut self.color, rest, v, fx),
-                KeySplit::Sub("border_color", rest) => color_anim_set(&mut self.border_color, rest, v, fx),
+                KeySplit::Sub("border_color", rest) => {
+                    color_anim_set(&mut self.border_color, rest, v, fx)
+                }
                 _ => false,
             },
         }

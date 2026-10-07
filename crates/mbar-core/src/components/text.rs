@@ -239,9 +239,12 @@ impl Text {
                         let target = self.color.hex;
                         let hc = self.highlight_color.hex;
                         self.set_color(hc);
-                        cx.animate("color", AnimValue::Color(hc), AnimValue::Color(target), |a, _| {
-                            self.set_color(a.as_u32())
-                        });
+                        cx.animate(
+                            "color",
+                            AnimValue::Color(hc),
+                            AnimValue::Color(target),
+                            |a, _| self.set_color(a.as_u32()),
+                        );
                     } else if !self.highlight && on {
                         for f in cx.cancel("highlight_color") {
                             self.set_highlight_color(f.as_u32());
@@ -301,13 +304,22 @@ impl Text {
                     let to = AnimValue::Int(self.length(true) as i32);
                     let r = cx.animate("width", from, to, |a, _| self.set_width(a.as_i32()));
                     let cw = self.custom_width as i32;
-                    cx.queue_chained("width", AnimValue::Int(cw), AnimValue::Int(-1), 0, Curve::Linear);
+                    cx.queue_chained(
+                        "width",
+                        AnimValue::Int(cw),
+                        AnimValue::Int(-1),
+                        0,
+                        Curve::Linear,
+                    );
                     r
                 } else {
                     let from = AnimValue::Int(self.length(false) as i32);
-                    cx.animate("width", from, AnimValue::Int(value::parse_int(v)), |a, _| {
-                        self.set_width(a.as_i32())
-                    })
+                    cx.animate(
+                        "width",
+                        from,
+                        AnimValue::Int(value::parse_int(v)),
+                        |a, _| self.set_width(a.as_i32()),
+                    )
                 }
             }
             "drawing" => {
@@ -341,8 +353,14 @@ impl Text {
                         color_set_prop(&mut self.highlight_color, rest, v, cx)
                     })
                 }
-                KeySplit::Sub(sub, _) => return Err(PropError::TextInvalidSubdomain(sub.to_string())),
-                _ => return Err(PropError::TextInvalidProperty(value::display_key(key).to_string())),
+                KeySplit::Sub(sub, _) => {
+                    return Err(PropError::TextInvalidSubdomain(sub.to_string()))
+                }
+                _ => {
+                    return Err(PropError::TextInvalidProperty(
+                        value::display_key(key).to_string(),
+                    ))
+                }
             },
         })
     }
@@ -356,11 +374,20 @@ impl Text {
             let post = self.length(false);
             if post != pre {
                 self.set_width(pre as i32);
-                cx.animate("width", AnimValue::Int(pre as i32), AnimValue::Int(post as i32), |a, _| {
-                    self.set_width(a.as_i32())
-                });
+                cx.animate(
+                    "width",
+                    AnimValue::Int(pre as i32),
+                    AnimValue::Int(post as i32),
+                    |a, _| self.set_width(a.as_i32()),
+                );
                 let cw = self.custom_width as i32;
-                cx.queue_chained("width", AnimValue::Int(cw), AnimValue::Int(-1), 0, Curve::Linear);
+                cx.queue_chained(
+                    "width",
+                    AnimValue::Int(cw),
+                    AnimValue::Int(-1),
+                    0,
+                    Curve::Linear,
+                );
             }
         }
         changed
@@ -393,7 +420,9 @@ impl Text {
                     self.mark_font(c)
                 }
                 KeySplit::Sub("color", rest) => color_anim_set(&mut self.color, rest, v, fx),
-                KeySplit::Sub("highlight_color", rest) => color_anim_set(&mut self.highlight_color, rest, v, fx),
+                KeySplit::Sub("highlight_color", rest) => {
+                    color_anim_set(&mut self.highlight_color, rest, v, fx)
+                }
                 KeySplit::Sub("background", rest) => self.background.anim_set(rest, v, fx),
                 KeySplit::Sub("shadow", rest) => self.shadow.anim_set(rest, v, fx),
                 _ => false,
@@ -500,7 +529,9 @@ mod tests {
                 "[!] Text: Invalid subdomain 'foo' \n"
             );
             assert_eq!(
-                t.set_prop("font.bogus", "1", &mut cx).unwrap_err().to_string(),
+                t.set_prop("font.bogus", "1", &mut cx)
+                    .unwrap_err()
+                    .to_string(),
                 "[!] Text: Invalid property 'bogus'\n"
             );
             assert!(t.set_prop("width", "dynamic", &mut cx).unwrap());
@@ -516,7 +547,10 @@ mod tests {
         t.set_string("a", true, &mut res);
         {
             let mut cx = PropCx::new(&mut res, &mut an, "/h");
-            cx.anim = Some(AnimSpec { curve: Curve::Linear, duration: 20 });
+            cx.anim = Some(AnimSpec {
+                curve: Curve::Linear,
+                duration: 20,
+            });
             assert!(t.set_prop("string", "abcdef", &mut cx).unwrap());
         }
         assert!(t.has_const_width);
@@ -528,7 +562,10 @@ mod tests {
         let mut t = Text::default();
         {
             let mut cx = PropCx::new(&mut res, &mut an, "/h");
-            cx.anim = Some(AnimSpec { curve: Curve::Linear, duration: 20 });
+            cx.anim = Some(AnimSpec {
+                curve: Curve::Linear,
+                duration: 20,
+            });
             assert!(t.set_prop("highlight", "on", &mut cx).unwrap());
         }
         assert_eq!(t.highlight_color.hex, 0xffffffff);
@@ -542,7 +579,9 @@ mod tests {
         Text::default().write_json(&mut out, "\t\t");
         assert!(out.starts_with("\t\t\"value\": \"\",\n\t\t\"drawing\": \"on\",\n"));
         assert!(out.contains("\t\t\"font\": \"Hack Nerd Font:Bold:14.00\",\n\t\t\"width\": 0,\n"));
-        assert!(out.contains("\t\t\"align\": \"left\",\n\t\t\"background\": {\n\t\t\t\"drawing\": \"off\""));
+        assert!(out.contains(
+            "\t\t\"align\": \"left\",\n\t\t\"background\": {\n\t\t\t\"drawing\": \"off\""
+        ));
         assert!(out.ends_with("\t\t\t\"distance\": 5\n\t\t}"));
     }
 }

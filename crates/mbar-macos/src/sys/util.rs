@@ -149,6 +149,13 @@ pub(crate) const MEDIA_REMOTE: &str =
     "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote";
 pub(crate) const COLOR_SYNC: &str = "/System/Library/Frameworks/ColorSync.framework/ColorSync";
 
+/// `dlsym(RTLD_DEFAULT, name)`: searches every image already loaded into the process.
+pub(crate) fn default_symbol(name: &str) -> Option<NonNull<c_void>> {
+    let c = CString::new(name).ok()?;
+    // SAFETY: RTLD_DEFAULT is a valid pseudo-handle and `c` a valid C string.
+    NonNull::new(unsafe { libc::dlsym(libc::RTLD_DEFAULT, c.as_ptr()) })
+}
+
 /// Cached `dlopen` of a framework binary.
 pub(crate) fn library(path: &'static str) -> Option<&'static Library> {
     use std::collections::HashMap;
@@ -171,6 +178,7 @@ macro_rules! private_fns {
                 let addr = (*SYM.get_or_init(|| {
                     $crate::sys::util::library($lib)
                         .and_then(|l| l.symbol(stringify!($name)))
+                        .or_else(|| $crate::sys::util::default_symbol(stringify!($name)))
                         .map(|p| p.as_ptr() as usize)
                 }))?;
                 // SAFETY: the symbol was resolved from the framework that exports it and the

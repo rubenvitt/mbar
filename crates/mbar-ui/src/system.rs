@@ -156,14 +156,14 @@ pub fn launch_agent_installed() -> bool {
     launch_agent_path().map(|p| p.exists()).unwrap_or(false)
 }
 
-/// Writes the launch agent (takes effect at the next login).
-pub fn install_launch_agent(bar_name: &str) -> io::Result<PathBuf> {
+/// Writes the launch agent running `mbar` (takes effect at the next login).
+pub fn install_launch_agent() -> io::Result<PathBuf> {
     let path = launch_agent_path()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "$HOME is not set"))?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let daemon = find_daemon_binary(bar_name);
+    let daemon = find_executable("mbar");
     std::fs::write(
         &path,
         launch_agent_plist(&launch_agent_program(daemon.as_deref())),

@@ -199,7 +199,10 @@ pub struct EventInfo {
 
 impl EventInfo {
     pub fn new(name: impl Into<String>, env: Option<EnvVars>) -> Self {
-        EventInfo { name: name.into(), env }
+        EventInfo {
+            name: name.into(),
+            env,
+        }
     }
 }
 
@@ -313,15 +316,24 @@ mod tests {
         let mut ev = CustomEvents::new();
         assert_eq!(ev.flag("space_windows_change"), Some(131072));
         assert_eq!(ev.flag("mouse.clicked"), Some(64));
-        assert_eq!(ev.append("my_event", Some("com.x")), AppendResult::Added(1 << 18));
+        assert_eq!(
+            ev.append("my_event", Some("com.x")),
+            AppendResult::Added(1 << 18)
+        );
         assert_eq!(ev.append("my_event", None), AppendResult::Exists);
         assert_eq!(ev.append("space_change", None), AppendResult::Exists);
         assert_eq!(ev.name_for_notification("com.x"), Some("my_event"));
         for i in 0..45 {
-            assert!(matches!(ev.append(&format!("e{i}"), None), AppendResult::Added(_)));
+            assert!(matches!(
+                ev.append(&format!("e{i}"), None),
+                AppendResult::Added(_)
+            ));
         }
         assert_eq!(ev.append("overflow", None), AppendResult::Full);
-        assert_eq!(EventKind::from_name("mouse.exited.global"), Some(EventKind::MouseExitedGlobal));
+        assert_eq!(
+            EventKind::from_name("mouse.exited.global"),
+            Some(EventKind::MouseExitedGlobal)
+        );
         assert_eq!(EventKind::MediaChange.bit(), 65536);
     }
 }

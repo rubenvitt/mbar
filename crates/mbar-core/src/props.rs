@@ -175,20 +175,46 @@ pub enum PropRequest {
 /// `docs/spec/components.md`). Item names print `(null)` when unset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PropError {
-    ItemInvalidProperty { item: Option<String>, key: String },
-    ItemInvalidSubdomain { item: Option<String>, sub: String },
-    NotGraph { item: Option<String> },
-    NotAlias { item: Option<String> },
-    NotSlider { item: Option<String> },
+    ItemInvalidProperty {
+        item: Option<String>,
+        key: String,
+    },
+    ItemInvalidSubdomain {
+        item: Option<String>,
+        sub: String,
+    },
+    NotGraph {
+        item: Option<String>,
+    },
+    NotAlias {
+        item: Option<String>,
+    },
+    NotSlider {
+        item: Option<String>,
+    },
     /// Extension: `app_menu.*` on a non-`app_menu` item.
-    NotAppMenu { item: Option<String> },
-    ItemPositionInvalidHost { item: Option<String>, host: String },
+    NotAppMenu {
+        item: Option<String>,
+    },
+    ItemPositionInvalidHost {
+        item: Option<String>,
+        host: String,
+    },
     /// D9: `space=` entry ≥ 32 (mbar-specific message).
-    ItemInvalidSpace { item: Option<String>, entry: String },
+    ItemInvalidSpace {
+        item: Option<String>,
+        entry: String,
+    },
     /// D9: `display=` entry ≥ 32 (mbar-specific message).
-    ItemInvalidDisplay { item: Option<String>, entry: String },
+    ItemInvalidDisplay {
+        item: Option<String>,
+        entry: String,
+    },
     /// Extension: unknown `provider=<name>`.
-    ItemInvalidProvider { item: Option<String>, name: String },
+    ItemInvalidProvider {
+        item: Option<String>,
+        name: String,
+    },
     TextInvalidProperty(String),
     TextInvalidSubdomain(String),
     BackgroundInvalidProperty(String),
@@ -230,10 +256,20 @@ impl fmt::Display for PropError {
         use PropError::*;
         match self {
             ItemInvalidProperty { item, key } => {
-                write!(f, "[!] Item ({}): Invalid property '{}' \n", name(item), key)
+                write!(
+                    f,
+                    "[!] Item ({}): Invalid property '{}' \n",
+                    name(item),
+                    key
+                )
             }
             ItemInvalidSubdomain { item, sub } => {
-                write!(f, "[!] Item ({}): Invalid subdomain '{}'\n", name(item), sub)
+                write!(
+                    f,
+                    "[!] Item ({}): Invalid subdomain '{}'\n",
+                    name(item),
+                    sub
+                )
             }
             NotGraph { item } => write!(
                 f,
@@ -265,7 +301,12 @@ impl fmt::Display for PropError {
                 write!(f, "[!] Item ({}): Invalid space '{}'\n", name(item), entry)
             }
             ItemInvalidDisplay { item, entry } => {
-                write!(f, "[!] Item ({}): Invalid display '{}'\n", name(item), entry)
+                write!(
+                    f,
+                    "[!] Item ({}): Invalid display '{}'\n",
+                    name(item),
+                    entry
+                )
             }
             ItemInvalidProvider { item, name: n } => {
                 write!(f, "[!] Item ({}): Invalid provider '{}'\n", name(item), n)
@@ -551,9 +592,11 @@ mod tests {
         {
             let mut cx = PropCx::new(&mut res, &mut anim, "/home/u");
             cx.set_target(AnimTarget::Bar);
-            assert!(cx.animate("margin", AnimValue::Int(0), AnimValue::Int(5), |v, _| {
-                set_i32(&mut field, v.as_i32())
-            }));
+            assert!(
+                cx.animate("margin", AnimValue::Int(0), AnimValue::Int(5), |v, _| {
+                    set_i32(&mut field, v.as_i32())
+                })
+            );
         }
         assert_eq!(field, 5);
         {
@@ -563,9 +606,11 @@ mod tests {
                 duration: 30,
             });
             let mark = cx.enter("icon");
-            assert!(!cx.animate("y_offset", AnimValue::Int(5), AnimValue::Int(9), |v, _| {
-                set_i32(&mut field, v.as_i32())
-            }));
+            assert!(
+                !cx.animate("y_offset", AnimValue::Int(5), AnimValue::Int(9), |v, _| {
+                    set_i32(&mut field, v.as_i32())
+                })
+            );
             assert_eq!(cx.path_of("x"), "icon.x");
             cx.leave(mark);
             assert_eq!(cx.prefix(), "");
@@ -577,10 +622,12 @@ mod tests {
         {
             let mut cx = PropCx::new(&mut res, &mut anim, "/home/u");
             cx.enter("icon");
-            assert!(cx.animate("y_offset", AnimValue::Int(5), AnimValue::Int(7), |v, _| {
-                snapped.push(v.as_i32());
-                set_i32(&mut field, v.as_i32())
-            }));
+            assert!(
+                cx.animate("y_offset", AnimValue::Int(5), AnimValue::Int(7), |v, _| {
+                    snapped.push(v.as_i32());
+                    set_i32(&mut field, v.as_i32())
+                })
+            );
         }
         assert_eq!(snapped, vec![9, 7]);
         assert_eq!(field, 7);

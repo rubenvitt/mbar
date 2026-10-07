@@ -92,44 +92,88 @@ pub enum MenuBarAction {
     Toggle,
 }
 
+/// `--add <type> <name> <position> [args…]` (Mode B). Missing tokens are `""`. For
+/// brackets the members are `position` followed by `args`; for graph/slider `args[0]` is the
+/// width (missing → 0).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddCommand {
+    pub item_type: String,
+    pub name: String,
+    pub position: String,
+    pub args: Vec<String>,
+}
+
 /// One parsed command (`cli.md` §3.4 domain table).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     /// `--set <name|/regex/> k=v …` (Mode A after the target).
-    Set { target: Selector, tokens: Vec<SetToken> },
+    Set {
+        target: Selector,
+        tokens: Vec<SetToken>,
+    },
     /// `--default k=v …`; `malformed` = the token that ended the list
     /// (`[!] Set (default): Expected <key>=<value> pair, but got: '<tok>'\n`).
-    Default { pairs: Vec<(String, String)>, malformed: Option<String> },
+    Default {
+        pairs: Vec<(String, String)>,
+        malformed: Option<String>,
+    },
     /// `--bar k=v …`; `malformed` → `[!] Bar: Expected <key>=<value> pair, but got: '<tok>'\n`.
-    Bar { pairs: Vec<(String, String)>, malformed: Option<String> },
+    Bar {
+        pairs: Vec<(String, String)>,
+        malformed: Option<String>,
+    },
     /// `--animate <curve> <duration>` (Mode C, 2 tokens, no `-` check). Applies to the rest
     /// of this message only; duration via `strtoul(…, 0)` (Q9).
-    Animate { curve: Curve, duration: u32 },
-    /// `--add <type> <name> <position> [args…]` (Mode B). Missing tokens are `""`. For
-    /// brackets the members are `position` followed by `args`; for graph/slider `args[0]` is
-    /// the width.
-    Add { item_type: String, name: String, position: String, args: Vec<String> },
+    Animate {
+        curve: Curve,
+        duration: u32,
+    },
+    /// `--add <type> <name> <position> [args…]`.
+    Add(AddCommand),
     /// `--add event <name> [<notification>]` (no response, duplicates ignored).
-    AddEvent { name: String, notification: Option<String> },
+    AddEvent {
+        name: String,
+        notification: Option<String>,
+    },
     /// `--clone <new name> <parent> [before|after]`.
-    Clone { name: String, parent: String, placement: Option<Placement> },
+    Clone {
+        name: String,
+        parent: String,
+        placement: Option<Placement>,
+    },
     /// `--subscribe <item> <event>…` (literal name).
-    Subscribe { item: String, events: Vec<String> },
+    Subscribe {
+        item: String,
+        events: Vec<String>,
+    },
     /// `--push <graph> <v>…` (values via `strtof`).
-    Push { item: String, values: Vec<f32> },
+    Push {
+        item: String,
+        values: Vec<f32>,
+    },
     /// `--update` (Mode C, 0 tokens).
     Update,
     /// `--trigger <event> [K=V…]`; `args` are the raw tokens (see `event::trigger_env`).
-    Trigger { event: String, args: Vec<String> },
+    Trigger {
+        event: String,
+        args: Vec<String>,
+    },
     Query(QueryTarget),
     /// `--reorder <name>…`.
     Reorder(Vec<String>),
     /// `--move <name> before|after <reference>`: anything but exactly `before` is after.
-    Move { item: String, before: bool, reference: String },
+    Move {
+        item: String,
+        before: bool,
+        reference: String,
+    },
     /// `--remove <name|/regex/>`.
     Remove(Selector),
     /// `--rename <old> <new>`.
-    Rename { old: String, new: String },
+    Rename {
+        old: String,
+        new: String,
+    },
     /// `--exit` (no reply).
     Exit,
     /// `--hotload <bool token>` (Mode C, 1 token).
@@ -187,15 +231,27 @@ pub fn parse(args: &[String]) -> Vec<Command> {
     todo!("WP-B: cli.md §3")
 }
 
+/// A pattern [`bre_to_regex`] cannot translate (`[!] Regex: Could not compile regex
+/// '<token>'\n`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegexError;
+
+impl std::fmt::Display for RegexError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("invalid basic regular expression")
+    }
+}
+
+impl std::error::Error for RegexError {}
+
 /// Translates a POSIX **basic** regular expression (as compiled by `regcomp(&re, p, 0)`)
 /// into `regex` crate syntax, unanchored: `\(` `\)` `\{` `\}` `\|` `\+` `\?` are the
 /// operators while `(` `)` `{` `}` `|` `+` `?` are literals; `*` at the start of the pattern
 /// (or after `\(`/`^`) is literal; `^`/`$` anchor only at the pattern/group edges; bracket
 /// expressions incl. `[[:alpha:]]` classes are passed through; back-references `\1`–`\9`
 /// are unsupported (`Err`). An empty pattern is an error (macOS `REG_EMPTY`), as are
-/// malformed patterns. `Err` carries nothing: the caller responds
-/// `[!] Regex: Could not compile regex '<token>'\n`.
-pub fn bre_to_regex(pattern: &str) -> Result<String, ()> {
+/// malformed patterns: the caller responds `[!] Regex: Could not compile regex '<token>'\n`.
+pub fn bre_to_regex(pattern: &str) -> Result<String, RegexError> {
     let _ = pattern;
     todo!("WP-B: cli.md §3.5")
 }

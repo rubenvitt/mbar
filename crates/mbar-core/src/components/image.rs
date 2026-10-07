@@ -8,7 +8,9 @@ use super::{color_anim_set, color_set_prop, Shadow};
 use crate::color::Color;
 use crate::geometry::{Rect, Size};
 use crate::platform::{ImageError, ImageInfo, ImageKey};
-use crate::props::{set_f32, set_i32, set_u32, AnimValue, PropCx, PropEffects, PropError, PropResult};
+use crate::props::{
+    set_f32, set_i32, set_u32, AnimValue, PropCx, PropEffects, PropError, PropResult,
+};
 use crate::value::{self, split_key, KeySplit};
 use std::fmt::Write;
 
@@ -162,7 +164,12 @@ impl Image {
             return false;
         }
         self.size = info.size;
-        self.bounds = Rect::new(0.0, 0.0, info.size.width * self.scale, info.size.height * self.scale);
+        self.bounds = Rect::new(
+            0.0,
+            0.0,
+            info.size.width * self.scale,
+            info.size.height * self.scale,
+        );
         self.key = Some(info.key);
         self.hash = info.hash;
         self.enabled = true;
@@ -199,7 +206,9 @@ impl Image {
             }
             Err(err) => match (&src, err) {
                 (ImageSource::App(name), _) => Err(PropError::ImageInvalidAppName(name.clone())),
-                (ImageSource::Space { raw, .. }, _) => Err(PropError::ImageInvalidSpaceId(raw.clone())),
+                (ImageSource::Space { raw, .. }, _) => {
+                    Err(PropError::ImageInvalidSpaceId(raw.clone()))
+                }
                 (ImageSource::File(_), ImageError::InvalidFormat) => {
                     let after_dot = match split_key(v) {
                         KeySplit::Sub(_, rest) => Some(rest.to_string()),
@@ -233,7 +242,11 @@ impl Image {
 
     /// `image_get_size` (§6.4): the space an image reserves in its owner.
     pub fn reserved_size(&self) -> Size {
-        let sx = if self.shadow.enabled { self.shadow.offset.x } else { 0.0 };
+        let sx = if self.shadow.enabled {
+            self.shadow.offset.x
+        } else {
+            0.0
+        };
         Size::new(
             self.bounds.width + self.padding_left as f32 + self.padding_right as f32 + sx,
             self.bounds.height + 2.0 * (self.y_offset as f32).abs(),
@@ -292,13 +305,21 @@ impl Image {
             ),
             _ => match split_key(key) {
                 KeySplit::Sub("border_color", rest) => {
-                    return cx.scoped("border_color", |cx| color_set_prop(&mut self.border_color, rest, v, cx))
+                    return cx.scoped("border_color", |cx| {
+                        color_set_prop(&mut self.border_color, rest, v, cx)
+                    })
                 }
                 KeySplit::Sub("shadow", rest) => {
                     return cx.scoped("shadow", |cx| self.shadow.set_prop(rest, v, cx))
                 }
-                KeySplit::Sub(sub, _) => return Err(PropError::ImageInvalidSubdomain(sub.to_string())),
-                _ => return Err(PropError::ImageUnknownProperty(value::display_key(key).to_string())),
+                KeySplit::Sub(sub, _) => {
+                    return Err(PropError::ImageInvalidSubdomain(sub.to_string()))
+                }
+                _ => {
+                    return Err(PropError::ImageUnknownProperty(
+                        value::display_key(key).to_string(),
+                    ))
+                }
             },
         })
     }
@@ -314,7 +335,9 @@ impl Image {
             "border_width" => set_f32(&mut self.border_width, v.as_f32()),
             "border_color" => self.set_border_color(v.as_u32()),
             _ => match split_key(path) {
-                KeySplit::Sub("border_color", rest) => color_anim_set(&mut self.border_color, rest, v, fx),
+                KeySplit::Sub("border_color", rest) => {
+                    color_anim_set(&mut self.border_color, rest, v, fx)
+                }
                 KeySplit::Sub("shadow", rest) => self.shadow.anim_set(rest, v, fx),
                 _ => false,
             },
@@ -355,23 +378,43 @@ mod tests {
 
     #[test]
     fn source_parsing() {
-        assert_eq!(ImageSource::parse("app.Safari", "/h"), ImageSource::App("Safari".into()));
-        assert_eq!(ImageSource::parse("app.png", "/h"), ImageSource::App("png".into()));
+        assert_eq!(
+            ImageSource::parse("app.Safari", "/h"),
+            ImageSource::App("Safari".into())
+        );
+        assert_eq!(
+            ImageSource::parse("app.png", "/h"),
+            ImageSource::App("png".into())
+        );
         assert_eq!(
             ImageSource::parse("space.2", "/h"),
-            ImageSource::Space { raw: "2".into(), index: 2 }
+            ImageSource::Space {
+                raw: "2".into(),
+                index: 2
+            }
         );
-        assert_eq!(ImageSource::parse("media.artwork", "/h"), ImageSource::MediaArtwork);
-        assert_eq!(ImageSource::parse("~/a.png", "/h"), ImageSource::File("/h/a.png".into()));
+        assert_eq!(
+            ImageSource::parse("media.artwork", "/h"),
+            ImageSource::MediaArtwork
+        );
+        assert_eq!(
+            ImageSource::parse("~/a.png", "/h"),
+            ImageSource::File("/h/a.png".into())
+        );
         assert_eq!(ImageSource::parse("", "/h"), ImageSource::Empty);
-        assert_eq!(ImageSource::parse("app.", "/h"), ImageSource::File("app.".into()));
+        assert_eq!(
+            ImageSource::parse("app.", "/h"),
+            ImageSource::File("app.".into())
+        );
     }
 
     #[test]
     fn loading() {
         let mut res = HeadlessResources::default();
-        res.files.insert("/h/a.png".into(), Ok(Size::new(20.0, 10.0)));
-        res.files.insert("/h/bad.gif".into(), Err(ImageError::DecodeFailed));
+        res.files
+            .insert("/h/a.png".into(), Ok(Size::new(20.0, 10.0)));
+        res.files
+            .insert("/h/bad.gif".into(), Err(ImageError::DecodeFailed));
         let mut an = Animator::new();
         let mut cx = PropCx::new(&mut res, &mut an, "/h");
         let mut img = Image::default();
@@ -397,7 +440,10 @@ mod tests {
         assert!(img.enabled, "destroy keeps enabled");
         let mut out = String::new();
         img.write_json(&mut out, "\t");
-        assert_eq!(out, "\t\"value\": \"(null)\",\n\t\"drawing\": \"on\",\n\t\"scale\": 2.000000");
+        assert_eq!(
+            out,
+            "\t\"value\": \"(null)\",\n\t\"drawing\": \"on\",\n\t\"scale\": 2.000000"
+        );
         assert!(img.load("media.artwork", &mut cx).unwrap());
         assert!(cx.fx.begin_media_events);
         assert_eq!(

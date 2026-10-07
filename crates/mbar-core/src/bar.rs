@@ -51,11 +51,13 @@ pub struct BarProps {
 
 impl Default for BarProps {
     fn default() -> Self {
-        let mut background = Background::default();
-        background.height = 25;
-        background.overrides_height = true;
-        background.padding_left = 20;
-        background.padding_right = 20;
+        let mut background = Background {
+            height: 25,
+            overrides_height: true,
+            padding_left: 20,
+            padding_right: 20,
+            ..Background::default()
+        };
         background.border_color.set_hex(0xffff0000);
         background.color.set_hex(0x44000000);
         BarProps {
@@ -228,7 +230,11 @@ impl BarProps {
                     self.topmost = true;
                 } else {
                     let on = value::parse_bool(v, self.topmost);
-                    self.window_level = if on { level::STATUS } else { level::BACKSTOP_MENU };
+                    self.window_level = if on {
+                        level::STATUS
+                    } else {
+                        level::BACKSTOP_MENU
+                    };
                     self.topmost = on;
                 }
                 // C resets *before* updating `topmost`, so the recreated windows use the old
@@ -318,7 +324,11 @@ impl BarProps {
             "{{\n\t\"position\": \"{}\",\n\t\"topmost\": \"{}\",\n\t\"sticky\": \"{}\",\n\
              \t\"hidden\": \"{}\",\n\t\"shadow\": \"{}\",\n\t\"font_smoothing\": \"{}\",\n\
              \t\"show_in_fullscreen\": \"{}\",\n\t\"blur_radius\": {},\n\t\"margin\": {},\n",
-            if self.position == b'b' { "bottom" } else { "top" },
+            if self.position == b'b' {
+                "bottom"
+            } else {
+                "top"
+            },
             value::format_bool(self.topmost),
             value::format_bool(self.sticky),
             value::format_bool(self.any_bar_hidden),
@@ -396,7 +406,9 @@ mod tests {
 \t\t\"value\": \"(null)\",\n\t\t\"drawing\": \"off\",\n\t\t\"scale\": 1.000000\n\t},\n\
 \t\"items\": [\n\n\t]\n}\n";
         assert_eq!(b.to_json(&[]), expected);
-        assert!(b.to_json(&[Some("a"), Some("b")]).ends_with("\t\"items\": [\n\t\t \"a\",\n\t\t \"b\"\n\t]\n}\n"));
+        assert!(b
+            .to_json(&[Some("a"), Some("b")])
+            .ends_with("\t\"items\": [\n\t\t \"a\",\n\t\t \"b\"\n\t]\n}\n"));
     }
 
     #[test]
@@ -411,7 +423,10 @@ mod tests {
         assert!(cx.fx.bar_needs_resize);
         assert!(!b.set_prop("blur_radius", "20", &mut cx).unwrap());
         assert_eq!(b.blur_radius, 20);
-        assert_eq!(b.set_prop("clip", "1", &mut cx).unwrap_err().to_string(), "[!] Bar: Invalid property 'clip'\n");
+        assert_eq!(
+            b.set_prop("clip", "1", &mut cx).unwrap_err().to_string(),
+            "[!] Bar: Invalid property 'clip'\n"
+        );
         assert!(b.set_prop("position", "bottom", &mut cx).unwrap());
         assert_eq!(b.position, b'b');
         assert!(!b.set_prop("position", "", &mut cx).unwrap());
@@ -424,7 +439,10 @@ mod tests {
         assert_eq!(parse_display_pattern("2,main").0, 0);
         assert_eq!(parse_display_pattern("0").1, vec!["0".to_string()]);
         assert!(!b.set_prop("hidden", "toggle", &mut cx).unwrap());
-        assert_eq!(cx.requests.last(), Some(&PropRequest::BarHidden(HiddenRequest::All(true))));
+        assert_eq!(
+            cx.requests.last(),
+            Some(&PropRequest::BarHidden(HiddenRequest::All(true)))
+        );
         assert_eq!(
             b.set_prop("nope", "1", &mut cx).unwrap_err().to_string(),
             "[!] Background: Invalid property 'nope'\n"

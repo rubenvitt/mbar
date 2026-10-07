@@ -30,7 +30,10 @@ impl EnvVars {
     }
 
     pub fn get(&self, key: &str) -> Option<&str> {
-        self.vars.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+        self.vars
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
     }
 
     pub fn remove(&mut self, key: &str) {
@@ -143,8 +146,14 @@ mod tests {
         e.set("A", "1");
         e.set("B", "2");
         e.set("A", "3");
-        assert_eq!(e.to_vec(), vec![("B".into(), "2".into()), ("A".into(), "3".into())]);
+        assert_eq!(
+            e.to_vec(),
+            vec![("B".into(), "2".into()), ("A".into(), "3".into())]
+        );
         assert_eq!(e.get("A"), Some("3"));
-        assert_eq!(Sender::Event("mouse.clicked".into()).as_str(), "mouse.clicked");
+        assert_eq!(
+            Sender::Event("mouse.clicked".into()).as_str(),
+            "mouse.clicked"
+        );
     }
 }

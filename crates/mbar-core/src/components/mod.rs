@@ -44,22 +44,41 @@ use crate::value;
 pub fn color_set_prop(color: &mut Color, key: &str, v: &str, cx: &mut PropCx) -> PropResult {
     let c = color.hex;
     Ok(match key {
-        "hex" => cx.animate("hex", AnimValue::Color(c), AnimValue::Color(value::parse_int(v) as u32), |a, _| {
-            color.set_hex(a.as_u32())
-        }),
-        "alpha" => cx.animate("alpha", AnimValue::Float(color.a), AnimValue::Float(value::parse_float(v)), |a, _| {
-            color.set_alpha(a.as_f32())
-        }),
-        "red" => cx.animate("red", AnimValue::Float(color.r), AnimValue::Float(value::parse_float(v)), |a, _| {
-            color.set_red(a.as_f32())
-        }),
-        "green" => cx.animate("green", AnimValue::Float(color.g), AnimValue::Float(value::parse_float(v)), |a, _| {
-            color.set_green(a.as_f32())
-        }),
-        "blue" => cx.animate("blue", AnimValue::Float(color.b), AnimValue::Float(value::parse_float(v)), |a, _| {
-            color.set_blue(a.as_f32())
-        }),
-        _ => return Err(PropError::ColorInvalidProperty(value::display_key(key).to_string())),
+        "hex" => cx.animate(
+            "hex",
+            AnimValue::Color(c),
+            AnimValue::Color(value::parse_int(v) as u32),
+            |a, _| color.set_hex(a.as_u32()),
+        ),
+        "alpha" => cx.animate(
+            "alpha",
+            AnimValue::Float(color.a),
+            AnimValue::Float(value::parse_float(v)),
+            |a, _| color.set_alpha(a.as_f32()),
+        ),
+        "red" => cx.animate(
+            "red",
+            AnimValue::Float(color.r),
+            AnimValue::Float(value::parse_float(v)),
+            |a, _| color.set_red(a.as_f32()),
+        ),
+        "green" => cx.animate(
+            "green",
+            AnimValue::Float(color.g),
+            AnimValue::Float(value::parse_float(v)),
+            |a, _| color.set_green(a.as_f32()),
+        ),
+        "blue" => cx.animate(
+            "blue",
+            AnimValue::Float(color.b),
+            AnimValue::Float(value::parse_float(v)),
+            |a, _| color.set_blue(a.as_f32()),
+        ),
+        _ => {
+            return Err(PropError::ColorInvalidProperty(
+                value::display_key(key).to_string(),
+            ))
+        }
     })
 }
 

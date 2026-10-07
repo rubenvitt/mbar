@@ -320,7 +320,11 @@ impl Animator {
 /// frames, a 0-frame jump to `-width`, linear `-width → 0` over `scroll_duration` frames.
 /// The runtime adds them with the `ANIMATE_FLOAT` semantics (cancel locked, then add);
 /// Quirk Q8 (resetting `--animate` for the rest of the message) is the runtime's call.
-pub fn marquee(target: AnimTarget, prefix: &str, text: &crate::components::Text) -> Option<Vec<PendingAnim>> {
+pub fn marquee(
+    target: AnimTarget,
+    prefix: &str,
+    text: &crate::components::Text,
+) -> Option<Vec<PendingAnim>> {
     let _ = (target, prefix, text);
     todo!("WP-D: components.md §4.10")
 }
@@ -378,7 +382,12 @@ mod tests {
             AnimValue::Int(7)
         );
         assert_eq!(
-            interpolate(AnimValue::Color(0), AnimValue::Color(0xff0000ff), 0.5, false),
+            interpolate(
+                AnimValue::Color(0),
+                AnimValue::Color(0xff0000ff),
+                0.5,
+                false
+            ),
             AnimValue::Color(0x7f00007f)
         );
         assert_eq!(

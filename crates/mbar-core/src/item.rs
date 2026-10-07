@@ -460,7 +460,8 @@ impl BarItem {
 
     /// `bar_item_get_content_length` (§4.1): icon + label + graph/slider/alias, `max(…, 0)`.
     pub fn content_length(&self) -> u32 {
-        let mut len = (self.icon.length(false) as i32).wrapping_add(self.label.length(false) as i32);
+        let mut len =
+            (self.icon.length(false) as i32).wrapping_add(self.label.length(false) as i32);
         if self.has_graph() && self.graph.enabled {
             len = len.wrapping_add(self.graph.width as i32);
         }
@@ -493,7 +494,11 @@ impl BarItem {
     /// layout updates `background.height` before calling this).
     pub fn height(&self) -> u32 {
         let text = self.label.height().max(self.icon.height());
-        let item = text.max(if self.has_alias() { self.alias.height() } else { 0 });
+        let item = text.max(if self.has_alias() {
+            self.alias.height()
+        } else {
+            0
+        });
         let bg = if self.background.enabled {
             let ih = if self.background.image.enabled {
                 self.background.image.reserved_size().height.max(0.0) as u32
@@ -559,9 +564,10 @@ impl BarItem {
 
     /// Point inside any virtual window (inclusive on all edges, `cgrect_contains_point`).
     pub fn contains_point(&self, p: Point) -> bool {
-        self.frames.iter().flatten().any(|r| {
-            p.x >= r.x && p.x <= r.max_x() && p.y >= r.y && p.y <= r.max_y()
-        })
+        self.frames
+            .iter()
+            .flatten()
+            .any(|r| p.x >= r.x && p.x <= r.max_x() && p.y >= r.y && p.y <= r.max_y())
     }
 
     fn err_name(&self) -> Option<String> {
@@ -582,28 +588,36 @@ impl BarItem {
                     if self.has_graph() || self.is_default {
                         cx.scoped("graph", |cx| self.graph.set_prop(rest, v, cx))
                     } else {
-                        Err(PropError::NotGraph { item: self.err_name() })
+                        Err(PropError::NotGraph {
+                            item: self.err_name(),
+                        })
                     }
                 }
                 "alias" => {
                     if self.has_alias() || self.is_default {
                         cx.scoped("alias", |cx| self.alias.set_prop(rest, v, cx))
                     } else {
-                        Err(PropError::NotAlias { item: self.err_name() })
+                        Err(PropError::NotAlias {
+                            item: self.err_name(),
+                        })
                     }
                 }
                 "slider" => {
                     if self.has_slider() || self.is_default {
                         cx.scoped("slider", |cx| self.slider.set_prop(rest, v, cx))
                     } else {
-                        Err(PropError::NotSlider { item: self.err_name() })
+                        Err(PropError::NotSlider {
+                            item: self.err_name(),
+                        })
                     }
                 }
                 "app_menu" => {
                     if self.item_type == ItemType::AppMenu || self.is_default {
                         cx.scoped("app_menu", |cx| self.app_menu.set_prop(rest, v, cx))
                     } else {
-                        Err(PropError::NotAppMenu { item: self.err_name() })
+                        Err(PropError::NotAppMenu {
+                            item: self.err_name(),
+                        })
                     }
                 }
                 "provider" => {
@@ -639,7 +653,10 @@ impl BarItem {
             }
             "width" => {
                 self.ensure_layout(cx.res);
-                let pads = self.background.padding_left.wrapping_add(self.background.padding_right);
+                let pads = self
+                    .background
+                    .padding_left
+                    .wrapping_add(self.background.padding_right);
                 if v == "dynamic" {
                     let from = AnimValue::Int(self.custom_width as i32);
                     let to = AnimValue::Int((self.length(true) as i32).wrapping_add(pads));
@@ -656,9 +673,12 @@ impl BarItem {
                 } else {
                     let extra = if self.has_const_width { 0 } else { pads };
                     let from = AnimValue::Int((self.length(false) as i32).wrapping_add(extra));
-                    cx.animate("width", from, AnimValue::Int(value::parse_int(v)), |a, _| {
-                        self.set_width(a.as_i32())
-                    })
+                    cx.animate(
+                        "width",
+                        from,
+                        AnimValue::Int(value::parse_int(v)),
+                        |a, _| self.set_width(a.as_i32()),
+                    )
                 }
             }
             "script" => {
@@ -679,7 +699,9 @@ impl BarItem {
                 }
                 match split_key(v) {
                     KeySplit::Sub(k, host) if k.starts_with('p') => {
-                        cx.request(PropRequest::AddToPopup { host: host.to_string() });
+                        cx.request(PropRequest::AddToPopup {
+                            host: host.to_string(),
+                        });
                     }
                     KeySplit::Sub(_, _) => self.parent = None,
                     _ => {}
@@ -849,7 +871,11 @@ impl BarItem {
             self.background.padding_left,
             self.background.padding_right,
             value::format_bool(self.scroll_texts),
-            if self.has_const_width { self.custom_width as i32 } else { -1 },
+            if self.has_const_width {
+                self.custom_width as i32
+            } else {
+                -1
+            },
         );
         self.background.write_json(o, "\t\t\t", true);
         o.push_str("\n\t\t}\n\t},\n\t\"icon\": {\n");
@@ -988,7 +1014,9 @@ mod tests {
         assert_eq!(json, expected);
         // No windows: empty body.
         let it2 = new_item(&mut res);
-        assert!(it2.to_json(&|_| None).contains("\t\"bounding_rects\": {\n\n\t}\n}\n"));
+        assert!(it2
+            .to_json(&|_| None)
+            .contains("\t\"bounding_rects\": {\n\n\t}\n}\n"));
     }
 
     #[test]
@@ -1014,7 +1042,9 @@ mod tests {
             "[!] Item (foo): Invalid subdomain 'foo'\n"
         );
         assert_eq!(
-            it.set_prop("graph.color", "1", &mut c).unwrap_err().to_string(),
+            it.set_prop("graph.color", "1", &mut c)
+                .unwrap_err()
+                .to_string(),
             "[!] Item (foo): Trying to set a graph property on a non-graph item\n"
         );
         assert!(!it.set_prop("updates", "when_shown", &mut c).unwrap());
@@ -1030,8 +1060,16 @@ mod tests {
         assert_eq!((it.position, it.align), (Position::Right, b'r'));
         assert!(it.set_prop("position", "popup.host", &mut c).unwrap());
         assert_eq!(it.align, b'r', "popup keeps align");
-        assert_eq!(c.requests, vec![PropRequest::AddToPopup { host: "host".into() }]);
-        assert!(it.set_prop("position", "xyz", &mut c).unwrap(), "invalid is silent, still refresh");
+        assert_eq!(
+            c.requests,
+            vec![PropRequest::AddToPopup {
+                host: "host".into()
+            }]
+        );
+        assert!(
+            it.set_prop("position", "xyz", &mut c).unwrap(),
+            "invalid is silent, still refresh"
+        );
         assert_eq!(it.position, Position::Popup);
         it.set_prop("script", "~/s.sh", &mut c).unwrap();
         assert_eq!(it.script.as_deref(), Some("/home/u/s.sh"));
@@ -1054,11 +1092,17 @@ mod tests {
         assert_eq!(it.content_length(), 36);
         {
             let mut c = cx(&mut res, &mut an);
-            c.anim = Some(AnimSpec { curve: Curve::Linear, duration: 10 });
+            c.anim = Some(AnimSpec {
+                curve: Curve::Linear,
+                duration: 10,
+            });
             assert!(!it.set_prop("width", "100", &mut c).unwrap());
         }
         let a = &an.animations()[0];
-        assert_eq!((a.path.as_str(), a.from, a.to), ("width", AnimValue::Int(46), AnimValue::Int(100)));
+        assert_eq!(
+            (a.path.as_str(), a.from, a.to),
+            ("width", AnimValue::Int(46), AnimValue::Int(100))
+        );
         an.clear();
         {
             let mut c = cx(&mut res, &mut an);
@@ -1126,6 +1170,8 @@ mod tests {
         assert!(!it.is_default);
         d.reset_default();
         assert_eq!(d.name, None);
-        assert!(d.to_json(&|_| None).starts_with("{\n\t\"name\": \"(null)\""));
+        assert!(d
+            .to_json(&|_| None)
+            .starts_with("{\n\t\"name\": \"(null)\""));
     }
 }

@@ -196,7 +196,10 @@ pub enum MouseButton {
 /// synthesized from pointer motion inside bar/popup windows.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MouseKind {
-    Up { button: MouseButton, button_code: u32 },
+    Up {
+        button: MouseButton,
+        button_code: u32,
+    },
     Dragged,
     Moved,
     /// The pointer entered `window` (bar or popup window).
@@ -204,7 +207,9 @@ pub enum MouseKind {
     /// The pointer left `window`.
     Exited,
     /// Vertical delta in lines (`kCGScrollWheelEventDeltaAxis1`).
-    Scrolled { delta: i32 },
+    Scrolled {
+        delta: i32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -222,7 +227,10 @@ pub struct MouseInput {
 #[derive(Debug, Clone, PartialEq)]
 pub enum OsEvent {
     /// `front_app_switched` (INFO = name if any). `bundle_id` feeds the `front_app` provider.
-    FrontAppSwitched { name: Option<String>, bundle_id: Option<String> },
+    FrontAppSwitched {
+        name: Option<String>,
+        bundle_id: Option<String>,
+    },
     /// `SPACE_CHANGED` (non-forced handling).
     SpaceChanged,
     /// `DISPLAY_CHANGED` (active display notification).
@@ -245,7 +253,10 @@ pub enum OsEvent {
     /// Ready-made `space_windows_change` INFO for one space.
     SpaceWindowsChanged(String),
     /// A distributed notification registered by `--add event <name> <notification>`.
-    DistributedNotification { name: String, info: Option<String> },
+    DistributedNotification {
+        name: String,
+        info: Option<String>,
+    },
     /// Hotload watcher saw a change in the config directory (rate limiting is the
     /// platform's job: one per 2^30 ns).
     ConfigChanged,
@@ -259,25 +270,42 @@ pub enum OsEvent {
 pub enum LuaRequest {
     /// A command batch (`mbar.set(...)` etc. compiled to argv); the response text is
     /// delivered to `callback` (if any) as `Effect::LuaCallback` with env `RESPONSE`.
-    Command { args: Vec<String>, callback: Option<u64> },
+    Command {
+        args: Vec<String>,
+        callback: Option<u64>,
+    },
     /// Subscribe an item to events with an in-process handler instead of a script
     /// (`script` then shows `lua:<handler>` in `--query`).
-    Subscribe { item: String, events: Vec<String>, handler: u64 },
+    Subscribe {
+        item: String,
+        events: Vec<String>,
+        handler: u64,
+    },
 }
 
 /// Everything that happens to the core.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Input {
     /// One IPC request (argv without argv[0]).
-    Message { args: Vec<String>, reply: ReplyToken },
+    Message {
+        args: Vec<String>,
+        reply: ReplyToken,
+    },
     Event(OsEvent),
     Mouse(MouseInput),
     /// `next_deadline()` reached (routine clock, providers, delayed wake, …).
     Timer,
     /// A spawned script exited (stats / Lua `exec` output).
-    ScriptFinished { pid: u32, item: Option<String>, output: Option<String> },
+    ScriptFinished {
+        pid: u32,
+        item: Option<String>,
+        output: Option<String>,
+    },
     /// A native provider produced a sample for `item`.
-    ProviderSample { item: ItemId, values: Vec<(String, String)> },
+    ProviderSample {
+        item: ItemId,
+        values: Vec<(String, String)>,
+    },
     /// Result of `PlatformRequest::CaptureAlias`. `image: None` with `disabled` = capture
     /// currently suspended (keep the old picture).
     AliasImage {
@@ -291,7 +319,10 @@ pub enum Input {
     DisplaysChanged,
     Lua(LuaRequest),
     /// Front application menus (app_menu extension; also fires `menus_change`).
-    MenuTitles { app: String, titles: Vec<String> },
+    MenuTitles {
+        app: String,
+        titles: Vec<String>,
+    },
 }
 
 /// Things the platform must do on the core's behalf.
@@ -312,38 +343,67 @@ pub enum PlatformRequest {
     /// `--load-font <path>`.
     LoadFont(String),
     /// Capture an alias' menu-bar extra (reply: `Input::AliasImage`).
-    CaptureAlias { item: ItemId, owner: String, name: Option<String>, forced: bool },
+    CaptureAlias {
+        item: ItemId,
+        owner: String,
+        name: Option<String>,
+        forced: bool,
+    },
     /// Ask for Screen Recording permission (alias setup).
     RequestScreenCapture,
     /// (Re)configure the native provider of `item` (`provider=` extension).
-    StartProvider { item: ItemId, provider: String, freq: Option<f32>, args: Option<String> },
-    StopProvider { item: ItemId },
+    StartProvider {
+        item: ItemId,
+        provider: String,
+        freq: Option<f32>,
+        args: Option<String>,
+    },
+    StopProvider {
+        item: ItemId,
+    },
     /// Open top-level menu `index` of the front app (app_menu / `--menu`).
-    OpenMenu { index: usize },
+    OpenMenu {
+        index: usize,
+    },
     /// `--menubar` / `hide_menubar=`: auto-hide the native menu bar.
     SetMenuBarHidden(bool),
     /// `--hotload <bool>`.
     SetHotload(bool),
     /// Send a payload to a `mach_helper` service (`k\0v\0…\0`; `"k\0"` on destroy).
-    MachSend { service: String, payload: Vec<u8> },
+    MachSend {
+        service: String,
+        payload: Vec<u8>,
+    },
 }
 
 /// Actions requested by `Runtime::handle`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     /// IPC response (possibly empty). Never sent after `--exit`.
-    Reply { reply: ReplyToken, text: String },
+    Reply {
+        reply: ReplyToken,
+        text: String,
+    },
     /// `fork_exec`: `/usr/bin/env sh -c <script>` with `env` added to the daemon's startup
     /// environment (D1), cwd = config dir, killed after 60 s.
-    RunScript { script: String, env: Vec<(String, String)>, item: Option<String> },
+    RunScript {
+        script: String,
+        env: Vec<(String, String)>,
+        item: Option<String>,
+    },
     /// `--exit` (after mach helpers got `"k"`).
     Exit,
     /// Run the config file again (after `--reload`/hotload reset the core). `path` replaces
     /// the stored config path when given.
-    RunConfig { path: Option<String> },
+    RunConfig {
+        path: Option<String>,
+    },
     Platform(PlatformRequest),
     /// Call an in-process Lua handler.
-    LuaCallback { handler: u64, env: Vec<(String, String)> },
+    LuaCallback {
+        handler: u64,
+        env: Vec<(String, String)>,
+    },
     /// Daemon log line (`respond()` echo, "No bar on display", …); the platform prefixes the
     /// timestamp.
     Log(String),
@@ -456,7 +516,12 @@ impl Resources for HeadlessResources {
             Rect::new(0.0, -descent, width, ascent + descent)
         };
         TextMetrics {
-            key: TextKey(hash_of((&font.family, &font.style, font.size.to_bits(), text))),
+            key: TextKey(hash_of((
+                &font.family,
+                &font.style,
+                font.size.to_bits(),
+                text,
+            ))),
             ink,
             typographic_width: width,
             ascent,

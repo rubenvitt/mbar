@@ -89,7 +89,12 @@ impl AppMenu {
     /// `max_titles` (0 = all). Returns `(index into titles, title)`.
     pub fn visible_titles(&self) -> Vec<(usize, &str)> {
         let start = if self.apple { 0 } else { 1 };
-        let iter = self.titles.iter().enumerate().skip(start).map(|(i, t)| (i, t.as_str()));
+        let iter = self
+            .titles
+            .iter()
+            .enumerate()
+            .skip(start)
+            .map(|(i, t)| (i, t.as_str()));
         if self.max_titles == 0 {
             iter.collect()
         } else {
@@ -151,7 +156,11 @@ impl AppMenu {
                 let n = value::parse_u32(v);
                 set_u32(&mut self.max_titles, n)
             }
-            _ => return Err(PropError::AppMenuInvalidProperty(value::display_key(key).to_string())),
+            _ => {
+                return Err(PropError::AppMenuInvalidProperty(
+                    value::display_key(key).to_string(),
+                ))
+            }
         })
     }
 
@@ -205,7 +214,10 @@ mod tests {
             ..AppMenu::default()
         };
         assert_eq!(m.visible_titles(), vec![(1, "File"), (2, "Edit")]);
-        let label = FontSpec { style: "Regular".into(), ..FontSpec::default() };
+        let label = FontSpec {
+            style: "Regular".into(),
+            ..FontSpec::default()
+        };
         assert_eq!(m.title_font(&label).style, "Regular");
         assert_eq!(m.app_name_font(&label).style, "Bold");
     }

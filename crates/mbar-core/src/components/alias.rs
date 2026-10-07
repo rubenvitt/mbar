@@ -81,7 +81,14 @@ impl Alias {
     /// Result of a capture (`alias_update_image` tail): `None` with `disabled == false`
     /// drops the window id and the picture; `Some` goes through `image_set_image` (the
     /// logical size is the window frame size). Returns "changed".
-    pub fn apply_capture(&mut self, image: Option<ImageInfo>, window_id: u32, frame: Rect, disabled: bool, forced: bool) -> bool {
+    pub fn apply_capture(
+        &mut self,
+        image: Option<ImageInfo>,
+        window_id: u32,
+        frame: Rect,
+        disabled: bool,
+        forced: bool,
+    ) -> bool {
         match image {
             None => {
                 if !disabled {
@@ -143,7 +150,9 @@ impl Alias {
                 self.update_frequency = value::parse_u32(v);
                 Ok(false)
             }
-            _ => Err(PropError::AliasInvalidProperty(value::display_key(key).to_string())),
+            _ => Err(PropError::AliasInvalidProperty(
+                value::display_key(key).to_string(),
+            )),
         }
     }
 

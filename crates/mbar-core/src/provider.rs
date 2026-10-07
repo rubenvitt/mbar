@@ -86,7 +86,11 @@ impl ProviderKind {
     pub fn is_event_driven(self) -> bool {
         matches!(
             self,
-            ProviderKind::Volume | ProviderKind::Wifi | ProviderKind::FrontApp | ProviderKind::Media | ProviderKind::Battery
+            ProviderKind::Volume
+                | ProviderKind::Wifi
+                | ProviderKind::FrontApp
+                | ProviderKind::Media
+                | ProviderKind::Battery
         )
     }
 
@@ -117,7 +121,13 @@ impl ProviderConfig {
     /// `provider=<name>` (`key == ""`) and `provider.<p>` (`key == p`). Pushes
     /// `PropRequest::ProviderChanged` on every successful change. `item` is the item name
     /// for error messages.
-    pub fn set_prop(&mut self, key: &str, v: &str, item: Option<&str>, cx: &mut PropCx) -> PropResult {
+    pub fn set_prop(
+        &mut self,
+        key: &str,
+        v: &str,
+        item: Option<&str>,
+        cx: &mut PropCx,
+    ) -> PropResult {
         let changed = match key {
             "" => {
                 let kind = if v == "none" {
@@ -146,7 +156,11 @@ impl ProviderConfig {
                 c
             }
             "args" => replace(&mut self.args, v),
-            _ => return Err(PropError::ProviderInvalidProperty(value::display_key(key).to_string())),
+            _ => {
+                return Err(PropError::ProviderInvalidProperty(
+                    value::display_key(key).to_string(),
+                ))
+            }
         };
         if changed {
             cx.request(PropRequest::ProviderChanged);
@@ -221,11 +235,17 @@ mod tests {
         let mut p = ProviderConfig::default();
         assert!(p.set_prop("", "cpu", Some("x"), &mut cx).unwrap());
         assert_eq!(p.kind, Some(ProviderKind::Cpu));
-        assert!(p.set_prop("format", "{percent}%", Some("x"), &mut cx).unwrap());
-        assert!(!p.set_prop("format", "{percent}%", Some("x"), &mut cx).unwrap());
+        assert!(p
+            .set_prop("format", "{percent}%", Some("x"), &mut cx)
+            .unwrap());
+        assert!(!p
+            .set_prop("format", "{percent}%", Some("x"), &mut cx)
+            .unwrap());
         assert_eq!(cx.requests.len(), 2);
         assert_eq!(
-            p.set_prop("", "gpu", Some("x"), &mut cx).unwrap_err().to_string(),
+            p.set_prop("", "gpu", Some("x"), &mut cx)
+                .unwrap_err()
+                .to_string(),
             "[!] Item (x): Invalid provider 'gpu'\n"
         );
         assert!(p.set_prop("", "none", Some("x"), &mut cx).unwrap());

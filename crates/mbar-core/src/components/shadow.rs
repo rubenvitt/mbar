@@ -102,8 +102,14 @@ impl Shadow {
                 KeySplit::Sub("color", rest) => {
                     return cx.scoped("color", |cx| color_set_prop(&mut self.color, rest, v, cx))
                 }
-                KeySplit::Sub(sub, _) => return Err(PropError::ShadowInvalidSubdomain(sub.to_string())),
-                _ => return Err(PropError::ShadowInvalidProperty(value::display_key(key).to_string())),
+                KeySplit::Sub(sub, _) => {
+                    return Err(PropError::ShadowInvalidSubdomain(sub.to_string()))
+                }
+                _ => {
+                    return Err(PropError::ShadowInvalidProperty(
+                        value::display_key(key).to_string(),
+                    ))
+                }
             },
         })
     }

@@ -26,7 +26,10 @@ use crate::platform::{DisplayInfo, Resources};
 use crate::scene::Scene;
 
 /// `g_nirvana`: where invisible windows are parked.
-pub const NIRVANA: Point = Point { x: -9999.0, y: -9999.0 };
+pub const NIRVANA: Point = Point {
+    x: -9999.0,
+    y: -9999.0,
+};
 
 /// Result of one layout pass over all bars and open popups.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -103,14 +106,22 @@ pub fn layout(model: &mut Model, res: &mut dyn Resources) -> Layout {
 /// (`l`, `c`, `r`, `q`/`e` around the notch on built-in displays), RTL for `r`/`q`,
 /// padding/const-width advance rules, unsigned-wrap emulation of the RTL clamp (D10: clamp
 /// at 0 instead of UB), then the bracket pass (§4.6). Returns the placed items.
-pub fn layout_bar_horizontal(model: &mut Model, bar_index: usize, res: &mut dyn Resources) -> BarLayout {
+pub fn layout_bar_horizontal(
+    model: &mut Model,
+    bar_index: usize,
+    res: &mut dyn Resources,
+) -> BarLayout {
     let _ = (model, bar_index, res);
     todo!("WP-A: bar.md §4.4")
 }
 
 /// `bar_calculate_bounds_left_right` (`bar.md` §4.5, `item.md` §4.6): vertical bars; centre
 /// start `(H - 2*margin - len)/2 - 1`; no bracket pass; window width = bar thickness.
-pub fn layout_bar_vertical(model: &mut Model, bar_index: usize, res: &mut dyn Resources) -> BarLayout {
+pub fn layout_bar_vertical(
+    model: &mut Model,
+    bar_index: usize,
+    res: &mut dyn Resources,
+) -> BarLayout {
     let _ = (model, bar_index, res);
     todo!("WP-A: bar.md §4.5")
 }
@@ -118,7 +129,12 @@ pub fn layout_bar_vertical(model: &mut Model, bar_index: usize, res: &mut dyn Re
 /// `bar_manager_length_for_bar_side` (`bar.md` §4.3): sum over items with the given
 /// position, not brackets, drawn on `bar`, of `len + (const ? 0 : pl + pr)` (`len` = height
 /// for vertical bars).
-pub fn side_length(model: &Model, bar: &BarState, side: crate::item::Position, vertical: bool) -> u32 {
+pub fn side_length(
+    model: &Model,
+    bar: &BarState,
+    side: crate::item::Position,
+    vertical: bool,
+) -> u32 {
     let _ = (model, bar, side, vertical);
     todo!("WP-A: bar.md §4.3")
 }
@@ -127,7 +143,13 @@ pub fn side_length(model: &Model, bar: &BarState, side: crate::item::Position, v
 /// widened slot, places icon / graph|alias|slider / label, the item background (auto height
 /// `bar_height - (bar.border_width + 1)`, double-subtraction quirk) and returns the slot
 /// length (`length(false)`). `bar_border_width` is the bar background's border width.
-pub fn item_calculate_bounds(item: &mut BarItem, bar_height: u32, x: u32, y: u32, bar_border_width: u32) -> u32 {
+pub fn item_calculate_bounds(
+    item: &mut BarItem,
+    bar_height: u32,
+    x: u32,
+    y: u32,
+    bar_border_width: u32,
+) -> u32 {
     let _ = (item, bar_height, x, y, bar_border_width);
     todo!("WP-A: item.md §4.3")
 }
@@ -149,7 +171,12 @@ pub fn background_calculate_bounds(bg: &mut Background, x: u32, y: u32, w: u32, 
 
 /// `image_calculate_bounds(image, x, y)` (`components.md` §6.4) incl. the media-artwork
 /// 32 pt normalisation (`artwork` = size of the shared artwork when `image.link`).
-pub fn image_calculate_bounds(image: &mut Image, x: f32, y: f32, artwork: Option<crate::geometry::Size>) {
+pub fn image_calculate_bounds(
+    image: &mut Image,
+    x: f32,
+    y: f32,
+    artwork: Option<crate::geometry::Size>,
+) {
     let _ = (image, x, y, artwork);
     todo!("WP-A: components.md §6.4")
 }
@@ -174,7 +201,11 @@ pub fn anchor_popup(model: &mut Model, host: ItemId, bar: &BarState, res: &mut d
 /// `popup_calculate_bounds` (`item.md` §6.4): stacks/rows member items (cell =
 /// `max(item height, cell_size)`), border quirk (width +bw once, height +2·bw), background
 /// image sizing, bracket members (§5.3). Returns the popup layout when anchored.
-pub fn popup_bounds(model: &mut Model, host: ItemId, res: &mut dyn Resources) -> Option<PopupLayout> {
+pub fn popup_bounds(
+    model: &mut Model,
+    host: ItemId,
+    res: &mut dyn Resources,
+) -> Option<PopupLayout> {
     let _ = (model, host, res);
     todo!("WP-A: item.md §6.4")
 }
@@ -199,7 +230,13 @@ pub fn popup_scene(model: &Model, layout: &PopupLayout) -> Scene {
 /// (+ blur region if `blur_radius > 0`); brackets stop here; icon (background, shadow,
 /// glyphs with `-scroll`, `max_chars` clip), label, alias (tint mask), graph (exact path
 /// §8.5), slider (track, fill, knob), app_menu titles.
-pub fn item_scene(item: &BarItem, origin: Point, window_h: f32, artwork: Option<crate::platform::ImageInfo>, scene: &mut Scene) {
+pub fn item_scene(
+    item: &BarItem,
+    origin: Point,
+    window_h: f32,
+    artwork: Option<crate::platform::ImageInfo>,
+    scene: &mut Scene,
+) {
     let _ = (item, origin, window_h, artwork, scene);
     todo!("WP-A: components.md §10.3")
 }

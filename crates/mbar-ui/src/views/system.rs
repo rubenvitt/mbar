@@ -20,6 +20,34 @@ use mbar_ui_model::system::{
 
 use super::{interval, page_header, section, status_color, status_text, Shared};
 
+/// Title and (truncated) description on the left, a control on the right.
+fn setting_row(
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    control: impl IntoElement,
+    cx: &App,
+) -> Div {
+    h_flex()
+        .w_full()
+        .gap_3()
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(div().text_sm().child(title.into()))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(description.into()),
+                ),
+        )
+        .child(div().flex_shrink_0().child(control))
+}
+
 pub struct SystemView {
     shared: Shared,
     status: DaemonStatus,
@@ -70,6 +98,10 @@ impl SystemView {
                 let became_connected =
                     status == DaemonStatus::Connected && this.status != DaemonStatus::Connected;
                 if status != this.status {
+                    if status != DaemonStatus::Connected {
+                        // Probed through the daemon; stale once it is gone.
+                        this.permissions = None;
+                    }
                     this.status = status;
                     cx.notify();
                 }
@@ -162,9 +194,8 @@ impl SystemView {
     }
 
     fn set_launch_agent(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let bar_name = self.shared.client.bar_name().to_string();
         let result = if on {
-            sys::install_launch_agent(&bar_name).map(|p| format!("Wrote {}", p.display()))
+            sys::install_launch_agent().map(|p| format!("Wrote {}", p.display()))
         } else {
             sys::remove_launch_agent().map(|_| "Removed the launch agent".to_string())
         };
@@ -297,31 +328,15 @@ impl Render for SystemView {
                 ),
         );
 
-        let menubar = section("Native menu bar", cx).child(
-            h_flex()
-                .gap_3()
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .child(
-                            div()
-                                .text_sm()
-                                .child("Automatically hide and show the macOS menu bar"),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("Sends `--menubar hide|show`; mbar updates the system setting."),
-                        ),
-                )
-                .child(
-                    Switch::new("menubar-autohide")
-                        .checked(self.menubar_hidden.unwrap_or(false))
-                        .disabled(!connected)
-                        .on_change(cx.listener(|this, on: &bool, _, cx| this.set_menubar(*on, cx))),
-                ),
-        );
+        let menubar = section("Native menu bar", cx).child(setting_row(
+            "Automatically hide and show the macOS menu bar",
+            "Sends `--menubar hide|show`; mbar updates the system setting.",
+            Switch::new("menubar-autohide")
+                .checked(self.menubar_hidden.unwrap_or(false))
+                .disabled(!connected)
+                .on_change(cx.listener(|this, on: &bool, _, cx| this.set_menubar(*on, cx))),
+            cx,
+        ));
 
         let perms = self.permissions.as_ref();
         let permissions = section("Permissions", cx)
@@ -356,28 +371,16 @@ impl Render for SystemView {
         let login_path = sys::launch_agent_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "~/Library/LaunchAgents/dev.rubeen.mbar.plist".into());
-        let login = section("Launch at login", cx).child(
-            h_flex()
-                .gap_3()
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .child(div().text_sm().child("Start mbar when you log in"))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(format!("Launch agent: {login_path}")),
-                        ),
-                )
-                .child(
-                    Switch::new("launch-at-login")
-                        .checked(self.launch_agent)
-                        .on_change(cx.listener(|this, on: &bool, window, cx| {
-                            this.set_launch_agent(*on, window, cx)
-                        })),
-                ),
-        );
+        let login = section("Launch at login", cx).child(setting_row(
+            "Start mbar when you log in",
+            format!("Launch agent: {login_path}"),
+            Switch::new("launch-at-login")
+                .checked(self.launch_agent)
+                .on_change(cx.listener(|this, on: &bool, window, cx| {
+                    this.set_launch_agent(*on, window, cx)
+                })),
+            cx,
+        ));
 
         v_flex()
             .size_full()

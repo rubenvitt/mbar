@@ -105,13 +105,23 @@ impl Graph {
             }
             _ => match split_key(key) {
                 KeySplit::Sub("color", rest) => {
-                    return cx.scoped("color", |cx| color_set_prop(&mut self.line_color, rest, v, cx))
+                    return cx.scoped("color", |cx| {
+                        color_set_prop(&mut self.line_color, rest, v, cx)
+                    })
                 }
                 KeySplit::Sub("fill_color", rest) => {
-                    return cx.scoped("fill_color", |cx| color_set_prop(&mut self.fill_color, rest, v, cx))
+                    return cx.scoped("fill_color", |cx| {
+                        color_set_prop(&mut self.fill_color, rest, v, cx)
+                    })
                 }
-                KeySplit::Sub(sub, _) => return Err(PropError::GraphInvalidSubdomain(sub.to_string())),
-                _ => return Err(PropError::GraphInvalidProperty(value::display_key(key).to_string())),
+                KeySplit::Sub(sub, _) => {
+                    return Err(PropError::GraphInvalidSubdomain(sub.to_string()))
+                }
+                _ => {
+                    return Err(PropError::GraphInvalidProperty(
+                        value::display_key(key).to_string(),
+                    ))
+                }
             },
         })
     }

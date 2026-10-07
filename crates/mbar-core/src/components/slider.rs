@@ -137,8 +137,14 @@ impl Slider {
                 KeySplit::Sub("knob", rest) => {
                     return cx.scoped("knob", |cx| self.knob.set_prop(rest, v, cx))
                 }
-                KeySplit::Sub(sub, _) => return Err(PropError::SliderInvalidSubdomain(sub.to_string())),
-                _ => return Err(PropError::SliderInvalidProperty(value::display_key(key).to_string())),
+                KeySplit::Sub(sub, _) => {
+                    return Err(PropError::SliderInvalidSubdomain(sub.to_string()))
+                }
+                _ => {
+                    return Err(PropError::SliderInvalidProperty(
+                        value::display_key(key).to_string(),
+                    ))
+                }
             },
         })
     }
@@ -199,8 +205,13 @@ mod tests {
         assert!(s.track.enabled && s.fill.enabled);
         assert!(s.set_prop("percentage", "150", &mut cx).unwrap());
         assert_eq!(s.percentage, 100);
-        assert!(s.set_prop("percentage", "150", &mut cx).unwrap(), "raw compare quirk");
-        assert!(s.set_prop("background.color", "0xff00ff00", &mut cx).unwrap());
+        assert!(
+            s.set_prop("percentage", "150", &mut cx).unwrap(),
+            "raw compare quirk"
+        );
+        assert!(s
+            .set_prop("background.color", "0xff00ff00", &mut cx)
+            .unwrap());
         assert_eq!(s.track.color.hex, 0xff00ff00);
         assert_eq!(s.fill.color.hex, 0xff0000ff);
         assert!(s.set_prop("background.height", "5", &mut cx).unwrap());

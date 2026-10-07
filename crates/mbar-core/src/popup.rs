@@ -6,7 +6,9 @@
 use crate::components::{align_name, Background};
 use crate::geometry::{Point, Rect};
 use crate::item::ItemId;
-use crate::props::{set_bool, set_i32, set_u32, AnimValue, PropCx, PropEffects, PropError, PropResult};
+use crate::props::{
+    set_bool, set_i32, set_u32, AnimValue, PropCx, PropEffects, PropError, PropResult,
+};
 use crate::value::{self, split_key, KeySplit};
 use std::fmt::Write;
 
@@ -149,8 +151,14 @@ impl Popup {
                 KeySplit::Sub("background", rest) => {
                     return cx.scoped("background", |cx| self.background.set_prop(rest, v, cx))
                 }
-                KeySplit::Sub(sub, _) => return Err(PropError::PopupInvalidSubdomain(sub.to_string())),
-                _ => return Err(PropError::PopupInvalidProperty(value::display_key(key).to_string())),
+                KeySplit::Sub(sub, _) => {
+                    return Err(PropError::PopupInvalidSubdomain(sub.to_string()))
+                }
+                _ => {
+                    return Err(PropError::PopupInvalidProperty(
+                        value::display_key(key).to_string(),
+                    ))
+                }
             },
         })
     }
@@ -184,7 +192,12 @@ impl Popup {
 
     /// `popup_serialize` at indent `i` (`item.md` §11 POPUP). `name_of` resolves member
     /// names (`(null)` for unnamed).
-    pub fn write_json(&self, out: &mut String, i: &str, name_of: &dyn Fn(ItemId) -> Option<String>) {
+    pub fn write_json(
+        &self,
+        out: &mut String,
+        i: &str,
+        name_of: &dyn Fn(ItemId) -> Option<String>,
+    ) {
         let _ = write!(
             out,
             "{i}\"drawing\": \"{}\",\n{i}\"horizontal\": \"{}\",\n{i}\"height\": {},\n\
@@ -200,7 +213,11 @@ impl Popup {
         self.background.write_json(out, &deeper, true);
         let _ = write!(out, "\n{i}}},\n{i}\"items\": [\n");
         for (n, id) in self.items.iter().enumerate() {
-            let _ = write!(out, "{i}\t \"{}\"", value::json_opt(name_of(*id).as_deref()));
+            let _ = write!(
+                out,
+                "{i}\t \"{}\"",
+                value::json_opt(name_of(*id).as_deref())
+            );
             if n + 1 < self.items.len() {
                 out.push_str(",\n");
             }
@@ -223,12 +240,17 @@ mod tests {
         let mut p = Popup::default();
         assert!(p.set_prop("drawing", "on", &mut cx).unwrap());
         assert!(p.set_prop("align", "center", &mut cx).unwrap());
-        assert!(p.set_prop("horizontal", "off", &mut cx).unwrap(), "always refreshes");
+        assert!(
+            p.set_prop("horizontal", "off", &mut cx).unwrap(),
+            "always refreshes"
+        );
         assert!(!p.set_prop("blur_radius", "5", &mut cx).unwrap());
         assert_eq!(p.blur_radius, 5);
         assert!(p.set_prop("height", "40", &mut cx).unwrap());
         assert!(p.overrides_cell_size);
-        assert!(p.set_prop("background.color", "0xff000000", &mut cx).unwrap());
+        assert!(p
+            .set_prop("background.color", "0xff000000", &mut cx)
+            .unwrap());
         assert_eq!(
             p.set_prop("x.y", "1", &mut cx).unwrap_err().to_string(),
             "[!] Popup: Invalid subdomain 'x'\n"
@@ -236,7 +258,9 @@ mod tests {
         p.items = vec![ItemId(1), ItemId(2)];
         let mut out = String::new();
         p.write_json(&mut out, "\t\t", &|id| Some(format!("i{}", id.0)));
-        assert!(out.starts_with("\t\t\"drawing\": \"on\",\n\t\t\"horizontal\": \"off\",\n\t\t\"height\": 40,\n"));
+        assert!(out.starts_with(
+            "\t\t\"drawing\": \"on\",\n\t\t\"horizontal\": \"off\",\n\t\t\"height\": 40,\n"
+        ));
         assert!(out.contains("\t\t\"align\": \"center\",\n"));
         assert!(out.ends_with("\t\t\"items\": [\n\t\t\t \"i1\",\n\t\t\t \"i2\"\n\t\t]"));
     }

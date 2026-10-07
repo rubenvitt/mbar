@@ -48,7 +48,11 @@ pub enum Primitive {
         border_color: Color,
     },
     /// Fill `color` through the picture's alpha (alias tint, `alias_draw`, Q4).
-    ImageMask { rect: Rect, key: ImageKey, color: Color },
+    ImageMask {
+        rect: Rect,
+        key: ImageKey,
+        color: Color,
+    },
     /// A graph (`graph_draw`, §8.5): `line` is the exact stroked polyline, `fill` the closed
     /// polygon painted after (on top of) the stroke.
     Graph {
@@ -69,11 +73,18 @@ pub enum Primitive {
         stroke_alpha: f32,
     },
     /// Intersect the clip with a (rounded) rect until the matching `PopClip`.
-    PushClip { rect: Rect, corner_radius: f32 },
+    PushClip {
+        rect: Rect,
+        corner_radius: f32,
+    },
     PopClip,
     /// Region behind which the platform realises a background blur (`blur_radius` of items;
     /// a child window behind the bar window).
-    BlurRegion { rect: Rect, corner_radius: f32, radius: u32 },
+    BlurRegion {
+        rect: Rect,
+        corner_radius: f32,
+        radius: u32,
+    },
 }
 
 /// The content of one window.

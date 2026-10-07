@@ -135,9 +135,15 @@ impl FontSpec {
         let mut out = Vec::new();
         for entry in f.split(',').filter(|e| !e.is_empty()) {
             if let Some((a, b)) = entry.split_once(':') {
-                let a_ok = !a.is_empty() && a.trim_start_matches(['-', '+']).chars().all(|c| c.is_ascii_digit());
+                let a_ok = !a.is_empty()
+                    && a.trim_start_matches(['-', '+'])
+                        .chars()
+                        .all(|c| c.is_ascii_digit());
                 let b_digits = b.trim_start_matches(['-', '+']);
-                let b_num: String = b_digits.chars().take_while(|c| c.is_ascii_digit()).collect();
+                let b_num: String = b_digits
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
                 if a_ok && !b_num.is_empty() {
                     out.push(FontFeature::Aat {
                         kind: value::parse_int(a),
@@ -178,9 +184,12 @@ impl FontSpec {
         Ok(match key {
             "size" => {
                 let from = AnimValue::Float(self.size);
-                cx.animate("size", from, AnimValue::Float(value::parse_float(v)), |a, _| {
-                    self.set_size(a.as_f32())
-                })
+                cx.animate(
+                    "size",
+                    from,
+                    AnimValue::Float(value::parse_float(v)),
+                    |a, _| self.set_size(a.as_f32()),
+                )
             }
             "family" => self.set_family(v),
             "style" => self.set_style(v),
@@ -189,7 +198,11 @@ impl FontSpec {
                 let on = value::parse_bool(v, self.typographical_width);
                 self.set_typographical_width(on)
             }
-            _ => return Err(PropError::TextInvalidProperty(value::display_key(key).to_string())),
+            _ => {
+                return Err(PropError::TextInvalidProperty(
+                    value::display_key(key).to_string(),
+                ))
+            }
         })
     }
 }
@@ -204,11 +217,26 @@ mod tests {
             FontSpec::parse_triplet("Hack Nerd Font:Bold:17.0"),
             ("Hack Nerd Font".into(), "Bold".into(), 17.0)
         );
-        assert_eq!(FontSpec::parse_triplet("SF Pro:Semibold"), ("SF Pro".into(), "Semibold".into(), 10.0));
-        assert_eq!(FontSpec::parse_triplet("Menlo"), ("Menlo".into(), "".into(), 10.0));
-        assert_eq!(FontSpec::parse_triplet(":Bold:12"), ("".into(), "".into(), 10.0));
-        assert_eq!(FontSpec::parse_triplet("Fam::12"), ("Fam".into(), "".into(), 10.0));
-        assert_eq!(FontSpec::parse_triplet("Fam:S:x"), ("Fam".into(), "S".into(), 10.0));
+        assert_eq!(
+            FontSpec::parse_triplet("SF Pro:Semibold"),
+            ("SF Pro".into(), "Semibold".into(), 10.0)
+        );
+        assert_eq!(
+            FontSpec::parse_triplet("Menlo"),
+            ("Menlo".into(), "".into(), 10.0)
+        );
+        assert_eq!(
+            FontSpec::parse_triplet(":Bold:12"),
+            ("".into(), "".into(), 10.0)
+        );
+        assert_eq!(
+            FontSpec::parse_triplet("Fam::12"),
+            ("Fam".into(), "".into(), 10.0)
+        );
+        assert_eq!(
+            FontSpec::parse_triplet("Fam:S:x"),
+            ("Fam".into(), "S".into(), 10.0)
+        );
         let long = "a".repeat(300);
         assert_eq!(FontSpec::parse_triplet(&long).0.len(), 254);
     }
@@ -222,12 +250,27 @@ mod tests {
         assert_eq!(
             f.parsed_features(),
             vec![
-                FontFeature::OpenType { tag: "tnum".into(), value: 1 },
-                FontFeature::OpenType { tag: "liga".into(), value: 0 },
-                FontFeature::Aat { kind: 1, selector: 0 },
-                FontFeature::OpenType { tag: "ss01".into(), value: 1 },
+                FontFeature::OpenType {
+                    tag: "tnum".into(),
+                    value: 1
+                },
+                FontFeature::OpenType {
+                    tag: "liga".into(),
+                    value: 0
+                },
+                FontFeature::Aat {
+                    kind: 1,
+                    selector: 0
+                },
+                FontFeature::OpenType {
+                    tag: "ss01".into(),
+                    value: 1
+                },
             ]
         );
-        assert_eq!(FontSpec::default().query_string(), "Hack Nerd Font:Bold:14.00");
+        assert_eq!(
+            FontSpec::default().query_string(),
+            "Hack Nerd Font:Bold:14.00"
+        );
     }
 }
