@@ -471,6 +471,12 @@ impl BarItem {
         if self.has_alias() {
             len = len.wrapping_add(self.alias.length() as i32);
         }
+        if self.item_type == ItemType::AppMenu {
+            // Extension: the menu title cells measured by the last layout pass.
+            for r in &self.app_menu.title_bounds {
+                len = len.wrapping_add(r.width.max(0.0) as i32);
+            }
+        }
         len.max(0) as u32
     }
 

@@ -1984,12 +1984,15 @@ impl Runtime {
         if self.monitor_stats {
             self.fill_stats();
             let text = query::stats_json(&self.stats, self.model.items.len());
+            // One compact line, `"type"` first (key order of the rest is serde's).
             let line = match serde_json::from_str::<serde_json::Value>(&text) {
-                Ok(serde_json::Value::Object(mut map)) => {
-                    let mut out = serde_json::Map::new();
-                    out.insert("type".into(), serde_json::Value::String("stats".into()));
-                    out.append(&mut map);
-                    serde_json::Value::Object(out).to_string()
+                Ok(v @ serde_json::Value::Object(_)) => {
+                    let compact = v.to_string();
+                    if compact.len() > 2 {
+                        format!("{{\"type\":\"stats\",{}", &compact[1..])
+                    } else {
+                        "{\"type\":\"stats\"}".to_string()
+                    }
                 }
                 _ => "{\"type\":\"stats\"}".to_string(),
             };

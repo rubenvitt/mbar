@@ -146,10 +146,7 @@ fn artwork_size(model: &Model) -> Option<Size> {
 // Item metrics used by layout (app_menu extension + D11)
 // ---------------------------------------------------------------------------------------
 
-/// Width of the `app_menu` titles (extension), from the title cells measured this pass.
-///
-/// TODO(shared): `BarItem::content_length` should include this; until then layout uses
-/// [`content_len`] / [`item_len`] so `app_menu` items reserve their space.
+/// Width of the `app_menu` title cells measured this pass (the "middle" component).
 fn app_menu_len(item: &BarItem) -> u32 {
     if item.item_type != ItemType::AppMenu {
         return 0;
@@ -160,9 +157,9 @@ fn app_menu_len(item: &BarItem) -> u32 {
         .fold(0u32, |a, r| a.wrapping_add(to_u32(r.width as f64)))
 }
 
-/// `bar_item_get_content_length` (+ app_menu titles).
+/// `bar_item_get_content_length` (includes `app_menu` title cells, see `BarItem::content_length`).
 fn content_len(item: &BarItem) -> u32 {
-    item.content_length().wrapping_add(app_menu_len(item))
+    item.content_length()
 }
 
 /// `bar_item_get_length(item, ignore_override)` (`item.md` §4.1) on top of [`content_len`];
