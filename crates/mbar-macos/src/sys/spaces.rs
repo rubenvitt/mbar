@@ -379,6 +379,25 @@ pub fn window_is_suitable(wid: u32) -> bool {
     !suitable_windows(arr.as_opaque()).is_empty()
 }
 
+/// `window_send_to_space` (`bar.md` §6.4, non-sticky bars on a space change):
+/// `SLSMoveWindowsToManagedSpace(cid, [wid…] (SInt32), dsid)`. Returns `false` when
+/// there is nothing to do or SkyLight lacks the symbol.
+pub fn move_windows_to_space(wids: &[u32], dsid: u64) -> bool {
+    if wids.is_empty() || dsid == 0 {
+        return false;
+    }
+    let Some(f) = sls::SLSMoveWindowsToManagedSpace() else {
+        return false;
+    };
+    let nums: Vec<CFRetained<CFNumber>> =
+        wids.iter().map(|w| CFNumber::new_i32(*w as i32)).collect();
+    let arr = CFArray::from_retained_objects(&nums);
+    // SAFETY: valid connection id, a CFArray of CFNumber window ids owned by this process
+    // and a plain space id; the call retains nothing we pass.
+    unsafe { f(sls::cid(), arr.as_opaque(), dsid) };
+    true
+}
+
 /// `space.<n>` image: `SLSHWCaptureSpace(cid, dsid_of(n), 0)[0]` (one-shot snapshot).
 pub fn capture_space(n: u32) -> Option<CFRetained<CGImage>> {
     let dsid = space_at_index(n);

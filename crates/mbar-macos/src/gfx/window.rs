@@ -448,6 +448,11 @@ impl BarWindow {
         }
     }
 
+    /// Whether the window joins all spaces (see [`set_sticky`](Self::set_sticky)).
+    pub fn is_sticky(&self) -> bool {
+        self.sticky
+    }
+
     fn apply_collection_behavior(&self) {
         let base = NSWindowCollectionBehavior::Stationary
             | NSWindowCollectionBehavior::IgnoresCycle

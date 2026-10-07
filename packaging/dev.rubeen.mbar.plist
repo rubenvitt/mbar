@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent template for mbar. `make install-agent` fills in the placeholders and
+  writes the result to ~/Library/LaunchAgents/dev.rubeen.mbar.plist:
+
+    @MBAR_BIN@  absolute path of the mbar binary (launchd does not search PATH)
+    @HOME@      the user's home directory (launchd does not expand ~)
+    @PATH@      PATH for the daemon and the plugin scripts it runs
+
+  The label matches the "launch at login" switch of mbar-ui.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.rubeen.mbar</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>@MBAR_BIN@</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>@PATH@</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<!-- Restart after a crash. A clean exit (status 0, e.g. the exit command) stays stopped. -->
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<key>StandardOutPath</key>
+	<string>@HOME@/Library/Logs/mbar.log</string>
+	<key>StandardErrorPath</key>
+	<string>@HOME@/Library/Logs/mbar.log</string>
+</dict>
+</plist>

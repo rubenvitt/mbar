@@ -35,8 +35,8 @@ use crate::layout::{self, BarLayout, Layout, PopupLayout, WindowHit};
 use crate::model::Model;
 use crate::platform::{
     Effect, FrameOutput, ImageInfo, Input, LuaRequest, MouseInput, MouseKind, OsEvent,
-    PlatformRequest, ReplyToken, Resources, SpaceMove, SystemQuery, SystemValue, WindowKey,
-    WindowUpdate,
+    PlatformRequest, ReplyToken, Resources, SpaceMove, SystemQuery, SystemValue, TextKey,
+    WindowKey, WindowUpdate,
 };
 use crate::props::{
     AnimSpec, AnimTarget, HiddenRequest, PropCx, PropEffects, PropRequest, PropResult,
@@ -657,6 +657,39 @@ impl Runtime {
         self.stats.lua_callbacks = self.stats.lua_callbacks.saturating_add(count);
         self.lua_total_us = self.lua_total_us.saturating_add(total_us);
         self.stats.lua_max_us = self.stats.lua_max_us.max(max_us);
+    }
+
+    /// Calls `f` for every [`TextKey`] the runtime still references, i.e. every text line
+    /// a current or future scene can draw: `icon`, `label` and `slider.knob` of every item
+    /// (bar and popup members alike) and of the `--default` template, the measured
+    /// `app_menu` titles, and the title lines of the last layout pass. Keys may be
+    /// reported more than once. Platforms that cache text runs per key use this to prune
+    /// exactly (`TextCache::prune_live` on macOS) instead of evicting by age, so a
+    /// long-unchanged label is never dropped while it is still shown.
+    pub fn for_each_text_key(&self, f: &mut dyn FnMut(TextKey)) {
+        fn item_keys(item: &BarItem, f: &mut dyn FnMut(TextKey)) {
+            for text in [&item.icon, &item.label, &item.slider.knob] {
+                if let Some(k) = text.line {
+                    f(k);
+                }
+            }
+            for cell in &item.app_menu.measured.cells {
+                f(cell.key);
+            }
+        }
+        item_keys(&self.model.default_item, f);
+        for item in &self.model.items {
+            item_keys(item, f);
+        }
+        if let Some(layout) = &self.layout {
+            let bar_lines = layout.bars.iter().flat_map(|b| &b.menu_lines);
+            let popup_lines = layout.popups.iter().flat_map(|p| &p.menu_lines);
+            for (_, lines) in bar_lines.chain(popup_lines) {
+                for line in lines {
+                    f(line.key);
+                }
+            }
+        }
     }
 
     /// Tells the runtime which `--monitor` streams still have subscribers, so it stops
@@ -1454,7 +1487,9 @@ impl Runtime {
     }
 
     /// `bar_manager_remove_item` (`item.md` §10.5): popup lists, brackets, popup children,
-    /// D18 `animator.cancel_target`, provider stop.
+    /// D18 `animator.cancel_target`, provider stop, alias capture stop
+    /// ([`PlatformRequest::RemoveAlias`]; an item's type never changes after `--add`, so
+    /// removal is the only way an alias item goes away).
     fn remove_item(&mut self, id: ItemId, effects: &mut Vec<Effect>) {
         let Some(idx) = self.model.index_of(id) else {
             return;
@@ -1494,6 +1529,9 @@ impl Runtime {
         let item = self.model.items.remove(idx);
         if item.provider.kind.is_some() {
             effects.push(Effect::Platform(PlatformRequest::StopProvider { item: id }));
+        }
+        if item.has_alias() {
+            effects.push(Effect::Platform(PlatformRequest::RemoveAlias { item: id }));
         }
         self.model.needs_ordering = true;
         self.model.bar_needs_update = true;
@@ -1696,6 +1734,9 @@ impl Runtime {
                 effects.push(Effect::Platform(PlatformRequest::StopProvider {
                     item: it.id,
                 }));
+            }
+            if it.has_alias() {
+                effects.push(Effect::Platform(PlatformRequest::RemoveAlias { item: it.id }));
             }
         }
         self.animator.clear();
@@ -3335,5 +3376,118 @@ mod tests {
             rt.run_message(&args(&["--set", &sel, "label=x"]), &mut fx, &mut res);
         }
         assert!(rt.regex_cache.len() <= REGEX_CACHE_SIZE);
+    }
+
+    fn runtime() -> (Runtime, HeadlessResources) {
+        let mut res = HeadlessResources::default();
+        let mut rt = Runtime::new(RuntimeConfig {
+            bar_name: "mbar".into(),
+            home: "/home/u".into(),
+            config_path: None,
+        });
+        rt.begin(&mut res);
+        (rt, res)
+    }
+
+    fn msg(rt: &mut Runtime, res: &mut HeadlessResources, a: &[&str]) -> Vec<Effect> {
+        let args = a.iter().map(|s| s.to_string()).collect();
+        rt.handle(
+            Input::Message {
+                args,
+                reply: ReplyToken(1),
+            },
+            res,
+        )
+    }
+
+    fn text_keys(rt: &Runtime) -> std::collections::HashSet<TextKey> {
+        let mut keys = std::collections::HashSet::new();
+        rt.for_each_text_key(&mut |k| {
+            keys.insert(k);
+        });
+        keys
+    }
+
+    /// Every drawable text line is reported as live (macOS `TextCache` prunes by this),
+    /// however long ago it was measured; replaced lines are not.
+    #[test]
+    fn for_each_text_key_reports_every_drawable_line() {
+        let (mut rt, mut res) = runtime();
+        msg(
+            &mut rt,
+            &mut res,
+            &["--add", "item", "a", "left", "--set", "a", "icon=I", "label=old"],
+        );
+        msg(&mut rt, &mut res, &["--add", "item", "p", "popup.a"]);
+        msg(&mut rt, &mut res, &["--set", "p", "label=in popup"]);
+        msg(&mut rt, &mut res, &["--add", "slider", "s", "right", "100"]);
+        msg(&mut rt, &mut res, &["--set", "s", "slider.knob=K"]);
+        msg(&mut rt, &mut res, &["--add", "app_menu", "m", "left"]);
+        rt.handle(
+            Input::MenuTitles {
+                app: "Finder".into(),
+                titles: vec!["Apple".into(), "File".into(), "Edit".into()],
+            },
+            &mut res,
+        );
+        rt.frame(res.now, &mut res);
+        let old = rt.model.item(rt.model.find("a").unwrap()).unwrap().label.line;
+        msg(&mut rt, &mut res, &["--set", "a", "label=new"]);
+        // Many unrelated updates later the popup label is still live.
+        for i in 0..50 {
+            msg(&mut rt, &mut res, &["--set", "s", &format!("icon={i}")]);
+            rt.frame(res.now, &mut res);
+        }
+
+        let keys = text_keys(&rt);
+        let line = |name: &str, f: fn(&BarItem) -> Option<TextKey>| {
+            f(rt.model.item(rt.model.find(name).unwrap()).unwrap()).unwrap()
+        };
+        assert!(keys.contains(&line("a", |i| i.icon.line)));
+        assert!(keys.contains(&line("a", |i| i.label.line)));
+        assert!(keys.contains(&line("p", |i| i.label.line)));
+        assert!(keys.contains(&line("s", |i| i.slider.knob.line)));
+        assert!(keys.contains(&line("s", |i| i.icon.line)));
+        let font = rt.model.item(rt.model.find("p").unwrap()).unwrap().label.font.clone();
+        let popup_key = res.text_metrics(&font, "in popup").key;
+        assert!(keys.contains(&popup_key));
+        let menu = rt.model.item(rt.model.find("m").unwrap()).unwrap();
+        assert!(!menu.app_menu.measured.cells.is_empty());
+        for cell in &menu.app_menu.measured.cells {
+            assert!(keys.contains(&cell.key), "app_menu title not live");
+        }
+        // The replaced label is no longer referenced.
+        assert_ne!(old, Some(line("a", |i| i.label.line)));
+        assert!(!keys.contains(&old.unwrap()));
+    }
+
+    fn remove_alias_requests(fx: &[Effect]) -> Vec<ItemId> {
+        fx.iter()
+            .filter_map(|e| match e {
+                Effect::Platform(PlatformRequest::RemoveAlias { item }) => Some(*item),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Removing an alias item (or resetting the model) stops its captures on the
+    /// platform; other items emit nothing.
+    #[test]
+    fn removing_an_alias_emits_remove_alias() {
+        let (mut rt, mut res) = runtime();
+        msg(&mut rt, &mut res, &["--add", "alias", "Control Center,Clock", "right"]);
+        msg(&mut rt, &mut res, &["--add", "alias", "Control Center,WiFi", "right"]);
+        msg(&mut rt, &mut res, &["--add", "item", "plain", "left"]);
+        let clock = rt.model.find("Control Center,Clock").unwrap();
+        let wifi = rt.model.find("Control Center,WiFi").unwrap();
+
+        let fx = msg(&mut rt, &mut res, &["--remove", "plain"]);
+        assert!(remove_alias_requests(&fx).is_empty());
+
+        let fx = msg(&mut rt, &mut res, &["--remove", "Control Center,Clock"]);
+        assert_eq!(remove_alias_requests(&fx), vec![clock]);
+
+        let fx = msg(&mut rt, &mut res, &["--reload"]);
+        assert_eq!(remove_alias_requests(&fx), vec![wifi]);
     }
 }

@@ -12,14 +12,21 @@
 //!   SkyLight) ordered directly below their parent.
 //! * View mouse events are forwarded to the platform through a [`ViewMouseSink`] with the
 //!   window's key.
+//! * `space_moves` (`bar_change_space`, `bar.md` §6.4: after a space change with
+//!   `--bar sticky=off`) send a non-sticky window and its blur children to the display's
+//!   new current space with `SLSMoveWindowsToManagedSpace`. Sticky windows join every space
+//!   through `canJoinAllSpaces` and are never moved; non-sticky ones never get that flag.
+//! * [`WindowManager::for_each_text_key`] reports the text keys of the kept scenes, so text
+//!   cache pruning never drops a line a re-render still needs.
 
 use super::convert::{self, blur_regions, scene_to_drawlist, BlurSpec};
 use super::resources::MacResources;
 use crate::gfx::scene::{DrawList, Rect as GRect};
 use crate::gfx::window::{BarWindow, MouseEvent};
+use crate::sys::spaces;
 use mbar_core::geometry::{Point, Rect};
-use mbar_core::platform::{FrameOutput, WindowKey, WindowUpdate};
-use mbar_core::scene::Scene;
+use mbar_core::platform::{FrameOutput, SpaceMove, TextKey, WindowKey, WindowUpdate};
+use mbar_core::scene::{Primitive, Scene};
 use objc2::MainThreadMarker;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -138,6 +145,48 @@ impl WindowManager {
         }
         if reorder {
             self.reorder();
+        }
+        self.move_to_spaces(&frame.space_moves);
+    }
+
+    /// `bar_change_space` / `popup_change_space`: every listed non-sticky window (with its
+    /// blur children) goes to space `dsid`, one SkyLight call per target space.
+    fn move_to_spaces(&self, moves: &[SpaceMove]) {
+        if moves.is_empty() {
+            return;
+        }
+        let mut targets: Vec<(u64, Vec<u32>)> = Vec::new();
+        for mv in moves {
+            let Some(m) = self.windows.get(&mv.key) else {
+                continue;
+            };
+            if m.win.is_sticky() {
+                continue;
+            }
+            let wids = std::iter::once(m.win.window_number())
+                .chain(m.children.iter().map(|c| c.win.window_number()))
+                .filter(|n| *n > 0)
+                .map(|n| n as u32);
+            match targets.iter_mut().find(|(d, _)| *d == mv.dsid) {
+                Some((_, list)) => list.extend(wids),
+                None => targets.push((mv.dsid, wids.collect())),
+            }
+        }
+        for (dsid, wids) in targets {
+            if !spaces::move_windows_to_space(&wids, dsid) {
+                log::debug!("cannot move {} window(s) to space {dsid}", wids.len());
+            }
+        }
+    }
+
+    /// Calls `f` for every text key referenced by the scenes kept for re-rendering.
+    pub fn for_each_text_key(&self, f: &mut dyn FnMut(TextKey)) {
+        for m in self.windows.values() {
+            for p in &m.scene.primitives {
+                if let Primitive::Text { key, .. } = p {
+                    f(*key);
+                }
+            }
         }
     }
 

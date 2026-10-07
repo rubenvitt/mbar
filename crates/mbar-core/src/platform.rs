@@ -354,6 +354,12 @@ pub enum PlatformRequest {
         name: Option<String>,
         forced: bool,
     },
+    /// The alias item `item` is gone (`--remove`, a failed `--add`, `--reload`/hotload):
+    /// stop recapturing it and free its picture. Captures still in flight for it are
+    /// dropped by the platform.
+    RemoveAlias {
+        item: ItemId,
+    },
     /// Ask for Screen Recording permission (alias setup).
     RequestScreenCapture,
     /// (Re)configure the native provider of `item` (`provider=` extension).

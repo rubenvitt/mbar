@@ -5,7 +5,9 @@
 //! Keys handed to the core:
 //! * [`TextKey`]: a hash of `(FontId, string)` owned by [`TextCache`], which remembers the
 //!   pair so a run evicted from the gfx LRU cache is transparently re-measured when the
-//!   scene is drawn again.
+//!   scene is drawn again. The table is pruned only with the core's list of live keys
+//!   ([`TextCache::prune_live`], fed by `Runtime::for_each_text_key`), so a key the core
+//!   still draws always resolves, however long ago it was measured.
 //! * [`ImageKey`]: the [`ImageId`] of the store (see [`convert::image_key`]). Pictures that
 //!   are replaced in place (alias captures, `space.<n>`, media artwork) keep their id and
 //!   bump a generation that feeds [`ImageInfo::hash`], so the core's change detection
@@ -27,7 +29,7 @@ use objc2::MainThreadMarker;
 use objc2_core_foundation::{CFRetained, CGRect};
 use objc2_core_graphics::CGImage;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
@@ -58,17 +60,26 @@ struct TextEntry {
     used: u64,
 }
 
-/// Default bound of remembered `(font, string)` pairs before LRU pruning.
+/// Default bound of remembered `(font, string)` pairs before pruning.
 pub const DEFAULT_TEXT_ENTRIES: usize = 16 * 1024;
 
 /// The gfx [`TextSystem`] plus the `TextKey → (font, string)` table the core's keys
 /// resolve through.
+///
+/// Pruning is liveness based: once the table grows past its bound, [`needs_prune`]
+/// turns true and the platform calls [`prune_live`] with the keys the core still
+/// references. Live keys are always kept; among the others the least recently used go
+/// first (they are re-measured on demand if the core asks for them again).
+///
+/// [`needs_prune`]: TextCache::needs_prune
+/// [`prune_live`]: TextCache::prune_live
 pub struct TextCache {
     pub system: TextSystem,
     entries: HashMap<TextKey, TextEntry>,
     clock: u64,
     max_entries: usize,
     stamps: Vec<u64>,
+    live: HashSet<TextKey>,
 }
 
 impl TextCache {
@@ -79,6 +90,7 @@ impl TextCache {
             clock: 0,
             max_entries: DEFAULT_TEXT_ENTRIES,
             stamps: Vec::new(),
+            live: HashSet::new(),
         }
     }
 
@@ -130,9 +142,6 @@ impl TextCache {
                 }
             }
         }
-        if self.entries.len() > self.max_entries {
-            self.prune();
-        }
         convert::text_metrics(TextKey(k), text.is_empty(), &layout)
     }
 
@@ -146,24 +155,40 @@ impl TextCache {
         Some(e.run)
     }
 
-    /// Drops the least recently used quarter of the remembered lines.
-    fn prune(&mut self) {
-        let target = self.max_entries * 3 / 4;
-        let remove = self.entries.len().saturating_sub(target);
-        if remove == 0 {
-            return;
-        }
-        self.stamps.clear();
-        self.stamps.extend(self.entries.values().map(|e| e.used));
-        let (_, cutoff, _) = self.stamps.select_nth_unstable(remove - 1);
-        let cutoff = *cutoff;
-        self.entries.retain(|_, e| e.used > cutoff);
+    /// The table outgrew its bound: call [`prune_live`](Self::prune_live).
+    pub fn needs_prune(&self) -> bool {
+        self.entries.len() > self.max_entries
     }
 
-    /// Keeps only the keys for which `live` returns true (exact pruning once the core can
-    /// enumerate its live text keys).
-    pub fn retain_keys(&mut self, mut live: impl FnMut(TextKey) -> bool) {
-        self.entries.retain(|k, _| live(*k));
+    /// Shrinks the table to three quarters of its bound without ever dropping a key that
+    /// `for_each_live` reports (`Runtime::for_each_text_key`, plus the scenes the window
+    /// manager keeps for re-rendering). Unreferenced lines go least recently used first;
+    /// if the live set alone exceeds the target, every unreferenced line is dropped.
+    pub fn prune_live(&mut self, for_each_live: impl FnOnce(&mut dyn FnMut(TextKey))) {
+        let target = self.max_entries * 3 / 4;
+        if self.entries.len() <= target {
+            return;
+        }
+        let mut live = std::mem::take(&mut self.live);
+        live.clear();
+        for_each_live(&mut |k| {
+            live.insert(k);
+        });
+        self.stamps.clear();
+        self.stamps.extend(
+            self.entries
+                .iter()
+                .filter(|(k, _)| !live.contains(k))
+                .map(|(_, e)| e.used),
+        );
+        let remove = self.entries.len().saturating_sub(target).min(self.stamps.len());
+        if remove > 0 {
+            let (_, cutoff, _) = self.stamps.select_nth_unstable(remove - 1);
+            let cutoff = *cutoff;
+            self.entries
+                .retain(|k, e| e.used > cutoff || live.contains(k));
+        }
+        self.live = live;
     }
 }
 
@@ -245,6 +270,14 @@ impl ImageCache {
             self.aliases.insert(id, iid);
         }
         Some((info, changed))
+    }
+
+    /// Frees the alias picture of item `id` (the item was removed).
+    pub fn remove_alias(&mut self, id: u64) {
+        if let Some(iid) = self.aliases.remove(&id) {
+            self.generations.remove(&iid);
+            self.store.remove(iid);
+        }
     }
 
     /// `space.<n>` capture (1 px = 1 pt).

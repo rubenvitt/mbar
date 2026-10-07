@@ -13,6 +13,7 @@
 //! | `ObserveNotification(n)` | `SystemEvents::observe(n)` (distributed center) |
 //! | `LoadFont(path)` | `TextSystem::register_font` (process scope) |
 //! | `CaptureAlias{item, owner, name, forced}` | `AliasScheduler::set(item, owner, name, 0)` + `refresh_now` (capture off the main thread; reply `Input::AliasImage`) |
+//! | `RemoveAlias{item}` | `AliasScheduler::remove(item)`, free the picture slot; captures still in flight for it are dropped |
 //! | `RequestScreenCapture` | `CGRequestScreenCaptureAccess` once per process, if not yet granted |
 //! | `StartProvider{item, provider, freq, args}` | `Providers::subscribe(item, …)` |
 //! | `StopProvider{item}` | `Providers::unsubscribe(item)` |
@@ -38,7 +39,7 @@ use mbar_core::geometry::Point;
 use mbar_core::item::ItemId;
 use mbar_core::platform::{Input, OsEvent, PlatformRequest, WindowKey};
 use objc2::MainThreadMarker;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 
 /// Result of translating one [`SysEvent`].
@@ -71,6 +72,9 @@ pub struct Services {
     alias_forced: HashMap<u64, bool>,
     /// Last `(window_id, frame)` per alias, for dropping unchanged unforced captures.
     alias_last: HashMap<u64, (u32, mbar_core::geometry::Rect)>,
+    /// Alias items with a capture schedule (between `CaptureAlias` and `RemoveAlias`);
+    /// late captures of other ids are dropped.
+    alias_live: HashSet<u64>,
     hotload: Option<HotloadWatcher>,
     mach: Option<MachServer>,
     mach_tx: Option<mpsc::Sender<(String, Vec<u8>)>>,
@@ -122,6 +126,7 @@ impl Services {
             aliases: None,
             alias_forced: HashMap::new(),
             alias_last: HashMap::new(),
+            alias_live: HashSet::new(),
             hotload,
             mach,
             mach_tx: None,
@@ -191,6 +196,10 @@ impl Services {
                 disabled,
                 ..
             } => {
+                if !self.alias_live.contains(&id) {
+                    // The item was removed while this capture was running.
+                    return Translated::Nothing;
+                }
                 let forced = self.alias_forced.remove(&id).unwrap_or(false);
                 let frame = core_rect(&frame);
                 let size = Some((frame.width, frame.height)).filter(|(w, h)| *w > 0.0 && *h > 0.0);
@@ -265,7 +274,7 @@ impl Services {
     }
 
     /// Executes one platform request (see the module table).
-    pub fn execute(&mut self, req: PlatformRequest, _res: &mut MacResources) {
+    pub fn execute(&mut self, req: PlatformRequest, res: &mut MacResources) {
         match req {
             PlatformRequest::StartVolumeEvents => self.events.start_volume_events(),
             PlatformRequest::StartBrightnessEvents => self.events.start_brightness_events(),
@@ -290,8 +299,18 @@ impl Services {
                     .get_or_insert_with(|| AliasScheduler::new(sink));
                 s.set(item.0, &owner, name.as_deref(), 0);
                 s.refresh_now(item.0);
+                self.alias_live.insert(item.0);
                 let f = self.alias_forced.entry(item.0).or_insert(false);
                 *f |= forced;
+            }
+            PlatformRequest::RemoveAlias { item } => {
+                if let Some(s) = &self.aliases {
+                    s.remove(item.0);
+                }
+                self.alias_live.remove(&item.0);
+                self.alias_forced.remove(&item.0);
+                self.alias_last.remove(&item.0);
+                res.images.remove_alias(item.0);
             }
             PlatformRequest::RequestScreenCapture => {
                 if !self.screen_capture_requested && !alias::screen_capture_preflight() {

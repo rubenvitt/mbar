@@ -42,6 +42,7 @@ private_fns! { SKYLIGHT =>
     fn SLSHWCaptureWindowList(i32, *const u32, i32, u32) -> *const CFArray;
     fn SLSCaptureWindowsContentsToRectWithOptions(i32, *const u32, bool, CGRect, u32, *mut *const CGImage) -> i32;
     fn SLSGetScreenRectForWindow(i32, u32, *mut CGRect) -> i32;
+    fn SLSMoveWindowsToManagedSpace(i32, *const CFArray, u64) -> ();
 }
 
 /// DisplayServices brightness callback (a `CFNotificationCallback`).
