@@ -1,6 +1,6 @@
 # mbar: build, test and install helpers.
 #
-#   make release                       optimized build of the bar (target/release/mbar)
+#   make release                       optimized build of the bar ($(TARGET_DIR)/release/mbar)
 #   make install PREFIX=$HOME/.local   install mbar + `sketchybar` symlink (after `make release`)
 #   make install-agent                 start mbar at login (LaunchAgent dev.rubeen.mbar)
 #   make ui                            build the management app (crates/mbar-ui)
@@ -19,6 +19,13 @@ AGENT_PLIST := $(AGENT_DIR)/$(LABEL).plist
 AGENT_PATH  := $(BINDIR):/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 UI_DIR      := crates/mbar-ui
 GUI_DOMAIN   = gui/$(shell id -u)
+
+# cargo may build elsewhere (CARGO_TARGET_DIR, build.target-dir in ~/.cargo/config.toml).
+TARGET_DIR    := $(shell $(CARGO) metadata --format-version 1 --no-deps 2>/dev/null | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+UI_TARGET_DIR := $(shell cd $(UI_DIR) && $(CARGO) metadata --format-version 1 --no-deps 2>/dev/null | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+# Fall back to cargo's default if `cargo metadata` is unavailable.
+TARGET_DIR    := $(or $(TARGET_DIR),target)
+UI_TARGET_DIR := $(or $(UI_TARGET_DIR),$(UI_DIR)/target)
 
 .PHONY: all help build release test lint fmt ui ui-test install install-ui \
         install-agent uninstall-agent uninstall clean
@@ -64,9 +71,9 @@ ui-test:
 	cd $(UI_DIR) && $(CARGO) test --no-default-features
 
 install:
-	@test -x target/release/mbar || { echo "target/release/mbar not found: run 'make release' first"; exit 1; }
+	@test -x "$(TARGET_DIR)/release/mbar" || { echo "$(TARGET_DIR)/release/mbar not found: run 'make release' first"; exit 1; }
 	install -d "$(DESTDIR)$(BINDIR)" "$(DESTDIR)$(DATADIR)"
-	install -m 755 target/release/mbar "$(DESTDIR)$(BINDIR)/mbar"
+	install -m 755 "$(TARGET_DIR)/release/mbar" "$(DESTDIR)$(BINDIR)/mbar"
 	install -m 644 lua/mbar.d.lua "$(DESTDIR)$(DATADIR)/mbar.d.lua"
 ifeq ($(SKETCHYBAR_LINK),1)
 	@if [ -e "$(DESTDIR)$(BINDIR)/sketchybar" ] && [ ! -L "$(DESTDIR)$(BINDIR)/sketchybar" ]; then \
@@ -78,9 +85,9 @@ ifeq ($(SKETCHYBAR_LINK),1)
 endif
 
 install-ui:
-	@test -x $(UI_DIR)/target/release/mbar-ui || { echo "run 'make ui' first"; exit 1; }
+	@test -x "$(UI_TARGET_DIR)/release/mbar-ui" || { echo "run 'make ui' first"; exit 1; }
 	install -d "$(DESTDIR)$(BINDIR)"
-	install -m 755 $(UI_DIR)/target/release/mbar-ui "$(DESTDIR)$(BINDIR)/mbar-ui"
+	install -m 755 "$(UI_TARGET_DIR)/release/mbar-ui" "$(DESTDIR)$(BINDIR)/mbar-ui"
 
 install-agent:
 	@test "$$(uname -s)" = Darwin || { echo "install-agent: macOS only"; exit 1; }
