@@ -12,8 +12,11 @@ use mbar_app::update::{decide, record, Action, UpdateState};
 
 /// First check this long after the daemon starts.
 const FIRST_CHECK_SECS: u64 = 120;
-/// Then one check per this interval.
+/// Then one check per this interval (wall-clock time).
 const CHECK_INTERVAL_SECS: u64 = 86_400;
+/// How often the thread wakes to see whether the next check is due. `thread::sleep`
+/// does not advance while a Mac sleeps, so one 24 h sleep could stretch over days.
+const WAKE_SECS: u64 = 3_600;
 
 /// Everything the check needs from the outside world (a fake in the tests, the
 /// `curl`/`defaults`/`open`/`launchctl` runner on macOS).
@@ -49,8 +52,11 @@ pub fn check_once(sys: &dyn System, bundle: &AppBundle, own_build: u64) -> Actio
     let mut state = UpdateState::from_json(&sys.load_state());
     let on_disk = sys.bundle_build().unwrap_or(own_build);
     let auto = sys.auto_checks().unwrap_or(bundle.auto_checks_default);
-    // A newer bundle on disk is handled without the network (and even with checks off).
-    let latest = if auto && on_disk <= own_build {
+    // A pending restart for a newer bundle on disk is handled without the network (and
+    // even with checks off). After that restart failed, the appcast is read again so a
+    // release newer than the bundle on disk is still offered.
+    let restart_pending = on_disk > own_build && state.restarted_for_build != Some(on_disk);
+    let latest = if auto && !restart_pending {
         sys.feed_override()
             .or_else(|| bundle.feed_url.clone())
             .and_then(|url| sys.fetch(&url))
@@ -121,8 +127,15 @@ impl StateFile {
             std::fs::create_dir_all(dir)
                 .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         }
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, json).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+        // Same directory (so the rename is atomic); per process, so daemons of several
+        // bars never write into each other's temp file.
+        let tmp = self
+            .path
+            .with_extension(format!("json.{}.tmp", std::process::id()));
+        std::fs::write(&tmp, json).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("cannot write {}: {e}", tmp.display())
+        })?;
         std::fs::rename(&tmp, &self.path).map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
             format!("cannot replace {shown}: {e}")
@@ -130,22 +143,38 @@ impl StateFile {
     }
 }
 
+/// Whether the next check is due, `last` and `now` in Unix seconds. A clock that went
+/// backwards counts as due rather than postponing checks until it catches up.
+fn check_due(last: u64, now: u64) -> bool {
+    now < last || now - last >= CHECK_INTERVAL_SECS
+}
+
 /// The system runner for this platform, or `None` where there is none (yet).
 ///
 /// TODO(Task 6, macOS): under `#[cfg(target_os = "macos")]` return
-/// `Some(Box::new(real::MacSystem { bundle_root: bundle.root.clone(), state }))`, the
-/// `curl`/`sw_vers`/`defaults`/`open -b dev.rubeen.mbar --args --update`/
-/// `launchctl kickstart -k gui/<uid>/dev.rubeen.mbar` runner whose `ui_running`/
-/// `notify_ui` use `mbar_macos::sys::apps` (notification
-/// `dev.rubeen.mbar.checkForUpdates`) and whose `load_state`/`save_state` delegate to
-/// `state`. Keep `None` on other platforms.
+/// `Some(Box::new(real::MacSystem { bundle_root: bundle.root.clone(), state }))` and keep
+/// `None` on other platforms. `real::MacSystem` (a `#[cfg(target_os = "macos")] mod
+/// real` in this file, fields `bundle_root: PathBuf`, `state: StateFile`, so it is
+/// `Send`) implements [`System`] as in the plan's Task 6 Step 4:
+/// - `fetch`: `/usr/bin/curl -fsSL --max-time 30 <url>`, `None` on non-zero exit;
+/// - `os_version`: `/usr/bin/sw_vers -productVersion`;
+/// - `auto_checks` / `feed_override`: `/usr/bin/defaults read dev.rubeen.mbar
+///   SUEnableAutomaticChecks` (`1`/`true`/`YES` → true) / `SUFeedURL` (empty → `None`);
+/// - `ui_running`: `mbar_macos::sys::apps::is_app_running("dev.rubeen.mbar")`;
+/// - `notify_ui`: `mbar_macos::sys::apps::post_distributed("dev.rubeen.mbar.checkForUpdates")`;
+/// - `open_ui_update`: `/usr/bin/open -b dev.rubeen.mbar --args --update`;
+/// - `restart_self`: `/bin/launchctl kickstart -k gui/<libc::getuid()>/dev.rubeen.mbar`;
+/// - `now`: `SystemTime` Unix seconds;
+/// - `load_state` / `save_state`: `self.state.load()` / `self.state.save(json)`;
+/// - `bundle_build`: `mbar_app::bundle::read_bundle(&self.bundle_root).map(|b| b.build)`.
 fn platform_system(bundle: &AppBundle, state: StateFile) -> Option<Box<dyn System + Send>> {
     let _ = (bundle, state);
     None
 }
 
 /// Starts the check thread: first check after 120 s, then every 24 h. Only when the
-/// daemon runs from a bundle with a feed URL and the platform has a runner.
+/// daemon runs from a bundle with a feed URL and the platform has a runner. The thread
+/// is detached and holds no locks between checks; the daemon's exit ends it.
 pub fn spawn(bundle: AppBundle, home: &str) {
     if bundle.feed_url.is_none() || home.is_empty() {
         return;
@@ -164,7 +193,13 @@ pub fn spawn(bundle: AppBundle, home: &str) {
             loop {
                 let action = check_once(&*sys, &bundle, own_build);
                 log::info!("update check: {action:?}");
-                std::thread::sleep(std::time::Duration::from_secs(CHECK_INTERVAL_SECS));
+                let last = sys.now();
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(WAKE_SECS));
+                    if check_due(last, sys.now()) {
+                        break;
+                    }
+                }
             }
         });
     if let Err(e) = started {
@@ -366,6 +401,40 @@ mod tests {
         assert_eq!(*f.calls.borrow(), ["open"]);
     }
 
+    /// After a restart that kept the old binary, a release newer than the bundle on
+    /// disk is still offered.
+    #[test]
+    fn newer_release_offered_after_failed_restart() {
+        let f = Fake {
+            feed: Some(feed(3000)),
+            bundle_build: Some(2000),
+            state: RefCell::new(r#"{"restarted_for_build":2000}"#.into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            check_once(&f, &bundle(), 1000),
+            Action::Offer { build: 3000, .. }
+        ));
+        assert_eq!(*f.calls.borrow(), ["open"]);
+        // What is already on disk is not offered.
+        let f = Fake {
+            feed: Some(feed(2000)),
+            ..f
+        };
+        f.calls.borrow_mut().clear();
+        *f.state.borrow_mut() = r#"{"restarted_for_build":2000}"#.into();
+        assert_eq!(check_once(&f, &bundle(), 1000), Action::Nothing);
+        assert!(f.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn check_due_uses_wall_clock() {
+        assert!(!check_due(1_000, 1_000));
+        assert!(!check_due(1_000, 1_000 + CHECK_INTERVAL_SECS - 1));
+        assert!(check_due(1_000, 1_000 + CHECK_INTERVAL_SECS));
+        assert!(check_due(1_000, 500), "clock went backwards");
+    }
+
     #[test]
     fn disabled_checks_never_fetch() {
         let f = Fake {
@@ -410,6 +479,11 @@ mod tests {
         assert_eq!(file.load(), "{\"restarted_for_build\":2000}");
         file.save("{}").unwrap();
         assert_eq!(file.load(), "{}");
+        // Only the state file is left behind (the temp file was renamed over it).
+        let entries = std::fs::read_dir(file.path.parent().unwrap())
+            .unwrap()
+            .count();
+        assert_eq!(entries, 1);
         let _ = std::fs::remove_dir_all(&home);
     }
 
