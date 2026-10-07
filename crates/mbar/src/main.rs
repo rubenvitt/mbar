@@ -18,6 +18,7 @@ mod ipc;
 mod logging;
 mod platform;
 mod scripts;
+mod signals;
 
 use std::ffi::OsString;
 use std::path::PathBuf;

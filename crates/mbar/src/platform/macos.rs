@@ -140,6 +140,14 @@ impl MacState {
                 self.wm.apply(frame, &mut self.res);
                 self.last_frame = Instant::now();
             }
+            if self.res.text.needs_prune() {
+                // Exact pruning: keys the core or a kept scene still draws survive.
+                let (rt, wm) = (self.driver.runtime(), &self.wm);
+                self.res.text.prune_live(|f| {
+                    rt.for_each_text_key(f);
+                    wm.for_each_text_key(f);
+                });
+            }
             for req in self.driver.take_platform_requests() {
                 self.services.execute(req, &mut self.res);
             }
@@ -227,7 +235,7 @@ impl MacState {
 pub struct MacPlatform;
 
 impl Platform for MacPlatform {
-    fn run(self, setup: DaemonSetup) -> i32 {
+    fn run(self, mut setup: DaemonSetup) -> i32 {
         let Some(mtm) = MainThreadMarker::new() else {
             log::error!("the macOS platform must run on the main thread; running headless");
             return super::headless::HeadlessPlatform.run(setup);
@@ -253,6 +261,14 @@ impl Platform for MacPlatform {
             let s = shared.clone();
             Arc::new(move |e| s.push(Msg::Driver(e)))
         };
+        // SIGTERM/SIGINT/SIGHUP → `Event::Terminate` on the main queue: the same exit path
+        // as `--exit` (`finish`: windows closed, menu-bar auto-hide restored).
+        if let Some(signals) = setup.signals.take() {
+            let post = post.clone();
+            if let Err(e) = signals.forward(move |signal| post(Event::Terminate { signal })) {
+                log::warn!("cannot start signal thread: {e}");
+            }
+        }
         let sink: Sink = {
             let s = shared.clone();
             Arc::new(move |e| s.push(Msg::Sys(e)))

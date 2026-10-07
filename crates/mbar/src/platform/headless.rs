@@ -1,7 +1,7 @@
 //! Headless platform: a plain thread main loop over an mpsc channel.
 //!
-//! Background threads (IPC readers, script reapers, hotload watcher) post
-//! [`Event`]s; the loop sleeps in `recv_timeout` until the next event or
+//! Background threads (IPC readers, script reapers, hotload watcher, the signal forwarder)
+//! post [`Event`]s; the loop sleeps in `recv_timeout` until the next event or
 //! `Driver::next_deadline_paced`. There is no display link, so animation frames are paced
 //! at 60 Hz (`animation::FRAME_INTERVAL`, D12) instead of being due "now" (which would
 //! busy-spin a core while any animation runs). Frames are computed (so layout runs and
@@ -36,11 +36,17 @@ enum Step {
 }
 
 impl Platform for HeadlessPlatform {
-    fn run(self, setup: DaemonSetup) -> i32 {
+    fn run(self, mut setup: DaemonSetup) -> i32 {
         let (tx, rx) = mpsc::channel::<Event>();
         let post: Post = Arc::new(move |e| {
             let _ = tx.send(e);
         });
+        if let Some(signals) = setup.signals.take() {
+            let post = post.clone();
+            if let Err(e) = signals.forward(move |signal| post(Event::Terminate { signal })) {
+                log::warn!("cannot start signal thread: {e}");
+            }
+        }
 
         if let Err(e) = setup.listener.spawn(post.clone()) {
             log::error!("ipc: cannot start server: {e}");

@@ -60,6 +60,8 @@ pub enum Event {
         id: u64,
         output: String,
     },
+    /// `SIGTERM`/`SIGINT`/`SIGHUP` (`crate::signals`): shut down like `--exit`.
+    Terminate { signal: i32 },
 }
 
 /// Posts an [`Event`] to the main loop (and wakes it). Called from any thread.
@@ -224,8 +226,25 @@ impl Driver {
                 id,
                 output,
             }),
+            Event::Terminate { signal } => self.terminate(signal),
         }
         self.drain(res);
+    }
+
+    /// A termination signal: the `--exit` path of the runtime (mach helpers get `"k"`),
+    /// then the platform leaves its loop and `platform_main` cleans up.
+    fn terminate(&mut self, signal: i32) {
+        if self.exit {
+            return;
+        }
+        daemon_log(&format!(
+            "received {}, shutting down",
+            crate::signals::name(signal)
+        ));
+        let fx = self.rt.exit();
+        self.apply(fx);
+        // Should the runtime have exited already, the signal still ends the loop.
+        self.exit = true;
     }
 
     /// Fires due timers (runtime, Lua), runs queued work and renders when

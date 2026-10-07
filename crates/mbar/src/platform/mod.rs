@@ -10,6 +10,10 @@
 //! * [`macos::MacPlatform`] (`cfg(target_os = "macos")`): `NSApplication` run loop, Metal
 //!   windows, native system services and the mach server; the default on macOS unless
 //!   `--headless`.
+//!
+//! Both forward `DaemonSetup::signals` (`SIGTERM`/`SIGINT`/`SIGHUP`) into their loop as
+//! `Event::Terminate`, which ends it like `--exit`; [`platform_main`] then removes the
+//! socket and terminates the scripts' process groups.
 
 pub mod headless;
 #[cfg(target_os = "macos")]
@@ -35,6 +39,12 @@ pub fn platform_main(setup: DaemonSetup) -> ! {
     #[cfg(not(target_os = "macos"))]
     let code = headless::HeadlessPlatform.run(setup);
 
+    // Shared exit cleanup (`--exit`, termination signals, failed startup): the socket,
+    // then whatever scripts still run (their whole process groups).
     let _ = std::fs::remove_file(&socket);
+    let killed = crate::scripts::kill_process_groups(libc::SIGTERM);
+    if killed > 0 {
+        log::debug!("terminated {killed} script process group(s)");
+    }
     std::process::exit(code)
 }

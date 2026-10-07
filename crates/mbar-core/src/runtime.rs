@@ -659,6 +659,25 @@ impl Runtime {
         self.stats.lua_max_us = self.stats.lua_max_us.max(max_us);
     }
 
+    /// `--exit` outside of a message, for a platform that was asked to terminate
+    /// (`SIGTERM`/`SIGINT`/`SIGHUP`): the mach helpers get `"k"` (`bar_manager_destroy`),
+    /// animations stop and [`Effect::Exit`] is emitted. Later messages are ignored like
+    /// the rest of an `--exit` message.
+    pub fn exit(&mut self) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        if !self.exiting {
+            self.exit_into(&mut effects);
+        }
+        effects
+    }
+
+    fn exit_into(&mut self, effects: &mut Vec<Effect>) {
+        self.send_mach_destroy(effects);
+        self.animator.clear();
+        effects.push(Effect::Exit);
+        self.exiting = true;
+    }
+
     /// Calls `f` for every [`TextKey`] the runtime still references, i.e. every text line
     /// a current or future scene can draw: `icon`, `label` and `slider.knob` of every item
     /// (bar and popup members alike) and of the `--default` template, the measured
@@ -887,11 +906,8 @@ impl Runtime {
                 false
             }
             Command::Exit => {
-                self.send_mach_destroy(effects);
-                self.animator.clear();
-                effects.push(Effect::Exit);
+                self.exit_into(effects);
                 self.no_reply = true;
-                self.exiting = true;
                 false
             }
             Command::Hotload(tok) => {
@@ -3459,6 +3475,25 @@ mod tests {
         // The replaced label is no longer referenced.
         assert_ne!(old, Some(line("a", |i| i.label.line)));
         assert!(!keys.contains(&old.unwrap()));
+    }
+
+    /// `Runtime::exit` (signal shutdown) behaves like `--exit`, once.
+    #[test]
+    fn exit_outside_a_message_is_like_exit_command() {
+        let (mut rt, mut res) = runtime();
+        msg(&mut rt, &mut res, &["--add", "item", "a", "left"]);
+        msg(&mut rt, &mut res, &["--set", "a", "mach_helper=dev.test.helper"]);
+        let fx = rt.exit();
+        assert!(fx.contains(&Effect::Platform(PlatformRequest::MachSend {
+            service: "dev.test.helper".into(),
+            payload: MACH_HELPER_DESTROY.to_vec(),
+        })));
+        assert_eq!(fx.last(), Some(&Effect::Exit));
+        assert!(rt.exit().is_empty(), "second exit emits nothing");
+        let fx = msg(&mut rt, &mut res, &["--set", "a", "label=late"]);
+        assert!(fx.iter().all(|e| !matches!(e, Effect::Exit)));
+        let label = &rt.model.item(rt.model.find("a").unwrap()).unwrap().label.string;
+        assert_eq!(label, "", "messages after exit are ignored");
     }
 
     fn remove_alias_requests(fx: &[Effect]) -> Vec<ItemId> {

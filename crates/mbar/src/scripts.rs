@@ -19,6 +19,13 @@
 //! delays the callback nor feeds the daemon. At most [`MAX_CAPTURE`] bytes are kept; the
 //! pipe is closed when the limit is reached (the writer gets `SIGPIPE`/`EPIPE`, like
 //! `cmd | head -c`).
+//!
+//! Process groups: every child leads its own process group, so the daemon can end a script
+//! together with everything it started in the background (`cmd &`) when it shuts down
+//! ([`kill_process_groups`], after `--exit` or a termination signal), whether or not the
+//! script itself has already exited. A group is tracked from the spawn until it has no
+//! members left (checked when its leader is reaped and on later spawns); the 60 s
+//! `SIGALRM` above still reaches only the shell.
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -27,12 +34,61 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{ChildStdout, Command, Stdio};
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// `alarm(60)` of every spawned shell.
 pub const SCRIPT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Maximum number of captured stdout bytes of one `mbar.exec` command.
 pub const MAX_CAPTURE: usize = 4 << 20;
+
+/// Process groups (= leader pids) of spawned children that may still have members.
+static GROUPS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// Tracked groups beyond which a spawn first drops the empty ones.
+const GROUP_PRUNE_AT: usize = 64;
+
+/// `killpg(pgid, 0)`: the group still has a member (a zombie leader counts) we may signal.
+fn group_alive(pgid: u32) -> bool {
+    // SAFETY: plain syscall; signal 0 only checks existence and permission.
+    unsafe { libc::killpg(pgid as libc::pid_t, 0) == 0 }
+}
+
+fn groups() -> std::sync::MutexGuard<'static, Vec<u32>> {
+    GROUPS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn track_group(pgid: u32) {
+    let mut g = groups();
+    if g.len() >= GROUP_PRUNE_AT {
+        g.retain(|p| group_alive(*p));
+    }
+    g.push(pgid);
+}
+
+/// The leader of `pgid` was reaped: stop tracking the group unless background members
+/// remain (then the id cannot be reused yet).
+fn forget_group_if_empty(pgid: u32) {
+    let mut g = groups();
+    if !group_alive(pgid) {
+        g.retain(|p| *p != pgid);
+    }
+}
+
+/// Sends `sig` to the process group of every spawned child that still has members (daemon
+/// shutdown). Returns the number of groups signalled.
+pub fn kill_process_groups(sig: libc::c_int) -> usize {
+    let mut g = groups();
+    let mut n = 0;
+    for pgid in g.drain(..) {
+        // SAFETY: plain syscall on a group this process created; an empty group fails with
+        // ESRCH and is skipped.
+        if unsafe { libc::killpg(pgid as libc::pid_t, sig) } == 0 {
+            n += 1;
+        }
+    }
+    n
+}
 
 /// One child to spawn.
 #[derive(Debug, Clone)]
@@ -73,6 +129,7 @@ pub fn spawn(
     if spec.capture {
         cmd.stdout(Stdio::piped());
     }
+    cmd.process_group(0);
     let timer = itimer(timeout);
     // SAFETY: the closure runs in the forked child before `exec` and only makes
     // async-signal-safe system calls (`sigaction`, `sigprocmask`, `setitimer`).
@@ -87,6 +144,7 @@ pub fn spawn(
     };
     let mut child = cmd.spawn()?;
     let pid = child.id();
+    track_group(pid);
     let (reader, mut notify) = match (child.stdout.take(), wake) {
         (Some(out), Some((tx, rx))) => {
             let reader = std::thread::Builder::new()
@@ -107,6 +165,7 @@ pub fn spawn(
         .name("mbar-reaper".into())
         .spawn(move || {
             let _ = child.wait();
+            forget_group_if_empty(pid);
             if let Some(tx) = notify.as_mut() {
                 let _ = tx.write_all(&[1]);
             }

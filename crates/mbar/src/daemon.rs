@@ -20,6 +20,9 @@ pub struct DaemonSetup {
     pub headless: bool,
     /// Held for the daemon's lifetime (fcntl write lock).
     pub lock: File,
+    /// Termination signal handling, installed before the platform starts; the platform
+    /// forwards it into its main loop as `Event::Terminate`.
+    pub signals: Option<crate::signals::Signals>,
 }
 
 pub fn run(bar_name: String, opts: DaemonOptions) -> ! {
@@ -71,6 +74,15 @@ pub fn run(bar_name: String, opts: DaemonOptions) -> ! {
             std::process::exit(1);
         }
     };
+    // From here on SIGTERM/SIGINT/SIGHUP shut the daemon down cleanly (socket removed,
+    // script process groups terminated, menu-bar setting restored).
+    let signals = match crate::signals::install() {
+        Ok(s) => Some(s),
+        Err(e) => {
+            log::warn!("cannot install signal handlers: {e}");
+            None
+        }
+    };
 
     let home = std::env::var("HOME").unwrap_or_default();
     let xdg = std::env::var("XDG_CONFIG_HOME").unwrap_or_default();
@@ -109,6 +121,7 @@ pub fn run(bar_name: String, opts: DaemonOptions) -> ! {
         watch_dir,
         headless: opts.headless,
         lock,
+        signals,
     };
     crate::platform::platform_main(setup)
 }
