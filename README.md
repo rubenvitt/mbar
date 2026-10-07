@@ -92,9 +92,9 @@ mbar.add("item", "battery", { position = "right", provider = "battery" })
 ```
 
 ```sh
-mbar --reload           # the app's daemon is already running: load the new config
-mbar                    # source build: start the daemon in the foreground
-mbar --menubar hide     # auto-hide the native menu bar
+mbar --reload ~/.config/mbar/init.lua  # app: the daemon is already running, load this config
+mbar                                   # source build: start the daemon in the foreground
+mbar --menubar hide                    # auto-hide the native menu bar
 ```
 
 A shell `sketchybarrc` works too. If no mbar config exists, mbar reads

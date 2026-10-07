@@ -60,6 +60,11 @@ app bundle like the released one. This section and the LaunchAgent and
 Homebrew sections below are for source builds; the app does all of this in its
 setup.
 
+CI uploads the macOS release binary as a workflow artifact (`mbar-macos-ARM64`)
+on every run. It is unsigned and meant for testing. Artifacts do not keep file
+modes, so after downloading run `chmod +x mbar` and
+`xattr -d com.apple.quarantine mbar`.
+
 ### Requirements
 
 - macOS on Apple silicon or Intel
@@ -118,7 +123,8 @@ signed ad hoc, which is enough to run it on your own Mac. A locally built
 bundle checks the official feed like the released app, so it may offer to update
 itself to the latest release; turn automatic checks off on the System page to
 keep your build.
-`make dmg` (needs a Developer ID identity in `MBAR_SIGN_IDENTITY`, and
+`make dmg` (needs a Developer ID identity in `MBAR_SIGN_IDENTITY`, the Sparkle
+EdDSA private key in the login keychain or in `SPARKLE_KEY_FILE`, and
 notarization credentials unless `NOTARIZE=0`) builds the DMG, the update zip and
 `appcast.xml` in `dist/`, as the release workflow does.
 
@@ -255,10 +261,10 @@ conflict with the `sketchybar` formula. Its caveats show the command for it.
 ## Permissions
 
 With the app, the setup page and the System page show the live state of
-Accessibility and Screen Recording, open the right Settings pane and restart the
-daemon after a grant. The released app is signed with a Developer ID, so the
-grants survive updates. The rest of this section matters mostly for source
-builds.
+Accessibility and Screen Recording and open the right Settings pane. The setup
+page restarts the daemon after a grant. The released app is signed with a
+Developer ID, so the grants survive updates. The rest of this section matters
+mostly for source builds.
 
 macOS grants privacy permissions to the **responsible process**. When launchd
 starts mbar, that is the `mbar` binary itself. When you start mbar from a
