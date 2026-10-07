@@ -49,6 +49,7 @@ pub fn parse_alias_spec(spec: &str) -> (String, Option<String>) {
 
 /// SketchyBar's selection sort by x descending, including its quirk: the best index starts
 /// at 0 with threshold −9999, so with only `x ≤ −9999` left, element `i` is swapped with 0.
+#[allow(clippy::needless_range_loop)] // mirrors the C loop exactly
 pub fn sort_menu_extras(items: &mut [MenuExtraWindow]) {
     for i in 0..items.len() {
         let mut best_index = 0;
@@ -369,11 +370,20 @@ impl Drop for AliasScheduler {
     }
 }
 
+struct Due {
+    id: u64,
+    owner: String,
+    name: Option<String>,
+    window_id: u32,
+    last_hash: Option<u64>,
+    force: bool,
+}
+
 fn run(shared: Arc<(Mutex<Sched>, Condvar)>, sink: Sink) {
     let (lock, cv) = &*shared;
     loop {
         // Pick due entries.
-        let due: Vec<(u64, String, Option<String>, u32, Option<u64>, bool)> = {
+        let due: Vec<Due> = {
             let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
             loop {
                 if s.shutdown {
@@ -394,7 +404,14 @@ fn run(shared: Arc<(Mutex<Sched>, Condvar)>, sink: Sink) {
                             let force = e.force;
                             e.force = false;
                             e.next = now + if e.freq.is_zero() { Duration::from_secs(3600 * 24) } else { e.freq };
-                            Some((id, e.owner.clone(), e.name.clone(), e.window_id, e.last_hash, force))
+                            Some(Due {
+                                id,
+                                owner: e.owner.clone(),
+                                name: e.name.clone(),
+                                window_id: e.window_id,
+                                last_hash: e.last_hash,
+                                force,
+                            })
                         })
                         .collect();
                 }
@@ -410,8 +427,16 @@ fn run(shared: Arc<(Mutex<Sched>, Condvar)>, sink: Sink) {
                 };
             }
         };
-        for (id, owner, name, wid, last_hash, force) in due {
-            let cap = capture_alias(&owner, name.as_deref(), wid);
+        for Due {
+            id,
+            owner,
+            name,
+            window_id,
+            last_hash,
+            force,
+        } in due
+        {
+            let cap = capture_alias(&owner, name.as_deref(), window_id);
             let hash = cap.image.as_deref().map(image_hash);
             {
                 let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());

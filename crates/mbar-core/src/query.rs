@@ -122,19 +122,25 @@ pub fn displays_json(displays: &[DisplayInfo]) -> String {
     let f4 = |v: f32| format!("{:.4}", v as f64);
     let mut out = String::from("[\n");
     for (i, d) in sorted.iter().enumerate() {
+        let uuid = d
+            .uuid
+            .as_deref()
+            .map_or_else(|| "<unknown>".to_string(), json_escape);
         let _ = write!(
             out,
-            "\t{{\n\t\t\"arrangement-id\":{},\n\t\t\"DirectDisplayID\":{},\n\t\t\"UUID\":\"{}\",\n\
-             \t\t\"frame\":{{\n\t\t\"x\":{},\n\t\t\"y\":{},\n\t\t\"w\":{},\n\t\t\"h\":{}\n\t\t}}\n",
-            d.adid as i32,
-            d.id as i32,
-            d.uuid.as_deref().map_or_else(|| "<unknown>".to_string(), json_escape),
+            "\t{{\n\t\t\"arrangement-id\":{},\n\t\t\"DirectDisplayID\":{},\n\t\t\"UUID\":\"{uuid}\",\n",
+            d.adid as i32, d.id as i32,
+        );
+        let _ = write!(
+            out,
+            "\t\t\"frame\":{{\n\t\t\"x\":{},\n\t\t\"y\":{},\n\t\t\"w\":{},\n\t\t\"h\":{}\n\t\t}}\n",
             f4(d.frame.x),
             f4(d.frame.y),
             f4(d.frame.width),
             f4(d.frame.height),
         );
-        out.push_str(if i + 1 < sorted.len() { "\t},\n" } else { "\t}\n" });
+        let last = i + 1 == sorted.len();
+        out.push_str(if last { "\t}\n" } else { "\t},\n" });
     }
     out.push_str("]\n");
     out

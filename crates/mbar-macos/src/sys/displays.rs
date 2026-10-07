@@ -12,7 +12,7 @@ use objc2::rc::Retained;
 use objc2::runtime::NSObjectProtocol;
 use objc2::{sel, MainThreadMarker};
 use objc2_app_kit::NSScreen;
-use objc2_core_foundation::{CFArray, CFRetained, CFString, CFUUID, CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CFArray, CFRetained, CFString, CFUUID, CGPoint, CGRect};
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGDisplayChangeSummaryFlags, CGDisplayIsBuiltin,
     CGDisplayRegisterReconfigurationCallback, CGDisplayRemoveReconfigurationCallback, CGEvent,
@@ -483,17 +483,17 @@ impl Drop for ReconfigurationObserver {
     }
 }
 
-/// Size helper used by tests and the alias module.
-pub(crate) fn size(w: f64, h: f64) -> CGSize {
-    CGSize {
-        width: w,
-        height: h,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use objc2_core_foundation::CGSize;
+
+    fn size(w: f64, h: f64) -> CGSize {
+        CGSize {
+            width: w,
+            height: h,
+        }
+    }
 
     #[test]
     fn arrangement_index_is_one_based() {

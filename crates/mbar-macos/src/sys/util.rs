@@ -80,10 +80,6 @@ pub(crate) fn dict_bool(dict: &CFDictionary, key: &str) -> Option<bool> {
     dict_get(dict, key).and_then(|v| cf_bool(&v))
 }
 
-pub(crate) fn dict_dict(dict: &CFDictionary, key: &str) -> Option<CFRetained<CFDictionary>> {
-    dict_get(dict, key).and_then(downcast::<CFDictionary>)
-}
-
 pub(crate) fn dict_array(dict: &CFDictionary, key: &str) -> Option<CFRetained<CFArray>> {
     dict_get(dict, key).and_then(downcast::<CFArray>)
 }
@@ -110,8 +106,9 @@ pub fn os_at_least(major: i64, minor: i64) -> bool {
     (ma, mi) >= (major, minor)
 }
 
-/// Runs `f` asynchronously on the main GCD queue.
-pub(crate) fn on_main<F: FnOnce() + Send + 'static>(f: F) {
+/// Runs `f` asynchronously on the main GCD queue (helper for integrations that need to
+/// hop to the main thread from a sink).
+pub fn on_main<F: FnOnce() + Send + 'static>(f: F) {
     dispatch2::DispatchQueue::main().exec_async(f);
 }
 

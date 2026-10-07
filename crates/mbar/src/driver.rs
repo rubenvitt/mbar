@@ -23,9 +23,7 @@
 //! [`Driver::drain`] after the engine call has returned.
 
 use mbar_core::command::MonitorMode;
-use mbar_core::platform::{
-    Effect, FrameOutput, Input, PlatformRequest, ReplyToken, Resources,
-};
+use mbar_core::platform::{Effect, FrameOutput, Input, PlatformRequest, ReplyToken, Resources};
 use mbar_core::{Runtime, RuntimeConfig};
 use mbar_lua::{Host, LuaEngine};
 use std::collections::{HashMap, VecDeque};
@@ -166,6 +164,8 @@ impl Driver {
         }
     }
 
+    /// Read access for platforms (e.g. bar geometry for hit testing on macOS).
+    #[allow(dead_code)]
     pub fn runtime(&self) -> &Runtime {
         &self.rt
     }
@@ -313,16 +313,14 @@ impl Driver {
         for e in effects {
             match e {
                 Effect::Reply { reply, text } => self.reply(reply, text, res),
-                Effect::RunScript { script, env, item } => {
-                    match mbar_lua::parse_script(&script) {
-                        Some(id) => self.deferred.push_back(Deferred::Handler {
-                            generation: self.lua_generation,
-                            id,
-                            env,
-                        }),
-                        None => self.spawn_script(script, env, item),
-                    }
-                }
+                Effect::RunScript { script, env, item } => match mbar_lua::parse_script(&script) {
+                    Some(id) => self.deferred.push_back(Deferred::Handler {
+                        generation: self.lua_generation,
+                        id,
+                        env,
+                    }),
+                    None => self.spawn_script(script, env, item),
+                },
                 Effect::Exit => self.exit = true,
                 Effect::RunConfig { path } => self.deferred.push_back(Deferred::RunConfig(path)),
                 Effect::Platform(PlatformRequest::SetHotload(on)) => {
@@ -702,7 +700,10 @@ mod tests {
             monitor_mode(&s(&["--monitor", "stats"])),
             Some(MonitorMode::Stats)
         );
-        assert_eq!(monitor_mode(&s(&["--monitor", "all"])), Some(MonitorMode::All));
+        assert_eq!(
+            monitor_mode(&s(&["--monitor", "all"])),
+            Some(MonitorMode::All)
+        );
     }
 
     #[test]

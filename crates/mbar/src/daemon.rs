@@ -16,6 +16,7 @@ pub struct DaemonSetup {
     pub socket_path: PathBuf,
     /// Directory watched by the hotloader (the config directory at startup).
     pub watch_dir: Option<PathBuf>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub headless: bool,
     /// Held for the daemon's lifetime (fcntl write lock).
     pub lock: File,
@@ -24,7 +25,7 @@ pub struct DaemonSetup {
 pub fn run(bar_name: String, opts: DaemonOptions) -> ! {
     let user = std::env::var("USER").unwrap_or_default();
     if user.is_empty() {
-        eprint!("{bar_name}: 'env USER' not set! abort..\n");
+        eprintln!("{bar_name}: 'env USER' not set! abort..");
         std::process::exit(1);
     }
 
@@ -33,11 +34,11 @@ pub fn run(bar_name: String, opts: DaemonOptions) -> ! {
     let lock = match acquire_lock(&lock_path) {
         Ok(f) => f,
         Err(LockError::Create) => {
-            eprint!("{bar_name}: could not create lock-file! abort..\n");
+            eprintln!("{bar_name}: could not create lock-file! abort..");
             std::process::exit(1);
         }
         Err(LockError::Busy) => {
-            eprint!("{bar_name}: could not acquire lock-file... already running?\n");
+            eprintln!("{bar_name}: could not acquire lock-file... already running?");
             std::process::exit(1);
         }
     };
@@ -46,7 +47,7 @@ pub fn run(bar_name: String, opts: DaemonOptions) -> ! {
         Ok(l) => l,
         Err(e) => {
             log::error!("ipc: cannot bind {}: {e}", socket_path.display());
-            eprint!("{bar_name}: could not initialize daemon! abort..\n");
+            eprintln!("{bar_name}: could not initialize daemon! abort..");
             std::process::exit(1);
         }
     };

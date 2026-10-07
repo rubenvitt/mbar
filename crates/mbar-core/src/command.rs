@@ -70,9 +70,10 @@ pub enum QueryTarget {
     Item(String),
     /// Fallback: `[!] Query: Invalid query, or item '<name>' not found \n`.
     Name(String),
-    /// Extension `--query stats`.
+    /// Extension `--query stats` (an existing item named `stats` still wins, see
+    /// `query::query`).
     Stats,
-    /// Extension `--query menus`.
+    /// Extension `--query menus` (an existing item named `menus` still wins).
     Menus,
 }
 
@@ -361,9 +362,8 @@ pub fn parse(args: &[String]) -> Vec<Command> {
 /// Mode B domains: `line` is the batch line after the command token.
 fn batch_command(command: &str, line: &[&str]) -> Command {
     let arg = |i: usize| line.get(i).copied().unwrap_or("").to_string();
-    let rest = |from: usize| -> Vec<String> {
-        line.iter().skip(from).map(|s| s.to_string()).collect()
-    };
+    let rest =
+        |from: usize| -> Vec<String> { line.iter().skip(from).map(|s| s.to_string()).collect() };
     match command {
         "--add" => {
             if line.first() == Some(&"event") {
@@ -479,7 +479,8 @@ impl BreOut {
     fn literal(&mut self, c: char) {
         self.atom = Some(self.out.len());
         self.quantified = false;
-        self.out.push_str(&regex::escape(c.encode_utf8(&mut [0; 4])));
+        self.out
+            .push_str(&regex::escape(c.encode_utf8(&mut [0; 4])));
     }
 
     fn atom(&mut self, s: &str) {

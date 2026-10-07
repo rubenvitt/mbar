@@ -8,7 +8,7 @@
 use mbar_ipc::socket::{read_frame, write_frame, CLIENT_TIMEOUT};
 use std::io;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::driver::{Event, Post};
 
@@ -19,6 +19,7 @@ pub enum Responder {
     /// A Unix-socket connection.
     Socket(UnixStream),
     /// Any other transport (e.g. the macOS mach server): called with the reply text.
+    #[allow(dead_code)] // constructed by the macOS platform (mach transport)
     Callback(Box<dyn FnOnce(String) + Send>),
 }
 
@@ -53,7 +54,6 @@ impl std::fmt::Debug for Responder {
 
 /// The bound socket (`$TMPDIR/mbar_<user>_<bar>.socket`).
 pub struct Listener {
-    path: PathBuf,
     listener: UnixListener,
 }
 
@@ -71,14 +71,7 @@ impl Listener {
             std::fs::remove_file(path)?;
         }
         let listener = UnixListener::bind(path)?;
-        Ok(Listener {
-            path: path.to_path_buf(),
-            listener,
-        })
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
+        Ok(Listener { listener })
     }
 
     /// Accept loop on a background thread. Each connection's request is read on a

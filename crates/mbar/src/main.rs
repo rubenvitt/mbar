@@ -36,7 +36,7 @@ fn main() {
 
     // cli.md §1.1 step 2: refuse root (client mode included).
     if is_root() && std::env::var_os(ALLOW_ROOT_ENV).is_none() {
-        eprint!("{bar_name}: running as root is not allowed! abort..\n");
+        eprintln!("{bar_name}: running as root is not allowed! abort..");
         std::process::exit(1);
     }
 
@@ -110,7 +110,9 @@ fn parse_daemon_options(args: &[String]) -> Mode {
                 };
                 match std::fs::canonicalize(path) {
                     Ok(p) => opts.config = Some(p),
-                    Err(_) => return Mode::Error("[!] Error: Specified config file path invalid.\n"),
+                    Err(_) => {
+                        return Mode::Error("[!] Error: Specified config file path invalid.\n")
+                    }
                 }
                 i += 1;
             }

@@ -32,7 +32,7 @@ pub mod spaces;
 
 pub use mach_server::MachReply;
 pub use mouse::{MouseEvent, MouseKind};
-pub use util::{os_at_least, os_version};
+pub use util::{on_main, os_at_least, os_version};
 
 /// Where every system event goes. Must be cheap and non-blocking (queue + wake main).
 pub type Sink = Arc<dyn Fn(SysEvent) + Send + Sync>;

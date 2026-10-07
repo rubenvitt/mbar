@@ -17,7 +17,7 @@ pub fn run(bar_name: &str, args: &[String]) -> i32 {
         return 0;
     }
     if std::env::var_os("USER").map_or(true, |u| u.is_empty()) {
-        eprint!("sketchybar-msg: 'env USER' not set! abort..\n");
+        eprintln!("sketchybar-msg: 'env USER' not set! abort..");
         return 1;
     }
     if args.iter().any(|a| a == "--monitor") {

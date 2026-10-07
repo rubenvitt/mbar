@@ -25,16 +25,18 @@ impl Platform for HeadlessPlatform {
 
         if let Err(e) = setup.listener.spawn(post.clone()) {
             log::error!("ipc: cannot start server: {e}");
-            eprint!(
-                "{}: could not initialize daemon! abort..\n",
+            eprintln!(
+                "{}: could not initialize daemon! abort..",
                 setup.driver.bar_name
             );
             return 1;
         }
         let hotload = crate::hotload::spawn(setup.watch_dir.clone(), post.clone());
 
-        let mut res = HeadlessResources::default();
-        res.now = Instant::now();
+        let mut res = HeadlessResources {
+            now: Instant::now(),
+            ..HeadlessResources::default()
+        };
         let mut driver = Driver::new(setup.driver, post, hotload);
         driver.start(&mut res);
 
