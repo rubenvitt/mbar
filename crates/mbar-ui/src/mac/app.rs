@@ -28,21 +28,57 @@ pub fn activate() {
     }
 }
 
-/// Copies the running bundle to /Applications/mbar.app (replacing an older copy).
+/// Copies the running bundle to /Applications/mbar.app, replacing an older copy only
+/// once the new one is complete (copy to a temporary name, then swap by renaming).
 pub fn move_to_applications(src: &Path) -> Result<PathBuf, String> {
     let dst = PathBuf::from("/Applications/mbar.app");
-    if dst.exists() {
-        std::fs::remove_dir_all(&dst).map_err(|e| format!("remove {}: {e}", dst.display()))?;
+    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    if canonical(src) == canonical(&dst) {
+        return Err("mbar.app already runs from /Applications".into());
     }
+    let tmp = PathBuf::from(format!("/Applications/.mbar.app.{}", std::process::id()));
+    let old = PathBuf::from(format!(
+        "/Applications/.mbar.app.old.{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp);
     let st = Command::new("/usr/bin/ditto")
         .arg(src)
-        .arg(&dst)
+        .arg(&tmp)
         .status()
         .map_err(|e| e.to_string())?;
     if !st.success() {
+        let _ = std::fs::remove_dir_all(&tmp);
         return Err(format!("ditto exited with {st}"));
     }
+    let had_old = dst.exists();
+    if had_old {
+        std::fs::rename(&dst, &old).map_err(|e| {
+            let _ = std::fs::remove_dir_all(&tmp);
+            format!("move {} aside: {e}", dst.display())
+        })?;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &dst) {
+        if had_old {
+            let _ = std::fs::rename(&old, &dst);
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(format!("install {}: {e}", dst.display()));
+    }
+    if had_old {
+        let _ = std::fs::remove_dir_all(&old);
+    }
     Ok(dst)
+}
+
+/// Ends the app through AppKit (`-[NSApp terminate:]`), so termination hooks such as
+/// Sparkle's install-on-quit run.
+pub fn terminate() {
+    if let Some(mtm) = MainThreadMarker::new() {
+        NSApplication::sharedApplication(mtm).terminate(None);
+    } else {
+        std::process::exit(0);
+    }
 }
 
 pub fn relaunch(path: &Path) -> ! {

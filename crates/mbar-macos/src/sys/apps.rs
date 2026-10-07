@@ -3,10 +3,21 @@
 use objc2_app_kit::NSRunningApplication;
 use objc2_foundation::{NSDistributedNotificationCenter, NSString};
 
-/// Whether an application with this bundle identifier is running in this session.
-pub fn is_app_running(bundle_id: &str) -> bool {
+/// Whether a process of the app `bundle_id` whose executable is named `executable` runs
+/// in this session, this process excluded. The bundle's daemon (`Contents/MacOS/mbar`)
+/// registers with the same bundle identifier as the UI, so the identifier alone does
+/// not tell them apart.
+pub fn is_app_running(bundle_id: &str, executable: &str) -> bool {
     let id = NSString::from_str(bundle_id);
-    NSRunningApplication::runningApplicationsWithBundleIdentifier(&id).count() > 0
+    let me = std::process::id() as i32;
+    NSRunningApplication::runningApplicationsWithBundleIdentifier(&id)
+        .iter()
+        .filter(|app| app.processIdentifier() != me)
+        .any(|app| {
+            app.executableURL()
+                .and_then(|url| url.lastPathComponent())
+                .is_some_and(|name| name.to_string() == executable)
+        })
 }
 
 /// Posts a distributed notification without object or user info, delivered immediately.

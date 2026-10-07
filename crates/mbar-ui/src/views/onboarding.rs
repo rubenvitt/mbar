@@ -215,6 +215,8 @@ pub struct SetupView {
     remove_brew_sketchybar: bool,
     permissions: Option<Permissions>,
     probing: bool,
+    /// `OnboardingCompleted` was written (once per view).
+    completed_written: bool,
     _poll: Task<()>,
 }
 
@@ -231,6 +233,7 @@ impl SetupView {
             remove_brew_sketchybar: true,
             permissions: None,
             probing: false,
+            completed_written: false,
             _poll: poll,
         };
         view.redetect(cx);
@@ -300,13 +303,14 @@ impl SetupView {
         cx.notify();
     }
 
-    fn check_completed(&self) {
+    fn check_completed(&mut self) {
         let all = self
             .states
             .iter()
             .all(|(_, s)| matches!(s, StepState::Done(_) | StepState::Skipped));
-        if all {
-            mark_completed();
+        if all && !self.completed_written {
+            self.completed_written = true;
+            std::thread::spawn(mark_completed);
         }
     }
 
@@ -563,10 +567,14 @@ fn run(step: Step, plan: &SetupPlan, remove_brew: bool) -> Result<String, String
                 uid,
                 remove_brew,
             );
-            let mut log = ob::run_commands(&cmds)?;
-            // The legacy agent shares the launchd label; its bootout stopped ours too.
-            if was_registered && ob::cleanup_stops_login_item(&plan.old) {
-                login_item::register()?;
+            let result = ob::run_commands(&cmds);
+            // The legacy agent shares the launchd label; its bootout stopped ours too,
+            // even when a later command failed.
+            let reregister = (was_registered && ob::cleanup_stops_login_item(&plan.old))
+                .then(login_item::register);
+            let mut log = result?;
+            if let Some(r) = reregister {
+                r?;
                 log.push_str("\nRe-registered the login item");
             }
             let foreign: Vec<_> = plan

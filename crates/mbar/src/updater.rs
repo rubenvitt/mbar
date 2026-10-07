@@ -210,14 +210,19 @@ mod real {
             output("/usr/bin/defaults", &["read", BUNDLE_ID, "SUFeedURL"]).filter(|s| !s.is_empty())
         }
         fn ui_running(&self) -> bool {
-            mbar_macos::sys::apps::is_app_running(BUNDLE_ID)
+            mbar_macos::sys::apps::is_app_running(BUNDLE_ID, "mbar-ui")
         }
         fn notify_ui(&self) {
             mbar_macos::sys::apps::post_distributed(UPDATE_NOTIFICATION);
         }
         fn open_ui_update(&self) {
+            // By path and `-n`: the daemon itself is a running process of this bundle,
+            // so `open -b` could just activate it instead of launching the UI.
             if let Err(e) = Command::new("/usr/bin/open")
-                .args(["-b", BUNDLE_ID, "--args", "--update"])
+                .arg("-n")
+                .arg("-a")
+                .arg(&self.bundle_root)
+                .args(["--args", "--update"])
                 .status()
             {
                 log::warn!("update check: cannot open mbar.app: {e}");

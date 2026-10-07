@@ -58,7 +58,7 @@ fn main() {
                 }
                 let updater = std::rc::Rc::new(mac::sparkle::Updater::start(move || {
                     if update_mode {
-                        std::process::exit(0);
+                        mac::app::terminate();
                     }
                 }));
                 if let Some(u) = updater.as_ref() {
