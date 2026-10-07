@@ -1169,12 +1169,22 @@ pub fn sorted_counts(map: &HashMap<String, u64>) -> Vec<(String, u64)> {
     v
 }
 
-/// Command line of `mbar-ui`: `[--bar-name <name>]`. Returns the bar name, or `Err`
-/// with a message (usage for `--help`).
-pub fn parse_cli_args<I: IntoIterator<Item = String>>(args: I) -> Result<String, String> {
-    let usage = "usage: mbar-ui [--bar-name <name>]\n\nManagement app for the mbar status bar. \
-                 --bar-name selects the daemon instance (default: mbar).";
+/// Parsed command line of `mbar-ui`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliArgs {
+    pub bar_name: String,
+    /// Opened by the daemon to show the Sparkle update dialog only.
+    pub update: bool,
+}
+
+/// Command line of `mbar-ui`: `[--bar-name <name>] [--update]`. Returns the parsed
+/// arguments, or `Err` with a message (usage for `--help`).
+pub fn parse_cli_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliArgs, String> {
+    let usage =
+        "usage: mbar-ui [--bar-name <name>] [--update]\n\nManagement app for the mbar status bar. \
+         --bar-name selects the daemon instance (default: mbar).";
     let mut bar_name = mbar_ipc::DEFAULT_BAR_NAME.to_string();
+    let mut update = false;
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
         if arg == "-h" || arg == "--help" {
@@ -1189,13 +1199,15 @@ pub fn parse_cli_args<I: IntoIterator<Item = String>>(args: I) -> Result<String,
                 return Err(format!("--bar-name needs a value\n\n{usage}"));
             }
             bar_name = v.to_string();
+        } else if arg == "--update" {
+            update = true;
         } else if arg.starts_with("-psn_") {
             // Finder passes a process serial number to apps it launches.
         } else {
             return Err(format!("unknown argument '{arg}'\n\n{usage}"));
         }
     }
-    Ok(bar_name)
+    Ok(CliArgs { bar_name, update })
 }
 
 #[cfg(test)]
@@ -1582,14 +1594,25 @@ mod tests {
     #[test]
     fn cli_args() {
         let a = |v: &[&str]| parse_cli_args(v.iter().map(|s| s.to_string()));
-        assert_eq!(a(&[]).unwrap(), "mbar");
-        assert_eq!(a(&["--bar-name", "bottom"]).unwrap(), "bottom");
-        assert_eq!(a(&["--bar-name=top"]).unwrap(), "top");
-        assert_eq!(a(&["-psn_0_1234"]).unwrap(), "mbar");
+        assert_eq!(a(&[]).unwrap().bar_name, "mbar");
+        assert_eq!(a(&["--bar-name", "bottom"]).unwrap().bar_name, "bottom");
+        assert_eq!(a(&["--bar-name=top"]).unwrap().bar_name, "top");
+        assert_eq!(a(&["-psn_0_1234"]).unwrap().bar_name, "mbar");
         assert!(a(&["--bar-name"]).is_err());
         assert!(a(&["--bar-name="]).is_err());
         assert!(a(&["--help"]).unwrap_err().starts_with("usage"));
         assert!(a(&["x"]).is_err());
+    }
+
+    #[test]
+    fn cli_update_flag() {
+        let a = parse_cli_args(["--update".to_string()]).unwrap();
+        assert!(a.update);
+        assert_eq!(a.bar_name, "mbar");
+        let a = parse_cli_args(Vec::<String>::new()).unwrap();
+        assert!(!a.update);
+        let a = parse_cli_args(["-psn_0_123".into(), "--update".into()]).unwrap();
+        assert!(a.update);
     }
 
     #[test]
