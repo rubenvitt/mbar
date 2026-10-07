@@ -1,5 +1,5 @@
-//! System integration helpers for the "System" page: starting the daemon, the launch
-//! agent, permission probes and the native menu bar state. Blocking functions here run
+//! System integration helpers for the "System" page: starting and kickstarting the
+//! daemon, permission probes and the native menu bar state. Blocking functions here run
 //! on the background executor.
 
 use std::io;
@@ -15,18 +15,14 @@ pub const ACCESSIBILITY_SETTINGS_URL: &str =
 pub const SCREEN_RECORDING_SETTINGS_URL: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 
-/// PATH given to the daemon started by launchd (which otherwise only has the system
-/// directories), so scripts find Homebrew tools like they do from a shell.
-const LAUNCH_AGENT_PATH: &str =
-    "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
-
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
 }
 
-/// `~/Library/LaunchAgents/dev.rubeen.mbar.plist`.
+/// `~/Library/LaunchAgents/dev.rubeen.mbar.plist`, the legacy agent written by
+/// `make install-agent` (onboarding boots it out and removes it).
 pub fn launch_agent_path() -> Option<PathBuf> {
     home_dir().map(|h| {
         h.join("Library/LaunchAgents")
@@ -99,87 +95,34 @@ pub fn start_daemon(bar_name: &str) -> io::Result<PathBuf> {
     Ok(bin)
 }
 
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
-/// `ProgramArguments` for the launch agent: the absolute daemon path when known,
-/// otherwise a login shell resolving `mbar` from the user's `$PATH`.
-pub fn launch_agent_program(daemon: Option<&Path>) -> Vec<String> {
-    match daemon {
-        Some(p) => vec![p.to_string_lossy().into_owned()],
-        None => vec!["/bin/sh".into(), "-lc".into(), "exec mbar".into()],
+/// Restarts the daemon through launchd (the bundled login item `dev.rubeen.mbar`), e.g.
+/// after a permission grant that only takes effect in a new process.
+pub fn kickstart_daemon() -> io::Result<()> {
+    let uid = current_uid();
+    let status = Command::new("/bin/launchctl")
+        .args([
+            "kickstart",
+            "-k",
+            &format!("gui/{uid}/{LAUNCH_AGENT_LABEL}"),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("launchctl exited with {status}")))
     }
 }
 
-pub fn launch_agent_plist(program: &[String]) -> String {
-    let args: String = program
-        .iter()
-        .map(|a| format!("\t\t<string>{}</string>\n", xml_escape(a)))
-        .collect();
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key>
-	<string>{label}</string>
-	<key>ProgramArguments</key>
-	<array>
-{args}	</array>
-	<key>EnvironmentVariables</key>
-	<dict>
-		<key>PATH</key>
-		<string>{path}</string>
-	</dict>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>KeepAlive</key>
-	<dict>
-		<key>SuccessfulExit</key>
-		<false/>
-	</dict>
-	<key>ProcessType</key>
-	<string>Interactive</string>
-</dict>
-</plist>
-"#,
-        label = LAUNCH_AGENT_LABEL,
-        path = LAUNCH_AGENT_PATH,
-    )
-}
-
-pub fn launch_agent_installed() -> bool {
-    launch_agent_path().map(|p| p.exists()).unwrap_or(false)
-}
-
-/// Writes the launch agent running `mbar` (takes effect at the next login).
-pub fn install_launch_agent() -> io::Result<PathBuf> {
-    let path = launch_agent_path()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "$HOME is not set"))?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+/// The real user id of this process (the launchd `gui/<uid>` domain).
+pub fn current_uid() -> u32 {
+    extern "C" {
+        fn getuid() -> u32;
     }
-    let daemon = find_executable("mbar");
-    std::fs::write(
-        &path,
-        launch_agent_plist(&launch_agent_program(daemon.as_deref())),
-    )?;
-    Ok(path)
-}
-
-pub fn remove_launch_agent() -> io::Result<()> {
-    match launch_agent_path() {
-        Some(p) => match std::fs::remove_file(&p) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            other => other,
-        },
-        None => Ok(()),
-    }
+    // SAFETY: getuid has no preconditions and cannot fail.
+    unsafe { getuid() }
 }
 
 /// Opens a URL (e.g. a System Settings pane) with `open` (macOS) / `xdg-open`.
@@ -277,21 +220,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plist_contents() {
-        let p = launch_agent_plist(&launch_agent_program(Some(Path::new(
-            "/opt/homebrew/bin/mbar",
-        ))));
-        assert!(p.contains("<string>dev.rubeen.mbar</string>"));
-        assert!(p.contains("\t\t<string>/opt/homebrew/bin/mbar</string>\n\t</array>"));
-        assert!(p.contains("<key>RunAtLoad</key>\n\t<true/>"));
-        let fallback = launch_agent_plist(&launch_agent_program(None));
-        assert!(fallback.contains("<string>/bin/sh</string>"));
-        assert!(fallback.contains("<string>exec mbar</string>"));
-        let esc = launch_agent_plist(&["/a&b/<mbar>".to_string()]);
-        assert!(esc.contains("<string>/a&amp;b/&lt;mbar&gt;</string>"));
-    }
-
-    #[test]
     fn launch_agent_path_under_home() {
         if let Some(p) = launch_agent_path() {
             assert!(p.ends_with("Library/LaunchAgents/dev.rubeen.mbar.plist"));
@@ -332,6 +260,13 @@ mod tests {
         assert_eq!(parse_defaults_bool("0"), Some(false));
         assert_eq!(parse_defaults_bool("YES"), Some(true));
         assert_eq!(parse_defaults_bool("maybe"), None);
+    }
+
+    #[test]
+    fn uid_matches_id_command() {
+        let out = Command::new("id").arg("-u").output().unwrap();
+        let id: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+        assert_eq!(current_uid(), id);
     }
 
     #[test]

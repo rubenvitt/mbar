@@ -2,6 +2,7 @@
 //! detection over the file system plus command/script builders; the GUI runs them.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 pub const STARTER_INIT_LUA: &str = include_str!("../assets/starter-init.lua");
 
@@ -226,6 +227,138 @@ pub fn applescript_admin(shell: &str) -> String {
     format!("do shell script \"{escaped}\" with administrator privileges")
 }
 
+/// The onboarding steps in the order setup runs them.
+///
+/// `Cleanup` must come before `LoginItem`: the legacy
+/// `~/Library/LaunchAgents/dev.rubeen.mbar.plist` uses the same launchd label as the
+/// bundled agent, so the cleanup's `launchctl bootout gui/<uid>/dev.rubeen.mbar` would
+/// stop the bundled agent if it were already registered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupStep {
+    Location,
+    Cleanup,
+    TakeOver,
+    Starter,
+    CommandLine,
+    LoginItem,
+    Permissions,
+}
+
+impl SetupStep {
+    pub const ALL: [SetupStep; 7] = [
+        SetupStep::Location,
+        SetupStep::Cleanup,
+        SetupStep::TakeOver,
+        SetupStep::Starter,
+        SetupStep::CommandLine,
+        SetupStep::LoginItem,
+        SetupStep::Permissions,
+    ];
+}
+
+/// The cleanup boots out the launchd label `dev.rubeen.mbar`, which the bundled login
+/// item shares. When the login item was already registered before the cleanup ran
+/// (setup run again, or the cleanup retried after `LoginItem`), the executor must
+/// register it again afterwards; `SetupStep::ALL` keeps the first run safe.
+// TODO(Task 12/16, macOS): when this is true and `login_item::status()` was `Enabled`
+// before the cleanup, call `login_item::register()` again once `run_commands` returns.
+pub fn cleanup_stops_login_item(items: &[OldInstall]) -> bool {
+    items.iter().any(|i| i.kind == OldKind::LaunchAgent)
+}
+
+pub fn find_brew() -> Option<PathBuf> {
+    ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.exists())
+}
+
+/// User-level cleanup commands, in order: Homebrew services and formulas, the legacy
+/// launch agent (bootout, then remove the plist), user-owned old binaries. Admin-owned
+/// binaries go through `admin_shell`; `Foreign` entries are never touched.
+pub fn cleanup_commands(
+    items: &[OldInstall],
+    brew: &BrewState,
+    brew_bin: Option<&Path>,
+    uid: u32,
+    remove_brew_sketchybar: bool,
+) -> Vec<Vec<String>> {
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    let mut out = Vec::new();
+    if let Some(b) = brew_bin.map(|p| p.to_string_lossy().into_owned()) {
+        if brew.sketchybar_installed || brew.sketchybar_running {
+            out.push(s(&[&b, "services", "stop", "sketchybar"]));
+            if remove_brew_sketchybar && brew.sketchybar_installed {
+                out.push(s(&[&b, "uninstall", "sketchybar"]));
+            }
+        }
+        if brew.mbar_installed {
+            out.push(s(&[&b, "services", "stop", "mbar"]));
+            out.push(s(&[&b, "uninstall", "mbar"]));
+        }
+    }
+    for i in items.iter().filter(|i| i.kind == OldKind::LaunchAgent) {
+        out.push(s(&[
+            "/bin/launchctl",
+            "bootout",
+            &format!("gui/{uid}/dev.rubeen.mbar"),
+        ]));
+        out.push(s(&["/bin/rm", "-f", &i.path.to_string_lossy()]));
+    }
+    for i in items
+        .iter()
+        .filter(|i| i.kind == OldKind::Binary && !i.admin)
+    {
+        out.push(s(&["/bin/rm", "-f", &i.path.to_string_lossy()]));
+    }
+    out
+}
+
+/// `launchctl bootout` fails when the agent is not loaded, which is the goal anyway.
+fn failure_tolerated(cmd: &[String]) -> bool {
+    cmd.first().is_some_and(|p| p.ends_with("/launchctl"))
+        && cmd.get(1).map(String::as_str) == Some("bootout")
+}
+
+/// Runs `cmds` in order and stops at the first failure; returns the combined output
+/// (`Err` carries the output up to and including the failing command).
+pub fn run_commands(cmds: &[Vec<String>]) -> Result<String, String> {
+    let mut log = String::new();
+    for c in cmds {
+        let Some((prog, args)) = c.split_first() else {
+            continue;
+        };
+        let line = c.join(" ");
+        let out = Command::new(prog).args(args).output().map_err(|e| {
+            log.push_str(&format!("$ {line}\n{e}\n"));
+            log.clone()
+        })?;
+        log.push_str(&format!(
+            "$ {line}\n{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ));
+        if !out.status.success() && !failure_tolerated(c) {
+            log.push_str(&format!("({line} exited with {})\n", out.status));
+            return Err(log);
+        }
+    }
+    Ok(log)
+}
+
+/// Runs `shell` as root after the standard macOS admin prompt (`osascript`).
+pub fn run_admin(shell: &str) -> Result<(), String> {
+    let out = Command::new("/usr/bin/osascript")
+        .args(["-e", &applescript_admin(shell)])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,5 +567,110 @@ mod tests {
             a,
             "do shell script \"echo \\\"hi\\\" \\\\ there\" with administrator privileges"
         );
+    }
+    #[test]
+    fn cleanup_command_order() {
+        let items = vec![
+            OldInstall {
+                path: "/h/Library/LaunchAgents/dev.rubeen.mbar.plist".into(),
+                kind: OldKind::LaunchAgent,
+                admin: false,
+            },
+            OldInstall {
+                path: "/h/.local/bin/mbar".into(),
+                kind: OldKind::Binary,
+                admin: false,
+            },
+            OldInstall {
+                path: "/h/.local/bin/sketchybar".into(),
+                kind: OldKind::Foreign,
+                admin: false,
+            },
+            OldInstall {
+                path: "/usr/local/bin/mbar".into(),
+                kind: OldKind::Binary,
+                admin: true,
+            },
+        ];
+        let brew = BrewState {
+            sketchybar_installed: true,
+            sketchybar_running: true,
+            mbar_installed: true,
+        };
+        let cmds = cleanup_commands(
+            &items,
+            &brew,
+            Some(Path::new("/opt/homebrew/bin/brew")),
+            501,
+            true,
+        );
+        let s: Vec<String> = cmds.iter().map(|c| c.join(" ")).collect();
+        assert_eq!(
+            s,
+            [
+                "/opt/homebrew/bin/brew services stop sketchybar",
+                "/opt/homebrew/bin/brew uninstall sketchybar",
+                "/opt/homebrew/bin/brew services stop mbar",
+                "/opt/homebrew/bin/brew uninstall mbar",
+                "/bin/launchctl bootout gui/501/dev.rubeen.mbar",
+                "/bin/rm -f /h/Library/LaunchAgents/dev.rubeen.mbar.plist",
+                "/bin/rm -f /h/.local/bin/mbar",
+            ]
+        );
+        // Without consent the formula stays installed, only the service stops.
+        let cmds = cleanup_commands(&[], &brew, Some(Path::new("/b/brew")), 501, false);
+        assert_eq!(cmds[0].join(" "), "/b/brew services stop sketchybar");
+        assert!(!cmds
+            .iter()
+            .any(|c| c.join(" ") == "/b/brew uninstall sketchybar"));
+        // No brew binary: no brew commands at all.
+        assert!(cleanup_commands(&[], &brew, None, 501, true).is_empty());
+    }
+
+    #[test]
+    fn cleanup_runs_before_login_item() {
+        // The legacy agent's bootout shares the bundled agent's label, so the first run
+        // must clean up before it registers the login item.
+        let pos = |s: SetupStep| SetupStep::ALL.iter().position(|x| *x == s).unwrap();
+        assert!(pos(SetupStep::Cleanup) < pos(SetupStep::LoginItem));
+        // And a later cleanup with a legacy agent tells the executor to re-register.
+        let agent = OldInstall {
+            path: "/h/Library/LaunchAgents/dev.rubeen.mbar.plist".into(),
+            kind: OldKind::LaunchAgent,
+            admin: false,
+        };
+        let bin = OldInstall {
+            path: "/h/.local/bin/mbar".into(),
+            kind: OldKind::Binary,
+            admin: false,
+        };
+        assert!(cleanup_stops_login_item(&[bin.clone(), agent]));
+        assert!(!cleanup_stops_login_item(&[bin]));
+        assert!(!cleanup_stops_login_item(&[]));
+    }
+
+    #[test]
+    fn run_commands_stops_at_first_failure() {
+        let sh = |script: &str| vec!["/bin/sh".to_string(), "-c".into(), script.into()];
+        assert_eq!(
+            run_commands(&[sh("echo one"), sh("echo two >&2")]).unwrap(),
+            "$ /bin/sh -c echo one\none\n$ /bin/sh -c echo two >&2\ntwo\n"
+        );
+        let err = run_commands(&[sh("echo a"), sh("exit 3"), sh("echo never")]).unwrap_err();
+        assert!(err.contains("$ /bin/sh -c echo a\na\n"));
+        assert!(err.contains("exit 3"));
+        assert!(!err.contains("never"));
+        assert!(run_commands(&[vec!["/definitely/not/a/binary".into()]]).is_err());
+    }
+
+    #[test]
+    fn only_launchctl_bootout_failures_are_tolerated() {
+        let v = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        assert!(failure_tolerated(&v(
+            "/bin/launchctl bootout gui/501/dev.rubeen.mbar"
+        )));
+        assert!(!failure_tolerated(&v("/bin/launchctl kickstart -k x")));
+        assert!(!failure_tolerated(&v("/bin/rm bootout")));
+        assert!(!failure_tolerated(&[]));
     }
 }
