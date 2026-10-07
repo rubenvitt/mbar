@@ -179,6 +179,18 @@ pub enum DrawCmd {
     PushClip { rect: Rect, corner_radius: f32 },
     /// Pop the most recent clip. Unbalanced pops are ignored.
     PopClip,
+    /// Destination-out punch (`helpers.h:clip_rect`, `background.clip`): inside the rounded
+    /// rect `rect` the destination is multiplied by `1 - alpha`; a stroke of `stroke_width`
+    /// centred on the rect's edge multiplies it by `1 - stroke_alpha` (SketchyBar strokes the
+    /// hole with the bar's border state, spec Q11). The radius is clamped against `rect`
+    /// itself (no inset). Respects the current clip.
+    Erase {
+        rect: Rect,
+        corner_radius: f32,
+        alpha: f32,
+        stroke_width: f32,
+        stroke_alpha: f32,
+    },
 }
 
 /// A window's display list.

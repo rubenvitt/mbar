@@ -147,6 +147,8 @@ enum Batch {
         tex: TexSource,
         start: u32,
         count: u32,
+        /// Destination-out blending ([`DrawCmd::Erase`]).
+        erase: bool,
     },
     Path {
         start: u32,
@@ -199,6 +201,8 @@ pub struct Renderer {
     device: Device,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     quad_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// Quad pipeline with destination-out blending (`dst *= 1 - src.a`).
+    erase_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     path_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     nearest: Retained<ProtocolObject<dyn MTLSamplerState>>,
     linear: Retained<ProtocolObject<dyn MTLSamplerState>>,
@@ -221,6 +225,7 @@ fn make_pipeline(
     library: &ProtocolObject<dyn MTLLibrary>,
     vertex: &str,
     fragment: &str,
+    erase: bool,
 ) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, RendererError> {
     let vf = library
         .newFunctionWithName(&NSString::from_str(vertex))
@@ -237,8 +242,15 @@ fn make_pipeline(
     att.setBlendingEnabled(true);
     att.setRgbBlendOperation(MTLBlendOperation::Add);
     att.setAlphaBlendOperation(MTLBlendOperation::Add);
-    att.setSourceRGBBlendFactor(MTLBlendFactor::One);
-    att.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+    // Premultiplied "over"; the erase pipeline ignores the source colour and scales the
+    // destination by `1 - src.a` (CoreGraphics' `kCGBlendModeDestinationOut`).
+    let src = if erase {
+        MTLBlendFactor::Zero
+    } else {
+        MTLBlendFactor::One
+    };
+    att.setSourceRGBBlendFactor(src);
+    att.setSourceAlphaBlendFactor(src);
     att.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
     att.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
     device
@@ -272,8 +284,10 @@ impl Renderer {
         let library = device
             .newLibraryWithSource_options_error(&NSString::from_str(shaders::SOURCE), None)
             .map_err(|e| RendererError::Shader(e.localizedDescription().to_string()))?;
-        let quad_pipeline = make_pipeline(&device, &library, "quad_vertex", "quad_fragment")?;
-        let path_pipeline = make_pipeline(&device, &library, "path_vertex", "path_fragment")?;
+        let quad_pipeline = make_pipeline(&device, &library, "quad_vertex", "quad_fragment", false)?;
+        let erase_pipeline =
+            make_pipeline(&device, &library, "quad_vertex", "quad_fragment", true)?;
+        let path_pipeline = make_pipeline(&device, &library, "path_vertex", "path_fragment", false)?;
         let nearest = make_sampler(&device, MTLSamplerMinMagFilter::Nearest)?;
         let linear = make_sampler(&device, MTLSamplerMinMagFilter::Linear)?;
         let dummy = gpu::new_texture(&device, MTLPixelFormat::R8Unorm, 1, 1)
@@ -296,6 +310,7 @@ impl Renderer {
             device,
             queue,
             quad_pipeline,
+            erase_pipeline,
             path_pipeline,
             nearest,
             linear,
@@ -450,6 +465,49 @@ impl Renderer {
                             kind: KIND_RECT,
                         },
                         TexSource::None,
+                        false,
+                    );
+                }
+                DrawCmd::Erase {
+                    rect,
+                    corner_radius,
+                    alpha,
+                    stroke_width,
+                    stroke_alpha,
+                } => {
+                    let sw = stroke_width.max(0.0);
+                    let a = alpha.clamp(0.0, 1.0);
+                    let sa = if sw > 0.0 {
+                        stroke_alpha.clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    if rect.is_empty() || (a <= 0.0 && sa <= 0.0) {
+                        continue;
+                    }
+                    // Grow the region by half the stroke so that the rounded-rect shader's
+                    // inset (`border_width / 2`) lands exactly on `rect`: fill = `rect`,
+                    // stroke centred on its edge.
+                    let region = rect.inset(-sw / 2.0, -sw / 2.0);
+                    if !clip.intersects(&region) {
+                        continue;
+                    }
+                    let r = util::clamp_corner_radius(rect.width, rect.height, *corner_radius);
+                    self.push_quad(
+                        QuadInstance {
+                            rect: rect4(&region),
+                            color: [0.0, 0.0, 0.0, a],
+                            border_color: [0.0, 0.0, 0.0, sa],
+                            uv: [0.0; 4],
+                            clip: clip.rect,
+                            rclip: clip.rclip,
+                            radius: r,
+                            border_width: sw,
+                            rclip_radius: clip.rclip_radius,
+                            kind: KIND_RECT,
+                        },
+                        TexSource::None,
+                        true,
                     );
                 }
                 DrawCmd::Text {
@@ -495,6 +553,7 @@ impl Renderer {
                             color: g.color,
                             page: g.page,
                         },
+                        false,
                     );
                 }
                 DrawCmd::Image {
@@ -531,6 +590,7 @@ impl Renderer {
                             kind,
                         },
                         TexSource::Image(*image),
+                        false,
                     );
                 }
                 DrawCmd::Path {
@@ -573,17 +633,18 @@ impl Renderer {
         }
     }
 
-    fn push_quad(&mut self, q: QuadInstance, tex: TexSource) {
+    fn push_quad(&mut self, q: QuadInstance, tex: TexSource, erase: bool) {
         let index = self.quads.len() as u32;
         self.quads.push(q);
         if let Some(Batch::Quads {
             tex: batch_tex,
             count,
+            erase: batch_erase,
             ..
         }) = self.batches.last_mut()
         {
-            let compatible =
-                tex == TexSource::None || *batch_tex == TexSource::None || *batch_tex == tex;
+            let compatible = *batch_erase == erase
+                && (tex == TexSource::None || *batch_tex == TexSource::None || *batch_tex == tex);
             if compatible {
                 if *batch_tex == TexSource::None {
                     *batch_tex = tex;
@@ -596,6 +657,7 @@ impl Renderer {
             tex,
             start: index,
             count: 1,
+            erase,
         });
     }
 
@@ -683,17 +745,36 @@ impl Renderer {
         let uniforms_ptr = NonNull::from(&uniforms).cast::<c_void>();
         let buffer = self.frames[self.frame_index].buffer.clone();
         let mut draw_calls = 0u32;
-        // 0 = none, 1 = quads, 2 = paths
+        // 0 = none, 1 = quads, 2 = paths, 3 = erase quads
         let mut bound = 0u8;
 
         for batch in &self.batches {
             match *batch {
-                Batch::Quads { tex, start, count } => {
+                Batch::Quads {
+                    tex,
+                    start,
+                    count,
+                    erase,
+                } => {
                     let Some(buf) = buffer.as_deref() else {
                         continue;
                     };
-                    if bound != 1 {
-                        enc.setRenderPipelineState(&self.quad_pipeline);
+                    let want = if erase { 3 } else { 1 };
+                    if bound == 1 || bound == 3 {
+                        if bound != want {
+                            enc.setRenderPipelineState(if erase {
+                                &self.erase_pipeline
+                            } else {
+                                &self.quad_pipeline
+                            });
+                            bound = want;
+                        }
+                    } else {
+                        enc.setRenderPipelineState(if erase {
+                            &self.erase_pipeline
+                        } else {
+                            &self.quad_pipeline
+                        });
                         // SAFETY: the buffer outlives the command buffer (Metal retains
                         // it); the uniform bytes are copied by Metal during the call and
                         // match the shader's `Uniforms` layout; buffer/sampler indices
@@ -714,7 +795,7 @@ impl Renderer {
                             enc.setFragmentSamplerState_atIndex(Some(&self.nearest), 0);
                             enc.setFragmentSamplerState_atIndex(Some(&self.linear), 1);
                         }
-                        bound = 1;
+                        bound = want;
                     }
                     let texture: &ProtocolObject<dyn MTLTexture> = match tex {
                         TexSource::None => &self.dummy,
