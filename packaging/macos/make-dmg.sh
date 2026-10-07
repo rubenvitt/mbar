@@ -10,6 +10,11 @@ IDENTITY="${MBAR_SIGN_IDENTITY:?set MBAR_SIGN_IDENTITY to a Developer ID identit
 ZIP=$DIST/mbar-$VERSION.zip; DMG=$DIST/mbar-$VERSION.dmg
 NOTARIZE=${NOTARIZE:-1}
 
+# Sparkle 2 refuses to start without a public EdDSA key, so a release bundle without
+# one would silently never update.
+KEY=$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$APP/Contents/Info.plist" 2>/dev/null || true)
+[ -n "$KEY" ] || { echo "SUPublicEDKey is empty: set SPARKLE_PUBLIC_KEY in packaging/macos/sparkle.env and rebuild" >&2; exit 1; }
+
 notarize() {
   if [ -n "${ASC_KEY_PATH:-}" ]; then
     xcrun notarytool submit "$1" --key "$ASC_KEY_PATH" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --wait

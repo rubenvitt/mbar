@@ -28,7 +28,7 @@ TARGET_DIR    := $(or $(TARGET_DIR),target)
 UI_TARGET_DIR := $(or $(UI_TARGET_DIR),$(UI_DIR)/target)
 
 .PHONY: all help build release test lint fmt ui ui-test install install-ui \
-        install-agent uninstall-agent uninstall clean dmg
+        install-agent uninstall-agent uninstall clean app verify-app dmg
 
 all: build
 
@@ -47,6 +47,8 @@ help:
 	@echo "  uninstall-agent  unload and remove the LaunchAgent"
 	@echo "  uninstall        uninstall-agent + remove installed files"
 	@echo "  clean            cargo clean (workspace and mbar-ui)"
+	@echo "  app              build dist/mbar.app (MBAR_SIGN_IDENTITY, MBAR_UNIVERSAL)"
+	@echo "  verify-app       structural checks of dist/mbar.app"
 	@echo "  dmg              notarized dist/mbar-<v>.dmg, update zip, appcast.xml (NOTARIZE, MBAR_SIGN_IDENTITY)"
 
 build:
@@ -114,6 +116,12 @@ uninstall: uninstall-agent
 	fi
 	rm -f "$(DESTDIR)$(DATADIR)/mbar.d.lua"
 	-rmdir "$(DESTDIR)$(DATADIR)" 2>/dev/null
+
+app:
+	packaging/macos/build-app.sh
+
+verify-app:
+	packaging/macos/verify-app.sh dist/mbar.app
 
 dmg: app
 	packaging/macos/make-dmg.sh

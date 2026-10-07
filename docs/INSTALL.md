@@ -119,10 +119,12 @@ make verify-app   # structural checks of the bundle
 `dist/mbar.app`. Both Rust targets must be installed
 (`rustup target add aarch64-apple-darwin x86_64-apple-darwin`), or build for the
 host only with `MBAR_UNIVERSAL=0`. Without `MBAR_SIGN_IDENTITY` the bundle is
-signed ad hoc, which is enough to run it on your own Mac. A locally built
-bundle checks the official feed like the released app, so it may offer to update
-itself to the latest release; turn automatic checks off on the System page to
-keep your build.
+signed ad hoc, which is enough to run it on your own Mac. Once
+`packaging/macos/sparkle.env` carries the project's public EdDSA key, a locally
+built bundle checks the official feed like the released app, so it may offer to
+update itself to the latest release; turn automatic checks off on the System page
+to keep your build. With an empty key Sparkle does not start at all, so the bundle
+never checks for updates.
 `make dmg` (needs a Developer ID identity in `MBAR_SIGN_IDENTITY`, the Sparkle
 EdDSA private key in the login keychain or in `SPARKLE_KEY_FILE`, and
 notarization credentials unless `NOTARIZE=0`) builds the DMG, the update zip and
