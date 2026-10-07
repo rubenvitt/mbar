@@ -39,11 +39,15 @@ providers and a native application menu.
 - **GPU (Metal) renderer.** One `CAMetalLayer` per bar and popup window.
   Instanced shape and text quads. Animations are paced to the display's refresh
   rate.
-- **Management UI (`mbar-ui`, optional).** A separate app built with
-  [GPUI](https://www.gpui.rs) and [gpui-kit](https://gpui-kit.com). It has a live
+- **Management UI (`mbar.app`).** Built with
+  [GPUI](https://www.gpui.rs) and [gpui-kit](https://gpui-kit.com), in a process
+  separate from the bar. It has first-launch setup, a live
   item inspector with property editing, an event log, performance statistics
   (frame times, script spawns, slowest handlers), and a system page for
-  permissions, menu-bar auto-hide, launch at login and config reload.
+  permissions, menu-bar auto-hide, launch at login, updates and config reload.
+- **Signed app with auto-updates.** A notarized `mbar.app` in a DMG. The daemon
+  checks for new versions once a day and the app installs them with
+  [Sparkle](https://sparkle-project.org).
 - **Introspection.** `mbar --query stats` returns runtime statistics.
   `mbar --monitor events|stats|all` streams events and statistics as JSON lines.
 
@@ -54,7 +58,16 @@ corruption and undefined behaviour replaced by defined behaviour) are in
 
 ## Quick start
 
-Requirements: macOS, the Xcode Command Line Tools, and a stable Rust toolchain.
+Install the app (macOS 13 or later):
+
+1. Download `mbar-<version>.dmg` from the
+   [latest release](https://github.com/rubenvitt/mbar/releases/latest).
+2. Open it and drag **mbar** to **Applications**.
+3. Open mbar and follow the setup page. It takes over an existing SketchyBar
+   setup and config, puts `mbar` and `sketchybar` on the `PATH`, starts the bar
+   at login and asks for the permissions it needs. mbar updates itself.
+
+Or build from source (Xcode Command Line Tools and a stable Rust toolchain):
 
 ```sh
 git clone https://github.com/rubenvitt/mbar.git
@@ -63,7 +76,7 @@ make release                      # cargo build --release -p mbar
 make install PREFIX=$HOME/.local  # installs mbar plus a `sketchybar` symlink
 ```
 
-Then write a config and start the daemon:
+Then write a config (or keep your `sketchybarrc`):
 
 ```lua
 -- ~/.config/mbar/init.lua
@@ -79,14 +92,16 @@ mbar.add("item", "battery", { position = "right", provider = "battery" })
 ```
 
 ```sh
-mbar                    # start the daemon in the foreground
-mbar --menubar hide     # from another shell: auto-hide the native menu bar
+mbar --reload ~/.config/mbar/init.lua  # app: the daemon is already running, load this config
+mbar                                   # source build: start the daemon in the foreground
+mbar --menubar hide                    # auto-hide the native menu bar
 ```
 
 A shell `sketchybarrc` works too. If no mbar config exists, mbar reads
-`~/.config/sketchybar/sketchybarrc`. To start mbar at login, run
-`make install-agent PREFIX=$HOME/.local`. See [`docs/INSTALL.md`](docs/INSTALL.md) for the details:
-permissions, the LaunchAgent and uninstalling.
+`~/.config/sketchybar/sketchybarrc`. With a source build, run
+`make install-agent PREFIX=$HOME/.local` to start mbar at login. See
+[`docs/INSTALL.md`](docs/INSTALL.md) for the details: the app's setup and
+updates, permissions, the LaunchAgent and uninstalling.
 
 ## Coming from SketchyBar
 
@@ -123,7 +138,7 @@ hardware.
 
 | Document | Contents |
 |---|---|
-| [`docs/INSTALL.md`](docs/INSTALL.md) | Building, installing, LaunchAgent, permissions, uninstalling |
+| [`docs/INSTALL.md`](docs/INSTALL.md) | The app and its setup, updates, building from source, LaunchAgent, permissions, uninstalling |
 | [`docs/MIGRATING.md`](docs/MIGRATING.md) | Switching from SketchyBar / SbarLua |
 | [`docs/LUA.md`](docs/LUA.md) | Lua configuration API |
 | [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) | Commands, properties, providers and the `app_menu` item that are new in mbar |
@@ -138,6 +153,7 @@ make build      # debug build of the workspace
 make test       # cargo test --workspace (also runs on Linux, headless)
 make lint       # rustfmt check + clippy -D warnings
 make ui         # build the management app (crates/mbar-ui, its own workspace)
+make app        # assemble dist/mbar.app (macOS)
 ```
 
 On Linux, `mbar` runs with a headless platform: no windows, deterministic text

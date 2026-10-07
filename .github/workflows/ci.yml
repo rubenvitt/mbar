@@ -57,3 +57,25 @@ jobs:
           workspaces: crates/mbar-ui -> target
       - run: cargo build --release
       - run: cargo test --no-default-features
+
+  app-bundle:
+    name: macOS (mbar.app, ad-hoc)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            crates/mbar-ui -> target
+      - run: bash packaging/macos/test-appcast.sh
+      # The bundle steps activate once packaging/macos/build-app.sh (Task 8) lands.
+      - run: make app
+        if: hashFiles('packaging/macos/build-app.sh') != ''
+        env:
+          MBAR_SIGN_IDENTITY: "-"
+      - run: make verify-app
+        if: hashFiles('packaging/macos/build-app.sh') != ''

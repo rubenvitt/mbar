@@ -262,6 +262,7 @@ fn stats_fields(stats: &Stats, items: usize, compact: bool) -> Vec<(String, Stri
         ("lua", lua),
         ("events", counts(&stats.events)),
         ("ipc_messages", stats.ipc_messages.to_string()),
+        ("version", format!("\"{}\"", env!("CARGO_PKG_VERSION"))),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))

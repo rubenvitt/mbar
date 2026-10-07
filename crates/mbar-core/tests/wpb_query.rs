@@ -504,7 +504,7 @@ fn sample_stats() -> Stats {
     s
 }
 
-const STATS_KEYS: [&str; 11] = [
+const STATS_KEYS: [&str; 12] = [
     "uptime_s",
     "items",
     "windows",
@@ -516,6 +516,7 @@ const STATS_KEYS: [&str; 11] = [
     "lua",
     "events",
     "ipc_messages",
+    "version",
 ];
 
 #[test]
@@ -533,8 +534,9 @@ fn stats_shape() {
 \"by_item\": { \"clock\": { \"runs\": 120, \"avg_ms\": 3.2, \"max_ms\": 9.0 } } },\n\
 \t\"lua\": { \"callbacks\": 400, \"avg_us\": 35, \"max_us\": 900 },\n\
 \t\"events\": { \"front_app_switched\": 31, \"routine\": 600 },\n\
-\t\"ipc_messages\": 950\n\
-}\n";
+\t\"ipc_messages\": 950,\n"
+        .to_string()
+        + &format!("\t\"version\": \"{}\"\n}}\n", env!("CARGO_PKG_VERSION"));
     assert_eq!(out, expected);
     let v = assert_json(&out);
     let keys: Vec<&str> = STATS_KEYS.to_vec();
@@ -545,6 +547,24 @@ fn stats_shape() {
     assert_eq!(v["scripts"]["by_item"]["clock"]["runs"], 120);
     assert_eq!(v["frame_time_us"]["p95"], 640);
     assert_eq!(v["uptime_s"], 1234.5);
+}
+
+#[test]
+fn stats_reports_version_last() {
+    let out = stats_json(&Stats::default(), 0);
+    let last = out
+        .trim_end()
+        .trim_end_matches('}')
+        .trim_end()
+        .lines()
+        .last()
+        .unwrap();
+    assert_eq!(
+        last,
+        format!("\t\"version\": \"{}\"", env!("CARGO_PKG_VERSION"))
+    );
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
 }
 
 #[test]

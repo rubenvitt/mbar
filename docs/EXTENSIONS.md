@@ -30,9 +30,12 @@ existing configs behave exactly as documented in `docs/spec/`.
                "by_item": { "clock": { "runs": 120, "avg_ms": 3.2, "max_ms": 9.0 } } },
   "lua": { "callbacks": 400, "avg_us": 35, "max_us": 900 },
   "events": { "front_app_switched": 31, "routine": 600 },
-  "ipc_messages": 950
+  "ipc_messages": 950,
+  "version": "0.1.0"
 }
 ```
+
+`version` is the daemon version (semver), used by mbar.app to detect a stale daemon after an update.
 
 ## Item properties
 

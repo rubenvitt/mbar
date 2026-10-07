@@ -7,9 +7,21 @@ needs a few small edits.
 
 ## Quick checklist
 
+1. Install `mbar.app` ([`INSTALL.md`](INSTALL.md)); its setup stops and
+   removes SketchyBar for you. It also puts `mbar` and `sketchybar` on the
+   `PATH`, starts mbar at login and asks for Accessibility / Screen Recording.
+   The setup handles Homebrew SketchyBar; if you start SketchyBar some other
+   way (your own LaunchAgent), stop that yourself.
+2. Leave the config where it is (`~/.config/sketchybar/sketchybarrc`) or copy it
+   to `~/.config/mbar/`. mbar finds both. A SbarLua `sketchybarrc` gets an
+   `init.lua` from the setup (see [below](#from-sbarlua-to-mbars-lua) for what it
+   changes).
+
+Alternatively, build from source:
+
 1. Install mbar with the `sketchybar -> mbar` symlink on the `PATH`
-   ([`INSTALL.md`](INSTALL.md)). Make sure no real `sketchybar` binary comes
-   before it.
+   ([`INSTALL.md`](INSTALL.md#build-from-source)). Make sure no real
+   `sketchybar` binary comes before it.
 2. Stop SketchyBar: `brew services stop sketchybar`, or unload your own
    LaunchAgent.
 3. Leave the config where it is (`~/.config/sketchybar/sketchybarrc`) or copy it

@@ -169,10 +169,18 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "log",
+ "mbar-app",
  "mbar-core",
  "mbar-ipc",
  "mbar-lua",
  "mbar-macos",
+ "serde_json",
+]
+
+[[package]]
+name = "mbar-app"
+version = "0.1.0"
+dependencies = [
  "serde_json",
 ]
 

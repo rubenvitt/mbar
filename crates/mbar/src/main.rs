@@ -19,6 +19,7 @@ mod logging;
 mod platform;
 mod scripts;
 mod signals;
+mod updater;
 
 use std::ffi::OsString;
 use std::path::PathBuf;

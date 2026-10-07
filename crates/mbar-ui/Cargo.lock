@@ -3875,6 +3875,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mbar-app"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "mbar-ipc"
 version = "0.1.0"
 dependencies = [
@@ -3889,6 +3896,7 @@ version = "0.1.0"
 dependencies = [
  "async-channel",
  "gpui-kit",
+ "mbar-app",
  "mbar-ipc",
  "serde_json",
 ]
