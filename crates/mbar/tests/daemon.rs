@@ -479,7 +479,10 @@ mbar.delay(0.1, function() mbar.set("lua", { icon = "delayed" }) end)
     let _d = sb.daemon();
     let v = sb.wait_for("lua", "delay callback", |v| v["icon"]["value"] == "delayed");
     assert_eq!(label(&v), "start");
-    assert!(v["script"].as_str().unwrap_or("").starts_with("lua:"));
+    assert!(v["scripting"]["script"]
+        .as_str()
+        .unwrap_or("")
+        .starts_with("lua:"));
     sb.wait_for("dir", "exec callback", |v| {
         label(v) == "mbar" && v["icon"]["value"] == "exec-out"
     });

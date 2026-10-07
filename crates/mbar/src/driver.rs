@@ -59,9 +59,6 @@ pub enum Event {
 /// Posts an [`Event`] to the main loop (and wakes it). Called from any thread.
 pub type Post = Arc<dyn Fn(Event) + Send + Sync>;
 
-/// Interval of `--monitor stats` snapshots.
-const STATS_PERIOD: Duration = Duration::from_secs(1);
-
 /// Static daemon setup.
 #[derive(Debug, Clone)]
 pub struct DriverConfig {
@@ -119,10 +116,6 @@ pub struct Driver {
     pending: HashMap<ReplyToken, Responder>,
     pending_monitors: HashMap<ReplyToken, (Responder, MonitorMode)>,
     monitors: Vec<MonitorSub>,
-    /// Next platform-generated stats snapshot (only while stats subscribers exist and the
-    /// runtime does not stream stats itself).
-    stats_next: Option<Instant>,
-    runtime_streams_stats: bool,
     lua: Option<LuaEngine>,
     /// Bumped on every config (re)load; stale Lua exec/timer callbacks are dropped.
     lua_generation: u64,
@@ -153,8 +146,6 @@ impl Driver {
             pending: HashMap::new(),
             pending_monitors: HashMap::new(),
             monitors: Vec::new(),
-            stats_next: None,
-            runtime_streams_stats: false,
             lua: None,
             lua_generation: 0,
             lua_timers: Vec::new(),
@@ -233,9 +224,6 @@ impl Driver {
                     .push_back(Deferred::TimerFired { generation, id });
             }
         }
-        if self.stats_next.is_some_and(|t| t <= now) {
-            self.stats_tick(now, res);
-        }
         self.drain(res);
         if !self.exit && self.rt.needs_frame() {
             Some(self.rt.frame(res.now(), res))
@@ -247,10 +235,7 @@ impl Driver {
     /// When [`Driver::poll`] must run next (`None`: only on events).
     pub fn next_deadline(&self) -> Option<Instant> {
         let lua = self.lua_timers.iter().map(|t| t.0).min();
-        [self.rt.next_deadline(), lua, self.stats_next]
-            .into_iter()
-            .flatten()
-            .min()
+        [self.rt.next_deadline(), lua].into_iter().flatten().min()
     }
 
     // ------------------------------------------------------------------ requests
@@ -276,6 +261,11 @@ impl Driver {
         }
         let fx = self.rt.handle(Input::Message { args, reply: token }, res);
         self.apply(fx, res);
+        // The runtime does not reply to an accepted `--monitor` (the connection stays
+        // open); an error reply has already been delivered by `apply`.
+        if let Some((r, mode)) = self.pending_monitors.remove(&token) {
+            self.start_monitor(r, mode, String::new());
+        }
     }
 
     /// Runs a message synchronously and returns its reply (Lua `Host::command`, stats).
@@ -301,7 +291,7 @@ impl Driver {
         if let Some(r) = self.pending.remove(&token) {
             r.respond(&text);
         } else if let Some((r, mode)) = self.pending_monitors.remove(&token) {
-            self.start_monitor(r, mode, text, res);
+            self.start_monitor(r, mode, text);
         } else {
             log::debug!("reply for unknown token {token:?}");
         }
@@ -337,12 +327,7 @@ impl Driver {
                 Effect::Log(msg) => daemon_log(&msg),
                 Effect::Monitor(line) => {
                     let line = compact_json(&line);
-                    let stats = is_stats_line(&line);
-                    if stats && !self.runtime_streams_stats {
-                        self.runtime_streams_stats = true;
-                        self.stats_next = None;
-                    }
-                    self.broadcast(&line, stats);
+                    self.broadcast(&line, is_stats_line(&line));
                 }
             }
         }
@@ -518,13 +503,7 @@ impl Driver {
 
     // ------------------------------------------------------------------ --monitor
 
-    fn start_monitor(
-        &mut self,
-        responder: Responder,
-        mode: MonitorMode,
-        text: String,
-        res: &mut dyn Resources,
-    ) {
+    fn start_monitor(&mut self, responder: Responder, mode: MonitorMode, text: String) {
         if mbar_ipc::is_error_response(&text) {
             responder.respond(&text);
             return;
@@ -537,11 +516,7 @@ impl Driver {
                     return;
                 }
                 let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
-                let sub = MonitorSub { stream, mode };
-                if sub.wants(true) && !self.runtime_streams_stats && self.stats_next.is_none() {
-                    self.stats_next = Some(res.now());
-                }
-                self.monitors.push(sub);
+                self.monitors.push(MonitorSub { stream, mode });
             }
             Err(r) => r.respond("[!] Monitor: only available over the Unix socket\n"),
         }
@@ -559,23 +534,6 @@ impl Driver {
             !m.wants(stats)
                 || mbar_ipc::socket::write_frame(&mut m.stream, frame.as_bytes()).is_ok()
         });
-        if !self.monitors.iter().any(|m| m.wants(true)) {
-            self.stats_next = None;
-        }
-    }
-
-    /// Platform-side `--monitor stats` snapshot: `--query stats` with `"type":"stats"`.
-    /// Disabled as soon as the runtime emits stats lines itself.
-    fn stats_tick(&mut self, now: Instant, res: &mut dyn Resources) {
-        if self.runtime_streams_stats || !self.monitors.iter().any(|m| m.wants(true)) {
-            self.stats_next = None;
-            return;
-        }
-        self.stats_next = Some(now + STATS_PERIOD);
-        let json = self.command_sync(vec!["--query".into(), "stats".into()], res);
-        if let Some(line) = stats_line(&json) {
-            self.broadcast(&line, true);
-        }
     }
 }
 
@@ -666,20 +624,6 @@ fn is_stats_line(line: &str) -> bool {
     line.contains("\"type\":\"stats\"")
 }
 
-/// `--query stats` JSON → `{"type":"stats",…}` on one line.
-fn stats_line(json: &str) -> Option<String> {
-    let c = compact_json(json);
-    let body = c.strip_prefix('{')?;
-    if !c.ends_with('}') {
-        return None;
-    }
-    Some(if body == "}" {
-        "{\"type\":\"stats\"}".to_string()
-    } else {
-        format!("{{\"type\":\"stats\",{body}")
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -712,13 +656,7 @@ mod tests {
             compact_json("{\n\t\"a b\": \"x\\\" y\",\n\t\"c\": [1, 2]\n}\n"),
             "{\"a b\":\"x\\\" y\",\"c\":[1,2]}"
         );
-        assert_eq!(
-            stats_line("{\n\t\"uptime_s\": 1.5,\n\t\"items\": 2\n}\n").as_deref(),
-            Some("{\"type\":\"stats\",\"uptime_s\":1.5,\"items\":2}")
-        );
-        assert_eq!(stats_line("{}").as_deref(), Some("{\"type\":\"stats\"}"));
-        assert_eq!(stats_line("[!] nope\n"), None);
-        assert!(is_stats_line(&stats_line("{}").unwrap()));
+        assert!(is_stats_line("{\"type\":\"stats\",\"frames\":3}"));
         assert!(!is_stats_line("{\"type\":\"event\",\"name\":\"x\"}"));
     }
 
