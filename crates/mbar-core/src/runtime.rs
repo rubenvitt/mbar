@@ -612,9 +612,7 @@ impl Runtime {
                 match self.model.events.append(&name, notification.as_deref()) {
                     AppendResult::Added(_) => {
                         if let Some(n) = notification {
-                            effects.push(Effect::Platform(PlatformRequest::ObserveNotification(
-                                n,
-                            )));
+                            effects.push(Effect::Platform(PlatformRequest::ObserveNotification(n)));
                         }
                     }
                     AppendResult::Exists => {}
@@ -673,7 +671,9 @@ impl Runtime {
                             Vec::new()
                         }
                     },
-                    Selector::Regex(tok) => self.regex_select(tok, sel.pattern().unwrap_or(""), rsp),
+                    Selector::Regex(tok) => {
+                        self.regex_select(tok, sel.pattern().unwrap_or(""), rsp)
+                    }
                 };
                 for id in ids {
                     self.remove_item(id, effects);
@@ -723,9 +723,10 @@ impl Runtime {
                 false
             }
             Command::Menu(which) => {
-                let index = which.parse::<usize>().ok().or_else(|| {
-                    self.menu_titles.iter().position(|t| *t == which)
-                });
+                let index = which
+                    .parse::<usize>()
+                    .ok()
+                    .or_else(|| self.menu_titles.iter().position(|t| *t == which));
                 match index {
                     Some(index) => {
                         effects.push(Effect::Platform(PlatformRequest::OpenMenu { index }))
@@ -744,9 +745,7 @@ impl Runtime {
                     None => None,
                 };
                 match hide {
-                    Some(h) => {
-                        effects.push(Effect::Platform(PlatformRequest::SetMenuBarHidden(h)))
-                    }
+                    Some(h) => effects.push(Effect::Platform(PlatformRequest::SetMenuBarHidden(h))),
                     None => {
                         rsp.push_str(
                             "[!] Menubar: Invalid argument, expected 'hide', 'show' or 'toggle'\n",
@@ -922,10 +921,15 @@ impl Runtime {
                     let _ = write!(rsp, "{e}");
                 }
             }
-            refresh |= self.apply_requests(None, reqs, fx, rsp, effects, res).refresh;
+            refresh |= self
+                .apply_requests(None, reqs, fx, rsp, effects, res)
+                .refresh;
         }
         if let Some(t) = malformed {
-            let _ = write!(rsp, "[!] Bar: Expected <key>=<value> pair, but got: '{t}'\n");
+            let _ = write!(
+                rsp,
+                "[!] Bar: Expected <key>=<value> pair, but got: '{t}'\n"
+            );
         }
         refresh
     }
@@ -1058,11 +1062,7 @@ impl Runtime {
         }
 
         if !add.item_type.is_empty() && add.item_type != "item" {
-            let width = add
-                .args
-                .first()
-                .map(|w| value::parse_u32(w))
-                .unwrap_or(0);
+            let width = add.args.first().map(|w| value::parse_u32(w)).unwrap_or(0);
             match t {
                 ItemType::Graph => {
                     if let Some(item) = self.model.item_mut(id) {
@@ -1092,8 +1092,8 @@ impl Runtime {
                 }
                 ItemType::Bracket => {
                     let mut first_resolved = false;
-                    let members =
-                        std::iter::once(add.position.as_str()).chain(add.args.iter().map(String::as_str));
+                    let members = std::iter::once(add.position.as_str())
+                        .chain(add.args.iter().map(String::as_str));
                     for tok in members {
                         if tok.is_empty() {
                             continue;
@@ -1215,7 +1215,11 @@ impl Runtime {
             Some(Placement::After) => self.move_item(id, pid, false),
             None => {}
         }
-        if self.model.item(id).is_some_and(|i| i.provider.kind.is_some()) {
+        if self
+            .model
+            .item(id)
+            .is_some_and(|i| i.provider.kind.is_some())
+        {
             self.configure_provider(id, effects);
         }
     }
@@ -1459,7 +1463,9 @@ impl Runtime {
         self.send_mach_destroy(effects);
         for it in &self.model.items {
             if it.provider.kind.is_some() {
-                effects.push(Effect::Platform(PlatformRequest::StopProvider { item: it.id }));
+                effects.push(Effect::Platform(PlatformRequest::StopProvider {
+                    item: it.id,
+                }));
             }
         }
         self.animator.clear();
@@ -1590,7 +1596,10 @@ impl Runtime {
             });
         }
         if let Some((service, payload)) = mach_payload {
-            effects.push(Effect::Platform(PlatformRequest::MachSend { service, payload }));
+            effects.push(Effect::Platform(PlatformRequest::MachSend {
+                service,
+                payload,
+            }));
         }
         true
     }
@@ -1663,7 +1672,13 @@ impl Runtime {
     }
 
     /// One `--monitor` event line (extension).
-    fn monitor_event(&self, name: &str, sender: &str, info: Option<&str>, items: &[String]) -> Effect {
+    fn monitor_event(
+        &self,
+        name: &str,
+        sender: &str,
+        info: Option<&str>,
+        items: &[String],
+    ) -> Effect {
         let info = match info {
             Some(s) => serde_json::from_str::<serde_json::Value>(s)
                 .ok()
@@ -1696,7 +1711,13 @@ impl Runtime {
         effects: &mut Vec<Effect>,
     ) {
         self.count_event(name);
-        let ran = self.update_item(id, Some(Sender::Event(name.to_string())), forced, env, effects);
+        let ran = self.update_item(
+            id,
+            Some(Sender::Event(name.to_string())),
+            forced,
+            env,
+            effects,
+        );
         if self.monitor_events {
             let items: Vec<String> = if ran {
                 self.model.name_of(id).into_iter().collect()
@@ -2099,7 +2120,11 @@ impl Runtime {
             }
             if !self.model.items[idx].overrides_association {
                 let sp = self.model.items[idx].associated_space;
-                let space = if sp == 0 { u32::MAX } else { sp.trailing_zeros() };
+                let space = if sp == 0 {
+                    u32::MAX
+                } else {
+                    sp.trailing_zeros()
+                };
                 let adid = if space == u32::MAX || space == 0 {
                     None
                 } else {
@@ -2205,7 +2230,9 @@ impl Runtime {
             WindowHit::Item(id) => Some(id),
             _ => None,
         };
-        if item.map_or(true, |id| self.model.item(id).map_or(true, |i| i.is_bracket())) {
+        if item.map_or(true, |id| {
+            self.model.item(id).map_or(true, |i| i.is_bracket())
+        }) {
             item = layout::item_at_point(&self.model, p);
         }
         (hit, item)
@@ -2287,7 +2314,10 @@ impl Runtime {
                     let over = self.model.bar(adid).is_some_and(|b| b.mouse_over);
                     if over && !self.any_popup_mouse_over() {
                         let env = event::scroll_global_env(total, adid, m.modifiers);
-                        self.trigger_event(EventInfo::new("mouse.scrolled.global", Some(env)), effects);
+                        self.trigger_event(
+                            EventInfo::new("mouse.scrolled.global", Some(env)),
+                            effects,
+                        );
                     }
                 }
                 WindowHit::Popup(host) => {
@@ -2298,7 +2328,10 @@ impl Runtime {
                         .unwrap_or((false, 0));
                     if over && !self.any_bar_mouse_over() {
                         let env = event::scroll_global_env(total, adid, m.modifiers);
-                        self.trigger_event(EventInfo::new("mouse.scrolled.global", Some(env)), effects);
+                        self.trigger_event(
+                            EventInfo::new("mouse.scrolled.global", Some(env)),
+                            effects,
+                        );
                     }
                 }
                 _ => {}
@@ -2338,7 +2371,9 @@ impl Runtime {
 
     /// `bar_item_mouse_entered`.
     fn mouse_entered(&mut self, id: ItemId, effects: &mut Vec<Effect>) {
-        let Some(it) = self.model.item(id) else { return };
+        let Some(it) = self.model.item(id) else {
+            return;
+        };
         if it.update_mask.has(EventKind::MouseEntered) && !it.mouse_over {
             self.deliver(id, "mouse.entered", true, None, effects);
         }
@@ -2349,7 +2384,9 @@ impl Runtime {
 
     /// `bar_item_mouse_exited` (no `mouse_over` precondition).
     fn mouse_exited(&mut self, id: ItemId, effects: &mut Vec<Effect>) {
-        let Some(it) = self.model.item(id) else { return };
+        let Some(it) = self.model.item(id) else {
+            return;
+        };
         if it.update_mask.has(EventKind::MouseExited) {
             self.deliver(id, "mouse.exited", true, None, effects);
         }
@@ -2440,7 +2477,9 @@ impl Runtime {
                     }
                     self.exit_global(effects);
                 } else if !over_origin {
-                    if let Some(b) = target.and_then(|a| self.model.bars.iter_mut().find(|b| b.adid == a)) {
+                    if let Some(b) =
+                        target.and_then(|a| self.model.bars.iter_mut().find(|b| b.adid == a))
+                    {
                         b.mouse_over = true;
                     }
                     let mask = match self.model.item_mut(host) {
@@ -2607,8 +2646,7 @@ impl Runtime {
             if draws && in_display && !drawn_here {
                 return true;
             }
-            if draws && item.associated_to_active_display && m.active_adid == adid && !drawn_here
-            {
+            if draws && item.associated_to_active_display && m.active_adid == adid && !drawn_here {
                 return true;
             }
             if !item.associated_to_active_display
@@ -2684,7 +2722,9 @@ impl Runtime {
             self.dirty.insert(WindowKey::Bar(adid));
             let bit = bit32(adid - 1);
             for idx in 0..self.model.items.len() {
-                let draws = self.model.draws_item(&self.model.bars[i], &self.model.items[idx]);
+                let draws = self
+                    .model
+                    .draws_item(&self.model.bars[i], &self.model.items[idx]);
                 let it = &mut self.model.items[idx];
                 if draws {
                     it.associated_bar |= bit;
@@ -2849,7 +2889,10 @@ impl Runtime {
         if !it.has_alias() {
             return;
         }
-        if it.alias.apply_capture(image, window_id, frame, disabled, false) {
+        if it
+            .alias
+            .apply_capture(image, window_id, frame, disabled, false)
+        {
             it.needs_update = true;
         }
     }
@@ -2894,7 +2937,11 @@ impl Runtime {
                 handler,
             } => {
                 let mut rsp = String::new();
-                match self.model.find(&item).and_then(|id| self.model.item_mut(id)) {
+                match self
+                    .model
+                    .find(&item)
+                    .and_then(|id| self.model.item_mut(id))
+                {
                     Some(it) => {
                         it.lua_handler = Some(handler);
                         let evs: Vec<String> = events

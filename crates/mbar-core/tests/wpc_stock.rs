@@ -8,7 +8,13 @@ const P: &str = "/cfg/plugins";
 
 pub fn stock(h: &mut H) {
     assert_eq!(
-        h.msg(&["--bar", "position=top", "height=40", "blur_radius=30", "color=0x40000000"]),
+        h.msg(&[
+            "--bar",
+            "position=top",
+            "height=40",
+            "blur_radius=30",
+            "color=0x40000000"
+        ]),
         ""
     );
     assert_eq!(

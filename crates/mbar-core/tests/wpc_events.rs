@@ -17,14 +17,43 @@ fn custom_trigger_env() {
     let mut h = H::new();
     assert_eq!(
         h.msg(&[
-            "--add", "item", "a", "left", "--set", "a", "script=echo a", "--add", "item", "b",
-            "left", "--set", "b", "script=echo b", "--add", "event", "my_ev",
-            "--subscribe", "a", "my_ev", "nope", "--subscribe", "missing", "my_ev",
+            "--add",
+            "item",
+            "a",
+            "left",
+            "--set",
+            "a",
+            "script=echo a",
+            "--add",
+            "item",
+            "b",
+            "left",
+            "--set",
+            "b",
+            "script=echo b",
+            "--add",
+            "event",
+            "my_ev",
+            "--subscribe",
+            "a",
+            "my_ev",
+            "nope",
+            "--subscribe",
+            "missing",
+            "my_ev",
         ]),
         "[?] Event: 'nope' not found\n[!] Subscribe: Item not found 'missing'\n"
     );
     assert_eq!(h.query(&["a"])["scripting"]["update_mask"], 1u64 << 18);
-    let (rsp, fx) = h.msg_fx(&["--trigger", "my_ev", "INFO=hi", "FOO=bar", "EMPTY=", "junk", "FOO=baz"]);
+    let (rsp, fx) = h.msg_fx(&[
+        "--trigger",
+        "my_ev",
+        "INFO=hi",
+        "FOO=bar",
+        "EMPTY=",
+        "junk",
+        "FOO=baz",
+    ]);
     assert_eq!(rsp.as_deref(), Some(""));
     let r = runs(&fx);
     assert_eq!(r.len(), 1);
@@ -38,7 +67,15 @@ fn custom_trigger_env() {
     assert_eq!(rsp.as_deref(), Some(""));
     assert!(runs(&fx).is_empty());
     // Duplicate event names are ignored; built-in triggers go through custom dispatch.
-    h.msg(&["--add", "event", "my_ev", "com.x", "--subscribe", "b", "brightness_change"]);
+    h.msg(&[
+        "--add",
+        "event",
+        "my_ev",
+        "com.x",
+        "--subscribe",
+        "b",
+        "brightness_change",
+    ]);
     let fx = h.msg_fx(&["--trigger", "brightness_change", "INFO=5"]).1;
     let r = runs(&fx);
     assert_eq!(r.len(), 1);
@@ -49,11 +86,27 @@ fn custom_trigger_env() {
 #[test]
 fn forced_triggers_query_the_system() {
     let mut h = H::new();
-    h.res.system.insert("Volume".into(), SystemValue::Level(0.5));
-    h.res.system.insert("Wifi".into(), SystemValue::Text("home".into()));
+    h.res
+        .system
+        .insert("Volume".into(), SystemValue::Level(0.5));
+    h.res
+        .system
+        .insert("Wifi".into(), SystemValue::Text("home".into()));
     let (_, fx) = h.msg_fx(&[
-        "--add", "item", "v", "right", "--set", "v", "script=v.sh", "--subscribe", "v",
-        "volume_change", "wifi_change", "media_change", "space_change", "display_change",
+        "--add",
+        "item",
+        "v",
+        "right",
+        "--set",
+        "v",
+        "script=v.sh",
+        "--subscribe",
+        "v",
+        "volume_change",
+        "wifi_change",
+        "media_change",
+        "space_change",
+        "display_change",
     ]);
     let p = platform(&fx);
     assert!(p.contains(&PlatformRequest::StartVolumeEvents));
@@ -80,10 +133,32 @@ fn forced_triggers_query_the_system() {
 fn update_gating_and_routine_counter() {
     let mut h = H::new();
     h.msg(&[
-        "--add", "item", "r", "left", "--set", "r", "script=r.sh", "update_freq=3",
-        "--add", "item", "off", "left", "--set", "off", "script=off.sh", "updates=off",
-        "update_freq=1", "--subscribe", "off", "system_woke", "--add", "event", "e",
-        "--subscribe", "r", "e",
+        "--add",
+        "item",
+        "r",
+        "left",
+        "--set",
+        "r",
+        "script=r.sh",
+        "update_freq=3",
+        "--add",
+        "item",
+        "off",
+        "left",
+        "--set",
+        "off",
+        "script=off.sh",
+        "updates=off",
+        "update_freq=1",
+        "--subscribe",
+        "off",
+        "system_woke",
+        "--add",
+        "event",
+        "e",
+        "--subscribe",
+        "r",
+        "e",
     ]);
     // First tick 1 s after begin; r runs every 3 ticks.
     let fx = h.advance(Duration::from_millis(3050));
@@ -103,7 +178,9 @@ fn update_gating_and_routine_counter() {
     let fx = h.msg_fx(&["--update"]).1;
     assert_eq!(runs_of(&fx, "off")[0].sender(), Some("forced"));
     // Q3: the env-less run stored SENDER in the persistent env.
-    let fx = h.msg_fx(&["--set", "off", "updates=on", "--trigger", "system_woke"]).1;
+    let fx = h
+        .msg_fx(&["--set", "off", "updates=on", "--trigger", "system_woke"])
+        .1;
     let r = runs_of(&fx, "off");
     assert_eq!(r[0].sender(), Some("system_woke"));
     assert_eq!(keys(&r[0]), vec!["NAME", "SENDER"]);
@@ -113,8 +190,16 @@ fn update_gating_and_routine_counter() {
 fn when_shown() {
     let mut h = H::new();
     h.msg(&[
-        "--add", "item", "w", "left", "--set", "w", "script=w.sh", "update_freq=1",
-        "updates=when_shown", "drawing=off",
+        "--add",
+        "item",
+        "w",
+        "left",
+        "--set",
+        "w",
+        "script=w.sh",
+        "update_freq=1",
+        "updates=when_shown",
+        "drawing=off",
     ]);
     let fx = h.advance(Duration::from_millis(2500));
     assert!(runs_of(&fx, "w").is_empty());
@@ -142,15 +227,48 @@ fn deadlines() {
 fn space_change_flips() {
     let mut h = H::new();
     h.res.spaces = vec![
-        SpaceInfo { id: 10, display: 1, fullscreen: false },
-        SpaceInfo { id: 11, display: 1, fullscreen: false },
-        SpaceInfo { id: 12, display: 1, fullscreen: true },
+        SpaceInfo {
+            id: 10,
+            display: 1,
+            fullscreen: false,
+        },
+        SpaceInfo {
+            id: 11,
+            display: 1,
+            fullscreen: false,
+        },
+        SpaceInfo {
+            id: 12,
+            display: 1,
+            fullscreen: true,
+        },
     ];
     h.res.displays[0].current_space = 10;
     h.msg(&[
-        "--add", "space", "s1", "left", "--set", "s1", "space=1", "--add", "space", "s2",
-        "left", "--set", "s2", "space=2", "--add", "item", "x", "left", "--set", "x",
-        "script=x.sh", "--subscribe", "x", "space_change",
+        "--add",
+        "space",
+        "s1",
+        "left",
+        "--set",
+        "s1",
+        "space=1",
+        "--add",
+        "space",
+        "s2",
+        "left",
+        "--set",
+        "s2",
+        "space=2",
+        "--add",
+        "item",
+        "x",
+        "left",
+        "--set",
+        "x",
+        "script=x.sh",
+        "--subscribe",
+        "x",
+        "space_change",
     ]);
     let s1 = h.query(&["s1"]);
     assert_eq!(
@@ -189,8 +307,19 @@ fn space_change_flips() {
 fn sleep_and_wake() {
     let mut h = H::new();
     h.msg(&[
-        "--add", "item", "a", "left", "--set", "a", "script=a.sh", "update_freq=1",
-        "--subscribe", "a", "system_woke", "system_will_sleep", "display_change",
+        "--add",
+        "item",
+        "a",
+        "left",
+        "--set",
+        "a",
+        "script=a.sh",
+        "update_freq=1",
+        "--subscribe",
+        "a",
+        "system_woke",
+        "system_will_sleep",
+        "display_change",
     ]);
     let fx = h.input(Input::Event(OsEvent::SystemWillSleep));
     assert_eq!(runs(&fx)[0].sender(), Some("system_will_sleep"));
@@ -199,7 +328,10 @@ fn sleep_and_wake() {
     let fx = h.msg_fx(&["--update"]).1;
     assert!(runs(&fx).is_empty(), "--update suppressed while asleep");
     let fx = h.input(Input::Event(OsEvent::SystemWoke));
-    let senders: Vec<String> = runs(&fx).iter().map(|r| r.sender().unwrap().to_string()).collect();
+    let senders: Vec<String> = runs(&fx)
+        .iter()
+        .map(|r| r.sender().unwrap().to_string())
+        .collect();
     assert_eq!(senders, vec!["display_change", "system_woke"]);
     // second system_woke ~500 ms later
     let fx = h.advance_by(Duration::from_millis(600), Duration::from_millis(50));
@@ -222,7 +354,15 @@ fn active_display_poll() {
     assert_eq!(h.rt.model.bars.len(), 2);
     let _ = fx;
     h.msg(&[
-        "--add", "item", "a", "left", "--set", "a", "script=a.sh", "--subscribe", "a",
+        "--add",
+        "item",
+        "a",
+        "left",
+        "--set",
+        "a",
+        "script=a.sh",
+        "--subscribe",
+        "a",
         "display_change",
     ]);
     h.res.active_adid = 2;
@@ -244,12 +384,26 @@ fn active_display_poll() {
 fn notifications_mach_and_lua() {
     let mut h = H::new();
     let (_, fx) = h.msg_fx(&[
-        "--add", "event", "theme", "AppleInterfaceThemeChangedNotification", "--add", "item",
-        "a", "left", "--set", "a", "mach_helper=git.felix.helper", "--subscribe", "a", "theme",
+        "--add",
+        "event",
+        "theme",
+        "AppleInterfaceThemeChangedNotification",
+        "--add",
+        "item",
+        "a",
+        "left",
+        "--set",
+        "a",
+        "mach_helper=git.felix.helper",
+        "--subscribe",
+        "a",
+        "theme",
     ]);
-    assert!(platform(&fx).contains(&PlatformRequest::ObserveNotification(
-        "AppleInterfaceThemeChangedNotification".into()
-    )));
+    assert!(
+        platform(&fx).contains(&PlatformRequest::ObserveNotification(
+            "AppleInterfaceThemeChangedNotification".into()
+        ))
+    );
     let fx = h.input(Input::Event(OsEvent::DistributedNotification {
         name: "AppleInterfaceThemeChangedNotification".into(),
         info: Some("{}".into()),
@@ -264,10 +418,24 @@ fn notifications_mach_and_lua() {
     assert_eq!(mach.len(), 1);
     assert_eq!(mach[0].0, "git.felix.helper");
     assert_eq!(mach[0].1, b"INFO\0{}\0NAME\0a\0SENDER\0theme\0\0".to_vec());
-    assert!(runs(&fx).is_empty(), "mach helper without script spawns nothing");
+    assert!(
+        runs(&fx).is_empty(),
+        "mach helper without script spawns nothing"
+    );
 
     // Lua handlers: script=lua:<id> and LuaRequest::Subscribe.
-    h.msg(&["--add", "item", "l", "left", "--set", "l", "script=lua:7", "--subscribe", "l", "theme"]);
+    h.msg(&[
+        "--add",
+        "item",
+        "l",
+        "left",
+        "--set",
+        "l",
+        "script=lua:7",
+        "--subscribe",
+        "l",
+        "theme",
+    ]);
     let fx = h.msg_fx(&["--trigger", "theme"]).1;
     let lua: Vec<_> = fx
         .iter()
@@ -287,7 +455,12 @@ fn notifications_mach_and_lua() {
     }));
     assert_eq!(h.query(&["m"])["scripting"]["script"], "lua:9");
     let fx = h.input(Input::Lua(LuaRequest::Command {
-        args: vec!["--trigger".into(), "theme".into(), "--query".into(), "m".into()],
+        args: vec![
+            "--trigger".into(),
+            "theme".into(),
+            "--query".into(),
+            "m".into(),
+        ],
         callback: Some(3),
     }));
     let handlers: Vec<u64> = fx
@@ -319,8 +492,18 @@ fn notifications_mach_and_lua() {
 fn reload_resets_state() {
     let mut h = H::new();
     h.msg(&[
-        "--add", "event", "e", "--add", "item", "a", "left", "--subscribe", "a", "volume_change",
-        "--hotload", "on",
+        "--add",
+        "event",
+        "e",
+        "--add",
+        "item",
+        "a",
+        "left",
+        "--subscribe",
+        "a",
+        "volume_change",
+        "--hotload",
+        "on",
     ]);
     assert!(h.rt.hotload());
     // Mode B quirk: the first argument is taken even if it starts with '-'.

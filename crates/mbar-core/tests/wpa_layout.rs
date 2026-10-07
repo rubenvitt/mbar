@@ -85,37 +85,70 @@ fn bar_frame_top_bottom_vertical_notch() {
     let mut bar = Model::new().bar;
 
     // Top, menu bar visible (24 pt), not topmost.
-    assert_eq!(layout::bar_frame(&bar, &d, true), r(0.0, 24.0, 1920.0, 25.0));
-    assert_eq!(layout::bar_frame(&bar, &d, false), r(0.0, 0.0, 1920.0, 25.0));
+    assert_eq!(
+        layout::bar_frame(&bar, &d, true),
+        r(0.0, 24.0, 1920.0, 25.0)
+    );
+    assert_eq!(
+        layout::bar_frame(&bar, &d, false),
+        r(0.0, 0.0, 1920.0, 25.0)
+    );
     bar.margin = 10;
     bar.background.y_offset = 5;
-    assert_eq!(layout::bar_frame(&bar, &d, true), r(10.0, 29.0, 1900.0, 25.0));
+    assert_eq!(
+        layout::bar_frame(&bar, &d, true),
+        r(10.0, 29.0, 1900.0, 25.0)
+    );
     // topmost disables the menu-bar avoidance.
     bar.topmost = true;
-    assert_eq!(layout::bar_frame(&bar, &d, true), r(10.0, 5.0, 1900.0, 25.0));
+    assert_eq!(
+        layout::bar_frame(&bar, &d, true),
+        r(10.0, 5.0, 1900.0, 25.0)
+    );
     bar.topmost = false;
 
     // Bottom: y = maxY - H - 2*Y (quirk) - notch_offset.
     bar.position = b'b';
-    assert_eq!(layout::bar_frame(&bar, &d, true), r(10.0, 1045.0, 1900.0, 25.0));
+    assert_eq!(
+        layout::bar_frame(&bar, &d, true),
+        r(10.0, 1045.0, 1900.0, 25.0)
+    );
 
     // Built-in display: notch offset/height apply.
     d.builtin = true;
     bar.notch_offset = 3;
     bar.notch_display_height = 32;
-    assert_eq!(layout::bar_frame(&bar, &d, true), r(10.0, 1042.0, 1900.0, 32.0));
+    assert_eq!(
+        layout::bar_frame(&bar, &d, true),
+        r(10.0, 1042.0, 1900.0, 32.0)
+    );
     bar.position = b't';
-    assert_eq!(layout::bar_frame(&bar, &d, true), r(10.0, 32.0, 1900.0, 32.0));
+    assert_eq!(
+        layout::bar_frame(&bar, &d, true),
+        r(10.0, 32.0, 1900.0, 32.0)
+    );
     // Any other position char behaves like top.
     bar.position = b'x';
-    assert_eq!(layout::bar_frame(&bar, &d, true), r(10.0, 32.0, 1900.0, 32.0));
+    assert_eq!(
+        layout::bar_frame(&bar, &d, true),
+        r(10.0, 32.0, 1900.0, 32.0)
+    );
 
     // Vertical: notch ignored, width = thickness, height minus 2*Y and the menu bar.
     bar.position = b'l';
-    assert_eq!(layout::bar_frame(&bar, &d, true), r(10.0, 29.0, 25.0, 1046.0));
+    assert_eq!(
+        layout::bar_frame(&bar, &d, true),
+        r(10.0, 29.0, 25.0, 1046.0)
+    );
     bar.position = b'r';
-    assert_eq!(layout::bar_frame(&bar, &d, true), r(1885.0, 29.0, 25.0, 1046.0));
-    assert_eq!(layout::bar_frame(&bar, &d, false), r(1885.0, 5.0, 25.0, 1070.0));
+    assert_eq!(
+        layout::bar_frame(&bar, &d, true),
+        r(1885.0, 29.0, 25.0, 1046.0)
+    );
+    assert_eq!(
+        layout::bar_frame(&bar, &d, false),
+        r(1885.0, 5.0, 25.0, 1070.0)
+    );
 }
 
 // ----------------------------------------------------------------------------------------
@@ -139,7 +172,10 @@ fn horizontal_left_right_center_cursors() {
     let f = fx.item("f", "center", "abc"); // 26
 
     let bar = fx.m.bars[0].clone();
-    assert_eq!(layout::side_length(&fx.m, &bar, Position::Center, false), 46);
+    assert_eq!(
+        layout::side_length(&fx.m, &bar, Position::Center, false),
+        46
+    );
     let lay = fx.run();
 
     // left: cursor 20, +18 → 38; b: 38+5 = 43, then 43+26+3 = 72.
@@ -455,10 +491,12 @@ fn background_bounds_writes_height_and_lays_out_image() {
 
 #[test]
 fn media_artwork_normalised_to_32pt() {
-    let mut img = mbar_core::components::Image::default();
-    img.link = true;
-    img.enabled = true;
-    img.scale = 0.5;
+    let mut img = mbar_core::components::Image {
+        link: true,
+        enabled: true,
+        scale: 0.5,
+        ..Default::default()
+    };
     layout::image_calculate_bounds(&mut img, 0.0, 20.0, Some(Size::new(300.0, 150.0)));
     // k = 32/150 → 64 × 32, × scale 0.5 → 32 × 16; y = 20 - 8.
     assert_eq!(img.bounds, r(0.0, 12.0, 32.0, 16.0));
@@ -548,7 +586,7 @@ fn vertical_layout() {
     // b: cur 35 + 2 = 37; y_offset -4 shifts the window up by 4 and grows it.
     assert_eq!(fx.frame(b), r(0.0, 24.0 + 37.0 - 4.0, 25.0, 19.0));
     assert_eq!(fx.m.item(b).unwrap().label.bounds.x, 8.0); // (25-9)/2 = 8
-    // c: right from 1056 - 20 = 1036; 1036 - 15 - 1 = 1020.
+                                                           // c: right from 1056 - 20 = 1036; 1036 - 15 - 1 = 1020.
     assert_eq!(fx.frame(c), r(0.0, 24.0 + 1020.0, 25.0, 15.0));
     // d: centre (1056 - 0 - 15)/2 - 1 = 519.5 → 519; window grows by |y_offset|.
     assert_eq!(fx.frame(d), r(0.0, 24.0 + 519.0, 25.0, 18.0));
@@ -721,15 +759,24 @@ fn popup_alignment_cell_size_and_bottom_bar() {
     fx.it(host).popup.align = b'c';
     fx.run();
     // (18 - 26)/2 = -4.
-    assert_eq!(fx.m.item(host).unwrap().popup.anchor, Point::new(16.0, 25.0));
+    assert_eq!(
+        fx.m.item(host).unwrap().popup.anchor,
+        Point::new(16.0, 25.0)
+    );
     fx.it(host).popup.align = b'r';
     fx.run();
-    assert_eq!(fx.m.item(host).unwrap().popup.anchor, Point::new(12.0, 25.0));
+    assert_eq!(
+        fx.m.item(host).unwrap().popup.anchor,
+        Point::new(12.0, 25.0)
+    );
     // align left subtracts the host padding_left.
     fx.it(host).popup.align = b'l';
     fx.it(host).background.padding_left = 7;
     fx.run();
-    assert_eq!(fx.m.item(host).unwrap().popup.anchor, Point::new(20.0, 25.0));
+    assert_eq!(
+        fx.m.item(host).unwrap().popup.anchor,
+        Point::new(20.0, 25.0)
+    );
 
     // Explicit cell size.
     fx.it(host).popup.set_cell_size(40);
@@ -741,7 +788,10 @@ fn popup_alignment_cell_size_and_bottom_bar() {
     fx.m.bar.position = b'b';
     fx.m.bars[0].frame = r(0.0, 1055.0, 1920.0, 25.0);
     fx.run();
-    assert_eq!(fx.m.item(host).unwrap().popup.anchor, Point::new(20.0, 1055.0 - 80.0));
+    assert_eq!(
+        fx.m.item(host).unwrap().popup.anchor,
+        Point::new(20.0, 1055.0 - 80.0)
+    );
 }
 
 #[test]
@@ -896,7 +946,9 @@ fn popup_background_image_sizes_width() {
 fn bar_scene_background_and_items() {
     let mut fx = Fx::new();
     let a = fx.item("a", "left", "ab");
-    fx.it(a).background.set_color(0xff00ff00, &mut Default::default());
+    fx.it(a)
+        .background
+        .set_color(0xff00ff00, &mut Default::default());
     fx.it(a).background.corner_radius = 50;
     fx.it(a).background.border_width = 2;
     fx.m.bar.background.y_offset = 5;
@@ -960,7 +1012,9 @@ fn bar_scene_skips_invisible_bar_background_and_clip_holes() {
     let mut fx = Fx::new();
     fx.m.bar.background.color.set_hex(0);
     let a = fx.item("a", "left", "ab");
-    fx.it(a).background.set_color(0x80ffffff, &mut Default::default());
+    fx.it(a)
+        .background
+        .set_color(0x80ffffff, &mut Default::default());
     fx.it(a).background.clip = 0.5;
     fx.it(a).background.corner_radius = 4;
     fx.m.bar.background.border_width = 2;
@@ -996,7 +1050,9 @@ fn bar_scene_skips_invisible_bar_background_and_clip_holes() {
 #[test]
 fn bar_scene_brackets_below_items_and_popup_members_excluded() {
     let (mut fx, _a, _b, br) = bracket_fixture();
-    fx.it(br).background.set_color(0xff0000ff, &mut Default::default());
+    fx.it(br)
+        .background
+        .set_color(0xff0000ff, &mut Default::default());
     fx.it(br).background.set_height(20);
     let lay = fx.run();
     let scene = layout::bar_scene(&fx.m, &lay.bars[0]);
@@ -1193,7 +1249,10 @@ fn item_scene_slider_alias_image_and_blur() {
         })
         .collect();
     // Track then fill (30 % of 100), y_top = 25 - 17 = 8.
-    assert_eq!(rects, vec![r(0.0, 8.0, 100.0, 10.0), r(0.0, 8.0, 30.0, 10.0)]);
+    assert_eq!(
+        rects,
+        vec![r(0.0, 8.0, 100.0, 10.0), r(0.0, 8.0, 30.0, 10.0)]
+    );
 
     // Alias with tint mask and a rounded image.
     let mut fx = Fx::new();
@@ -1306,13 +1365,19 @@ fn hit_testing_bar_items_half_open_and_inclusive() {
     assert_eq!(at(&fx, 10.0, 10.0), WindowHit::Bar(1));
     assert_eq!(at(&fx, 10.0, 25.0), WindowHit::None);
     // get_item_by_point is inclusive and global-order first.
-    assert_eq!(layout::item_at_point(&fx.m, Point::new(38.0, 25.0)), Some(a));
+    assert_eq!(
+        layout::item_at_point(&fx.m, Point::new(38.0, 25.0)),
+        Some(a)
+    );
     // drawing=off items are never hit.
     fx.it(a).drawing = false;
     assert_eq!(at(&fx, 25.0, 10.0), WindowHit::Item(br));
 
     assert_eq!(layout::bar_at_point(&fx.m, Point::new(0.0, 0.0)), Some(1));
-    assert_eq!(layout::bar_at_point(&fx.m, Point::new(1919.9, 24.9)), Some(1));
+    assert_eq!(
+        layout::bar_at_point(&fx.m, Point::new(1919.9, 24.9)),
+        Some(1)
+    );
     assert_eq!(layout::bar_at_point(&fx.m, Point::new(1920.0, 10.0)), None);
     assert_eq!(layout::bar_at_point(&fx.m, Point::new(10.0, 25.0)), None);
     fx.m.bars[0].hidden = true;
@@ -1381,7 +1446,10 @@ fn local_points_and_slider_track_d2() {
     assert!(layout::slider_track_contains(item, local));
     // Half-open edges.
     assert!(layout::slider_track_contains(item, Point::new(0.0, 11.0)));
-    assert!(!layout::slider_track_contains(item, Point::new(100.0, 15.0)));
+    assert!(!layout::slider_track_contains(
+        item,
+        Point::new(100.0, 15.0)
+    ));
     assert!(!layout::slider_track_contains(item, Point::new(50.0, 21.0)));
     assert!(layout::item_local_point(item, 2, Point::new(0.0, 0.0)).is_none());
     assert_eq!(item.slider.percentage_for_point(local), 50);
@@ -1400,7 +1468,12 @@ fn app_menu_titles_layout_draw_and_hit() {
         it.set_type(ItemType::AppMenu, "/h");
         it.label.drawing = false;
         it.app_menu.app_name = "Finder".into();
-        it.app_menu.titles = vec!["Apple".into(), "Finder".into(), "File".into(), "Edit".into()];
+        it.app_menu.titles = vec![
+            "Apple".into(),
+            "Finder".into(),
+            "File".into(),
+            "Edit".into(),
+        ];
         it.app_menu.hovered = Some(2);
     }
     let lay = fx.run();
@@ -1414,9 +1487,18 @@ fn app_menu_titles_layout_draw_and_hit() {
     assert_eq!(xs, vec![0.0, 64.0, 112.0]);
 
     // Clicks resolve to indices into `titles`.
-    assert_eq!(layout::app_menu_title_at(item, Point::new(10.0, 12.0)), Some(1));
-    assert_eq!(layout::app_menu_title_at(item, Point::new(64.0, 12.0)), Some(2));
-    assert_eq!(layout::app_menu_title_at(item, Point::new(170.0, 12.0)), None);
+    assert_eq!(
+        layout::app_menu_title_at(item, Point::new(10.0, 12.0)),
+        Some(1)
+    );
+    assert_eq!(
+        layout::app_menu_title_at(item, Point::new(64.0, 12.0)),
+        Some(2)
+    );
+    assert_eq!(
+        layout::app_menu_title_at(item, Point::new(170.0, 12.0)),
+        None
+    );
 
     let scene = layout::bar_scene(&fx.m, &lay.bars[0]);
     let texts = scene
@@ -1430,4 +1512,72 @@ fn app_menu_titles_layout_draw_and_hit() {
         p,
         Primitive::Rect { rect, color, .. } if rect.x == 20.0 + 64.0 && color.hex == 0x33ffffff
     )));
+}
+
+// ----------------------------------------------------------------------------------------
+// Robustness and the remaining public entry points
+// ----------------------------------------------------------------------------------------
+
+#[test]
+fn popup_cycle_does_not_recurse_forever() {
+    let mut fx = Fx::new();
+    let a = fx.item("a", "left", "ab");
+    let b = fx.item("b", "left", "a");
+    let c = fx.item("c", "left", "a");
+    fx.add_popup_member(a, b);
+    fx.add_popup_member(b, c);
+    fx.add_popup_member(c, b); // b <-> c cycle
+    fx.it(a).popup.drawing = true;
+    fx.it(b).popup.drawing = true;
+    fx.it(c).popup.drawing = true;
+    let lay = fx.run();
+    assert!(lay.popups.iter().any(|p| p.host == a));
+}
+
+#[test]
+fn public_helpers_popup_bounds_bracket_bounds_side_length() {
+    let (mut fx, host, p1, _p2) = popup_fixture();
+    // Not anchored yet: computes the size only (default cell size 30).
+    assert!(layout::popup_bounds(&mut fx.m, host, &mut fx.res).is_none());
+    assert_eq!(
+        fx.m.item(host).unwrap().popup.background.bounds,
+        r(0.0, 0.0, 26.0, 60.0)
+    );
+    fx.run();
+    let pl = layout::popup_bounds(&mut fx.m, host, &mut fx.res).unwrap();
+    assert_eq!(pl.frame, r(20.0, 25.0, 26.0, 50.0));
+    assert_eq!(pl.items[0].id, p1);
+
+    // anchor_popup on a non-active bar does nothing.
+    let mut other = fx.m.bars[0].clone();
+    other.adid = 2;
+    let before = fx.m.item(host).unwrap().popup.clone();
+    layout::anchor_popup(&mut fx.m, host, &other, &mut fx.res);
+    assert_eq!(fx.m.item(host).unwrap().popup, before);
+
+    let (mut fx, _a, _b, br) = bracket_fixture();
+    fx.run();
+    let bar = fx.m.bars[0].clone();
+    assert_eq!(
+        layout::bracket_bounds(&mut fx.m, br, &bar, 12),
+        r(20.0, 0.0, 52.0, 25.0)
+    );
+    // Vertical side lengths use heights: 15 + 15 + (5 + 3) for the left items.
+    assert_eq!(layout::side_length(&fx.m, &bar, Position::Left, true), 38);
+    assert_eq!(
+        layout::side_length(&fx.m, &bar, Position::Left, false),
+        18 + 26 + 8
+    );
+}
+
+#[test]
+fn item_calculate_bounds_returns_slot_length() {
+    let mut fx = Fx::new();
+    let a = fx.item("a", "left", "ab");
+    fx.it(a).set_width(40);
+    fx.it(a).background.enabled = true;
+    let it = fx.m.item_mut(a).unwrap();
+    assert_eq!(layout::item_calculate_bounds(it, 30, 2, 15, 0), 40);
+    // Background spans the slot from the unaligned x; auto height 30 - 1.
+    assert_eq!(it.background.bounds, r(2.0, 1.0, 40.0, 29.0));
 }

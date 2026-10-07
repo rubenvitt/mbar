@@ -459,10 +459,7 @@ pub fn layout_bar_horizontal(
         };
         let disp = item_len(item, true);
         let rtl = item.position.is_rtl();
-        let (pl, pr) = (
-            item.background.padding_left,
-            item.background.padding_right,
-        );
+        let (pl, pr) = (item.background.padding_left, item.background.padding_right);
         *cur = place_cursor(*cur, disp, pl, pr, rtl, w);
         item.graph.rtl = rtl;
         let (sl, sr) = item.shadow_extents();
@@ -550,10 +547,7 @@ pub fn layout_bar_vertical(
         let ih = layout_height(item);
         let disp = item_len(item, true);
         let rtl = item.position.is_rtl();
-        let (pl, pr) = (
-            item.background.padding_left,
-            item.background.padding_right,
-        );
+        let (pl, pr) = (item.background.padding_left, item.background.padding_right);
         *cur = place_cursor(*cur, ih, pl, pr, rtl, hwin);
         item.graph.rtl = rtl;
         let (sl, _) = item.shadow_extents();
@@ -771,8 +765,7 @@ fn text_bounds(text: &mut Text, x: u32, y: u32, art: Option<Size>) {
     } else {
         x as f32
     };
-    text.bounds.y =
-        to_u32(y as f64 - (text.ascent as f64 - text.descent as f64) / 2.0) as f32;
+    text.bounds.y = to_u32(y as f64 - (text.ascent as f64 - text.descent as f64) / 2.0) as f32;
     if text.background.enabled {
         let h = if text.background.overrides_height {
             text.background.height
@@ -886,8 +879,7 @@ fn bracket_bounds_impl(
         return nirvana_rect(size);
     };
     let len = to_u32(
-        (lf.x as f64 + lf.width as f64 + last_pr as f64 + first_pl as f64 - ff.x as f64)
-            .max(0.0),
+        (lf.x as f64 + lf.width as f64 + last_pr as f64 + first_pl as f64 - ff.x as f64).max(0.0),
     );
     let (sl, sr) = item.shadow_extents();
     let bounds = Rect::new(
@@ -1139,7 +1131,9 @@ fn popup_bounds_impl(
     if adid > 0 {
         if let Some(bar) = model.bar(adid).cloned() {
             for m in &members {
-                let Some(bi) = model.index_of(*m) else { continue };
+                let Some(bi) = model.index_of(*m) else {
+                    continue;
+                };
                 let b = &model.items[bi];
                 if !b.drawing || !b.is_bracket() {
                     continue;
@@ -1224,7 +1218,9 @@ fn popup_snapshot(model: &mut Model, host: ItemId, res: &mut dyn Resources) -> P
         menu_lines: Vec::new(),
     };
     for m in members {
-        let Some(mi) = model.index_of(m) else { continue };
+        let Some(mi) = model.index_of(m) else {
+            continue;
+        };
         let it = &model.items[mi];
         let drawn = match &bar {
             Some(b) => model.draws_item(b, it),
@@ -1530,7 +1526,9 @@ pub fn bar_scene(model: &Model, layout: &BarLayout) -> Scene {
     let stroke_width = model.bar.background.border_width as f32;
     let stroke_alpha = model.bar.background.border_color.a;
     for p in &layout.items {
-        let Some(item) = model.item(p.id) else { continue };
+        let Some(item) = model.item(p.id) else {
+            continue;
+        };
         let dx = p.frame.x - layout.frame.x;
         for b in [
             &item.background,
@@ -1540,9 +1538,7 @@ pub fn bar_scene(model: &Model, layout: &BarLayout) -> Scene {
             if !b.clips_bar() {
                 continue;
             }
-            let r = b
-                .bounds
-                .offset(dx + b.x_offset as f32, b.y_offset as f32);
+            let r = b.bounds.offset(dx + b.x_offset as f32, b.y_offset as f32);
             scene.push(Primitive::ClipHole {
                 rect: cv.rect(r),
                 corner_radius: clamp_radius(&r, b.corner_radius, 0.0),
@@ -1723,7 +1719,12 @@ pub fn window_at(model: &Model, layout: &Layout, p: Point) -> WindowHit {
         seq: usize,
         windows: Vec<(Rect, WindowHit)>,
     }
-    fn push_items(model: &Model, items: &[PlacedItem], popup: bool, ws: &mut Vec<(Rect, WindowHit)>) {
+    fn push_items(
+        model: &Model,
+        items: &[PlacedItem],
+        popup: bool,
+        ws: &mut Vec<(Rect, WindowHit)>,
+    ) {
         let resolved: Vec<(&PlacedItem, &BarItem)> = items
             .iter()
             .filter_map(|pi| model.item(pi.id).map(|i| (pi, i)))
@@ -1793,9 +1794,7 @@ pub fn popup_at_point(model: &Model, p: Point) -> Option<ItemId> {
         .items
         .iter()
         .find(|i| {
-            i.drawing
-                && i.popup.drawing
-                && i.popup.frame.is_some_and(|f| contains_half_open(&f, p))
+            i.drawing && i.popup.drawing && i.popup.frame.is_some_and(|f| contains_half_open(&f, p))
         })
         .map(|i| i.id)
 }
@@ -1824,4 +1823,58 @@ pub fn app_menu_title_at(item: &BarItem, local: Point) -> Option<usize> {
         .iter()
         .position(|r| contains_half_open(r, local))
         .and_then(|k| entries.get(k).map(|e| e.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn conversions_clamp_d10() {
+        assert_eq!(to_u32(-3.5), 0);
+        assert_eq!(to_u32(f64::NAN), 0);
+        assert_eq!(to_u32(7.9), 7);
+        assert_eq!(add_signed(5, -9), 0);
+        assert_eq!(add_signed(5, 4), 9);
+    }
+
+    #[test]
+    fn cursor_rules() {
+        // LTR: max(cur + pl, 0).
+        assert_eq!(place_cursor(20, 10, 5, 0, false, 100.0), 25);
+        assert_eq!(place_cursor(20, 10, -50, 0, false, 100.0), 0);
+        // RTL: candidate, wrap → W - len, negative W - len → 0.
+        assert_eq!(place_cursor(80, 10, 0, 5, true, 100.0), 65);
+        assert_eq!(place_cursor(5, 10, 0, 0, true, 100.0), 90);
+        assert_eq!(place_cursor(5, 120, 0, 0, true, 100.0), 0);
+        // Negative padding_right: (u32)pr wraps the subtraction back into range, clamp.
+        assert_eq!(place_cursor(95, 10, 0, -20, true, 100.0), 90);
+    }
+
+    #[test]
+    fn half_open_and_radius() {
+        let r = Rect::new(0.0, 0.0, 10.0, 10.0);
+        assert!(contains_half_open(&r, Point::new(0.0, 0.0)));
+        assert!(!contains_half_open(&r, Point::new(10.0, 5.0)));
+        assert!(!contains_half_open(&r, Point::new(5.0, 10.0)));
+        // radius clamped against the inset rect, truncated
+        assert_eq!(clamp_radius(&Rect::new(0.0, 0.0, 18.0, 23.0), 50, 2.0), 8.0);
+        assert_eq!(clamp_radius(&Rect::new(0.0, 0.0, 9.0, 23.0), 50, 0.0), 4.0);
+        assert_eq!(clamp_radius(&Rect::new(0.0, 0.0, 18.0, 23.0), 3, 2.0), 3.0);
+        assert_eq!(clamp_radius(&Rect::new(0.0, 0.0, 1.0, 1.0), 3, 4.0), 0.0);
+    }
+
+    #[test]
+    fn conv_flips_y() {
+        let cv = Conv {
+            ox: 10.0,
+            oy: 5.0,
+            h: 25.0,
+        };
+        assert_eq!(
+            cv.rect(Rect::new(1.0, 2.0, 3.0, 4.0)),
+            Rect::new(11.0, 5.0 + 25.0 - 6.0, 3.0, 4.0)
+        );
+        assert_eq!(cv.pt(1.0, 7.0), Point::new(11.0, 23.0));
+    }
 }

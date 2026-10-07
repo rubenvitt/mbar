@@ -134,7 +134,13 @@ impl H {
         self.advance_by(d, Duration::from_millis(100))
     }
 
-    pub fn mouse(&mut self, kind: MouseKind, x: f32, y: f32, window: Option<WindowKey>) -> Vec<Effect> {
+    pub fn mouse(
+        &mut self,
+        kind: MouseKind,
+        x: f32,
+        y: f32,
+        window: Option<WindowKey>,
+    ) -> Vec<Effect> {
         let fx = self.input(Input::Mouse(MouseInput {
             kind,
             point: Point::new(x, y),
