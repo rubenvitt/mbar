@@ -312,6 +312,19 @@ impl Animator {
     }
 }
 
+/// `text_animate_scroll` (`components.md` §4.10, `events.md` §10.9): the marquee of one
+/// text, or `None` when its preconditions fail (`max_chars == 0`, `scroll != 0`,
+/// `has_const_width && custom_width < width`, `width == 0`, `width == bounds.w`). Returns the
+/// three chained float animations of `<prefix>scroll` (prefix e.g. `icon.`,
+/// `slider.knob.`): linear `0 → bounds.w` over `(u32)(scroll_duration * bounds.w / width)`
+/// frames, a 0-frame jump to `-width`, linear `-width → 0` over `scroll_duration` frames.
+/// The runtime adds them with the `ANIMATE_FLOAT` semantics (cancel locked, then add);
+/// Quirk Q8 (resetting `--animate` for the rest of the message) is the runtime's call.
+pub fn marquee(target: AnimTarget, prefix: &str, text: &crate::components::Text) -> Option<Vec<PendingAnim>> {
+    let _ = (target, prefix, text);
+    todo!("WP-D: components.md §4.10")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
