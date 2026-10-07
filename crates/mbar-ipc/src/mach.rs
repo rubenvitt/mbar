@@ -126,6 +126,11 @@ pub fn send(service: &str, payload: &[u8]) -> Option<String> {
     }
 }
 
+unsafe fn cleanup(task: mach_port_t, response_port: mach_port_t) {
+    mach_port_mod_refs(task, response_port, MACH_PORT_RIGHT_RECEIVE, -1);
+    mach_port_deallocate(task, response_port);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,9 +140,4 @@ mod tests {
         assert_eq!(std::mem::size_of::<MachMessage>(), 44);
         assert_eq!(std::mem::offset_of!(MachMessage, descriptor), 28);
     }
-}
-
-unsafe fn cleanup(task: mach_port_t, response_port: mach_port_t) {
-    mach_port_mod_refs(task, response_port, MACH_PORT_RIGHT_RECEIVE, -1);
-    mach_port_deallocate(task, response_port);
 }
