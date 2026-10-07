@@ -871,10 +871,10 @@ fn bracket_bounds_impl(
         let f = mi
             .frame(adid)
             .unwrap_or_else(|| nirvana_rect(Size::new(1.0, 1.0)));
-        if first.is_none_or(|(r, _)| f.x < r.x) {
+        if first.map_or(true, |(r, _)| f.x < r.x) {
             first = Some((f, mi.background.padding_left));
         }
-        if last.is_none_or(|(r, _)| f.x + f.width > r.x + r.width) {
+        if last.map_or(true, |(r, _)| f.x + f.width > r.x + r.width) {
             last = Some((f, mi.background.padding_right));
         }
     }
