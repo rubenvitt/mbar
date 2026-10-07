@@ -19,14 +19,17 @@ use std::ffi::CString;
 /// on a busy daemon don't come back empty.
 pub const RESPONSE_TIMEOUT_MS: mach_msg_timeout_t = 2000;
 
-#[repr(C)]
+/// Apple's headers declare mach messages with 4-byte packing, so the descriptor
+/// starts at byte 28 and the message is 44 bytes (a plain `repr(C)` would align
+/// the pointer-carrying descriptor to 8 and produce a 48-byte message).
+#[repr(C, packed(4))]
 pub struct MachMessage {
     pub header: mach_msg_header_t,
     pub descriptor_count: mach_msg_size_t,
     pub descriptor: mach_msg_ool_descriptor_t,
 }
 
-#[repr(C)]
+#[repr(C, packed(4))]
 pub struct MachBuffer {
     pub message: MachMessage,
     pub trailer: mach_msg_trailer_t,
@@ -105,9 +108,11 @@ pub fn send(service: &str, payload: &[u8]) -> Option<String> {
             RESPONSE_TIMEOUT_MS,
             MACH_PORT_NULL,
         );
-        let rsp = if kr == MACH_MSG_SUCCESS && !buffer.message.descriptor.address.is_null() {
-            let ptr = buffer.message.descriptor.address as *const u8;
-            let len = buffer.message.descriptor.size as usize;
+        // Copy out of the packed struct before use (no references to packed fields).
+        let descriptor = buffer.message.descriptor;
+        let rsp = if kr == MACH_MSG_SUCCESS && !descriptor.address.is_null() {
+            let ptr = descriptor.address as *const u8;
+            let len = descriptor.size as usize;
             let bytes = std::slice::from_raw_parts(ptr, len);
             let end = bytes.iter().position(|b| *b == 0).unwrap_or(len);
             let s = String::from_utf8_lossy(&bytes[..end]).into_owned();
@@ -118,6 +123,17 @@ pub fn send(service: &str, payload: &[u8]) -> Option<String> {
         };
         cleanup(task, response_port);
         Some(rsp)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_matches_apple_headers() {
+        assert_eq!(std::mem::size_of::<MachMessage>(), 44);
+        assert_eq!(std::mem::offset_of!(MachMessage, descriptor), 28);
     }
 }
 

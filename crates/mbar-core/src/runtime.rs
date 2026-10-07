@@ -7,23 +7,45 @@
 //! order (appending responses), resize/`bar_needs_update` if a `--bar`/`--update`/`--remove`
 //! asked for it, `animator.lock_all()`, unfreeze, refresh, reply.
 //!
+//! Redraw pipeline (mbar's version of `bar_manager_refresh` / `bar_draw`):
+//!
+//! * every handled input ends with [`Runtime::refresh`], which reproduces SketchyBar's redraw
+//!   *decision* (`bar_manager_bar_needs_redraw`, forced refreshes, `associated_bar` bits,
+//!   bar resizes) and records the windows that must be re-rendered in `dirty`;
+//! * [`Runtime::frame`] steps animations, refreshes again, runs **one** layout pass for
+//!   everything that changed since the last frame (several messages between two frames
+//!   share one pass) and returns scenes only for windows whose content, geometry or window
+//!   properties changed. When nothing is dirty `frame` returns immediately without any
+//!   allocation.
+//!
 //! Helper methods are grouped by spec area below; each group lists the functions it calls
 //! from other work packages (see `docs/IMPLEMENTATION-PLAN.md` "Cross-package contracts").
 
-use crate::animation::{AnimStep, Animator};
-use crate::command::{AddCommand, Command, QueryTarget, Selector, SetToken};
-use crate::event::{EventInfo, ScrollThrottle};
-use crate::geometry::Point;
-use crate::item::{ItemId, ItemType};
-use crate::layout::Layout;
+use crate::animation::{self, AnimStep, Animator};
+use crate::bar::{BarState, DISPLAY_MAIN};
+use crate::command::{
+    self, AddCommand, Command, MenuBarAction, MonitorMode, Placement, QueryTarget, Selector,
+    SetToken,
+};
+use crate::event::{self, AppendResult, BarSpace, EventInfo, EventKind, ScrollThrottle};
+use crate::geometry::{Point, Rect};
+use crate::group;
+use crate::item::{BarItem, ItemId, ItemType, Position};
+use crate::layout::{self, BarLayout, Layout, PopupLayout, WindowHit};
 use crate::model::Model;
 use crate::platform::{
-    Effect, FrameOutput, Input, LuaRequest, MouseInput, OsEvent, ReplyToken, Resources, WindowKey,
+    Effect, FrameOutput, ImageInfo, Input, LuaRequest, MouseInput, MouseKind, OsEvent,
+    PlatformRequest, ReplyToken, Resources, SystemQuery, SystemValue, WindowKey, WindowUpdate,
 };
-use crate::props::{AnimSpec, AnimTarget, PropEffects, PropRequest};
-use crate::query::Stats;
-use crate::script::{EnvVars, Sender};
-use std::collections::{BTreeSet, HashMap};
+use crate::props::{
+    AnimSpec, AnimTarget, HiddenRequest, PropCx, PropEffects, PropRequest, PropResult,
+};
+use crate::provider;
+use crate::query::{self, QueryCx, Stats};
+use crate::script::{self, EnvVars, Sender, MACH_HELPER_DESTROY};
+use crate::value;
+use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::fmt::Write;
 use std::time::{Duration, Instant};
 
 /// Static configuration of a daemon instance.
@@ -51,6 +73,88 @@ pub const CLOCK_PERIOD: Duration = Duration::from_secs(1);
 /// Delay of the second `system_woke` after a real sleep.
 pub const WAKE_REPOST_DELAY: Duration = Duration::from_millis(500);
 
+/// Number of frame/layout timing samples kept for `--query stats`.
+const SAMPLE_CAP: usize = 512;
+/// Pending script start times kept per item (for durations from `ScriptFinished`).
+const PENDING_SCRIPTS_CAP: usize = 64;
+
+/// Window properties of a bar window (part of every `WindowUpdate`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WinProps {
+    level: i32,
+    blur: u32,
+    shadow: bool,
+    sticky: bool,
+    font_smoothing: bool,
+}
+
+/// What was last sent to the platform for a bar window.
+#[derive(Debug, Clone)]
+struct EmittedBar {
+    layout: BarLayout,
+    props: WinProps,
+}
+
+/// What was last sent to the platform for a popup window.
+#[derive(Debug, Clone)]
+struct EmittedPopup {
+    layout: PopupLayout,
+    blur: u32,
+    props: WinProps,
+}
+
+/// Fixed-size ring of timing samples (µs).
+#[derive(Debug, Default)]
+struct Samples {
+    buf: Vec<u64>,
+    pos: usize,
+}
+
+impl Samples {
+    fn push(&mut self, v: u64) {
+        if self.buf.capacity() == 0 {
+            self.buf.reserve_exact(SAMPLE_CAP);
+        }
+        if self.buf.len() < SAMPLE_CAP {
+            self.buf.push(v);
+        } else {
+            self.buf[self.pos] = v;
+        }
+        self.pos = (self.pos + 1) % SAMPLE_CAP;
+    }
+
+    /// (avg, p95, max).
+    fn summary(&self) -> (u64, u64, u64) {
+        if self.buf.is_empty() {
+            return (0, 0, 0);
+        }
+        let mut s = self.buf.clone();
+        s.sort_unstable();
+        let avg = s.iter().sum::<u64>() / s.len() as u64;
+        let p95 = s[((s.len() * 95).div_ceil(100)).saturating_sub(1)];
+        (avg, p95, *s.last().unwrap_or(&0))
+    }
+}
+
+/// Per-item script statistics.
+#[derive(Debug, Default)]
+struct ScriptStat {
+    runs: u64,
+    finished: u64,
+    total_ms: f64,
+    max_ms: f64,
+    pending: VecDeque<Instant>,
+}
+
+/// Outcome of [`Runtime::apply_requests`].
+#[derive(Debug, Clone, Copy, Default)]
+struct ReqOutcome {
+    /// End-of-message refresh flag (`--bar hidden`, bar resets).
+    refresh: bool,
+    /// `AddToPopup` failed: the item must not be marked dirty (`item.md` §2.3).
+    suppress_update: bool,
+}
+
 pub struct Runtime {
     pub config: RuntimeConfig,
     pub model: Model,
@@ -69,28 +173,62 @@ pub struct Runtime {
     wake_repost: Option<Instant>,
     /// Scroll coalescing (`events.md` §6.3).
     scroll: ScrollThrottle,
-    /// Item the pointer is over (synthesized `mouse.entered`/`mouse.exited`).
-    hovered: Option<ItemId>,
     /// Alias capture suspended by WindowServer notifications.
     capture_disabled: bool,
     listeners: Listeners,
     /// Last layout (hit testing, scenes).
     layout: Option<Layout>,
+    /// The model changed in a way that needs a new layout pass.
+    needs_layout: bool,
+    /// Windows may need to be (re)sent to the platform.
+    needs_render: bool,
+    /// A forced refresh (`bar_manager_refresh(true)`) is pending.
+    force_refresh: bool,
     /// Windows that must be re-rendered by the next `frame`.
     dirty: BTreeSet<WindowKey>,
-    /// Windows currently open on the platform.
-    open_windows: BTreeSet<WindowKey>,
-    /// Effects produced outside `handle` (e.g. by animation frames) to return next time.
-    pending: Vec<Effect>,
+    /// Bar windows currently open on the platform (by adid) and what they show.
+    emitted_bars: HashMap<u32, EmittedBar>,
+    /// Popup windows currently open on the platform (by host).
+    emitted_popups: HashMap<ItemId, EmittedPopup>,
     stats: Stats,
+    frame_times: Samples,
+    layout_times: Samples,
+    redraws: HashMap<WindowKey, u64>,
+    scripts: HashMap<String, ScriptStat>,
+    scripts_finished: u64,
+    script_total_ms: f64,
+    script_finished_timed: u64,
     started: Option<Instant>,
+    /// Most recent clock reading (`Resources::now` / `frame(now)`).
+    last_now: Option<Instant>,
     /// `--monitor` subscribers exist (extension).
-    monitoring: bool,
+    monitor_events: bool,
+    monitor_stats: bool,
     /// Front app menus (app_menu extension).
     menu_app: String,
     menu_titles: Vec<String>,
-    /// In-process Lua handlers per item.
-    lua_handlers: HashMap<ItemId, u64>,
+    /// The current message sends no reply (`--exit`, `--monitor`).
+    no_reply: bool,
+    /// `--exit` was executed: ignore the rest of the message.
+    exiting: bool,
+}
+
+/// `lua:<id>` script values (`docs/LUA.md`).
+fn lua_id(script: &str) -> Option<u64> {
+    script.strip_prefix("lua:")?.parse().ok()
+}
+
+/// `CGRectContainsPoint` (half-open).
+fn contains_half_open(r: &Rect, p: Point) -> bool {
+    p.x >= r.x && p.x < r.x + r.width && p.y >= r.y && p.y < r.y + r.height
+}
+
+fn bit32(n: u32) -> u32 {
+    1u32.checked_shl(n).unwrap_or(0)
+}
+
+fn name_or_null(n: Option<&str>) -> &str {
+    n.unwrap_or("(null)")
 }
 
 impl Runtime {
@@ -107,52 +245,272 @@ impl Runtime {
             next_tick: None,
             wake_repost: None,
             scroll: ScrollThrottle::default(),
-            hovered: None,
             capture_disabled: false,
             listeners: Listeners::default(),
             layout: None,
+            needs_layout: false,
+            needs_render: false,
+            force_refresh: false,
             dirty: BTreeSet::new(),
-            open_windows: BTreeSet::new(),
-            pending: Vec::new(),
+            emitted_bars: HashMap::new(),
+            emitted_popups: HashMap::new(),
             stats: Stats::default(),
+            frame_times: Samples::default(),
+            layout_times: Samples::default(),
+            redraws: HashMap::new(),
+            scripts: HashMap::new(),
+            scripts_finished: 0,
+            script_total_ms: 0.0,
+            script_finished_timed: 0,
             started: None,
-            monitoring: false,
+            last_now: None,
+            monitor_events: false,
+            monitor_stats: false,
             menu_app: String::new(),
             menu_titles: Vec::new(),
-            lua_handlers: HashMap::new(),
+            no_reply: false,
+            exiting: false,
         }
+    }
+
+    /// The last layout pass (hit testing, tests).
+    pub fn layout(&self) -> Option<&Layout> {
+        self.layout.as_ref()
+    }
+
+    /// Lazily started OS listeners.
+    pub fn listeners(&self) -> Listeners {
+        self.listeners
+    }
+
+    /// `--hotload` state.
+    pub fn hotload(&self) -> bool {
+        self.hotload
     }
 
     /// `bar_manager_begin` at startup: create bars for the selected displays, poll the
     /// active display and schedule the first routine tick (now + 1 s).
     pub fn begin(&mut self, res: &mut dyn Resources) -> Vec<Effect> {
-        let _ = res;
-        todo!("WP-C: bar.md §6.6 bar_manager_begin, §8.1")
+        let now = res.now();
+        self.started = Some(now);
+        self.last_now = Some(now);
+        self.begin_bars(res);
+        self.model.active_adid = res.active_display();
+        self.next_tick = Some(now + CLOCK_PERIOD);
+        self.refresh(false, res);
+        Vec::new()
     }
 
     /// Processes one input. Before every input the active display is polled
     /// (`bar_manager_poll_active_display`, `events.md` §1.1).
     pub fn handle(&mut self, input: Input, res: &mut dyn Resources) -> Vec<Effect> {
-        let _ = (input, res);
-        todo!("WP-C")
+        let now = res.now();
+        self.last_now = Some(now);
+        if self.started.is_none() {
+            self.started = Some(now);
+        }
+        let mut effects = Vec::new();
+        self.poll_active_display(&mut effects, res);
+        match input {
+            Input::Message { args, reply } => {
+                let fx = self.handle_message(&args, reply, res);
+                effects.extend(fx);
+            }
+            Input::Event(ev) => self.handle_os_event(ev, &mut effects, res),
+            Input::Mouse(m) => self.handle_mouse(m, &mut effects, res),
+            Input::Timer => self.on_timer(&mut effects, res),
+            Input::ScriptFinished { item, .. } => self.script_finished(item, now),
+            Input::ProviderSample { item, values } => {
+                self.provider_sample(item, values, &mut effects, res)
+            }
+            Input::AliasImage {
+                item,
+                window_id,
+                frame,
+                image,
+                disabled,
+            } => self.alias_image(item, image, window_id, frame, disabled),
+            Input::DisplaysChanged => self.displays_changed(&mut effects, res),
+            Input::Lua(req) => self.handle_lua(req, &mut effects, res),
+            Input::MenuTitles { app, titles } => self.menu_titles(app, titles, &mut effects),
+        }
+        self.refresh(false, res);
+        effects
     }
 
     /// Steps animations (`Animator::step` + [`Runtime::apply_anim_steps`]), lays out
     /// (`layout::layout`), updates `associated_bar` bits, and returns scenes for dirty
     /// windows only (`bar_manager_refresh` / `bar_draw` redraw decision, `bar.md` §5).
     pub fn frame(&mut self, now: Instant, res: &mut dyn Resources) -> FrameOutput {
-        let _ = (now, res);
-        todo!("WP-C: bar.md §5")
+        let t0 = Instant::now();
+        self.last_now = Some(now);
+        if !self.sleeps && !self.animator.is_empty() {
+            let steps = self.animator.step(now);
+            if !steps.is_empty() {
+                self.apply_anim_steps(steps);
+            }
+        }
+        self.refresh(false, res);
+        if self.needs_layout {
+            self.run_layout(res);
+        }
+        if !self.needs_render {
+            return FrameOutput::default();
+        }
+        self.needs_render = false;
+        let Some(layout) = self.layout.take() else {
+            self.dirty.clear();
+            return FrameOutput::default();
+        };
+        let mut out = FrameOutput::default();
+        let props = self.bar_props();
+
+        // Bars.
+        let mut redrawn_bars: Vec<u32> = Vec::new();
+        for bl in &layout.bars {
+            let key = WindowKey::Bar(bl.adid);
+            let changed = self.dirty.contains(&key)
+                || match self.emitted_bars.get(&bl.adid) {
+                    Some(e) => e.props != props || e.layout != *bl,
+                    None => true,
+                };
+            if !changed {
+                continue;
+            }
+            redrawn_bars.push(bl.adid);
+            let scene = layout::bar_scene(&self.model, bl);
+            out.windows.push(WindowUpdate {
+                key,
+                frame: bl.frame,
+                level: props.level,
+                scene,
+                blur_radius: props.blur,
+                shadow: props.shadow,
+                sticky: props.sticky,
+                font_smoothing: props.font_smoothing,
+                order: 0,
+            });
+            *self.redraws.entry(key).or_insert(0) += 1;
+            self.emitted_bars.insert(
+                bl.adid,
+                EmittedBar {
+                    layout: bl.clone(),
+                    props,
+                },
+            );
+        }
+        if self.emitted_bars.len() != layout.bars.len()
+            || self
+                .emitted_bars
+                .keys()
+                .any(|a| !layout.bars.iter().any(|b| b.adid == *a))
+        {
+            let gone: Vec<u32> = self
+                .emitted_bars
+                .keys()
+                .copied()
+                .filter(|a| !layout.bars.iter().any(|b| b.adid == *a))
+                .collect();
+            for a in gone {
+                self.emitted_bars.remove(&a);
+                out.closed.push(WindowKey::Bar(a));
+            }
+        }
+
+        // Popups.
+        for pl in &layout.popups {
+            let key = WindowKey::Popup(pl.host);
+            let blur = self
+                .model
+                .item(pl.host)
+                .map(|h| h.popup.blur_radius)
+                .unwrap_or(0);
+            let changed = self.dirty.contains(&key)
+                || redrawn_bars.contains(&pl.adid)
+                || match self.emitted_popups.get(&pl.host) {
+                    Some(e) => e.blur != blur || e.props != props || e.layout != *pl,
+                    None => true,
+                };
+            if !changed {
+                continue;
+            }
+            let scene = layout::popup_scene(&self.model, pl);
+            out.windows.push(WindowUpdate {
+                key,
+                frame: pl.frame,
+                level: pl.level,
+                scene,
+                blur_radius: blur,
+                shadow: false,
+                sticky: props.sticky,
+                font_smoothing: props.font_smoothing,
+                order: 1,
+            });
+            *self.redraws.entry(key).or_insert(0) += 1;
+            self.emitted_popups.insert(
+                pl.host,
+                EmittedPopup {
+                    layout: pl.clone(),
+                    blur,
+                    props,
+                },
+            );
+        }
+        if self.emitted_popups.len() != layout.popups.len()
+            || self
+                .emitted_popups
+                .keys()
+                .any(|h| !layout.popups.iter().any(|p| p.host == *h))
+        {
+            let gone: Vec<ItemId> = self
+                .emitted_popups
+                .keys()
+                .copied()
+                .filter(|h| !layout.popups.iter().any(|p| p.host == *h))
+                .collect();
+            for h in gone {
+                self.emitted_popups.remove(&h);
+                out.closed.push(WindowKey::Popup(h));
+            }
+        }
+
+        self.layout = Some(layout);
+        self.dirty.clear();
+        self.stats.frames += 1;
+        self.frame_times.push(t0.elapsed().as_micros() as u64);
+        out
     }
 
     /// Earliest of: routine tick, wake re-post, provider/alias schedules, animation frame.
+    /// (Providers are sampled by the platform at their own `freq`; aliases are recaptured on
+    /// the routine tick.)
     pub fn next_deadline(&self) -> Option<Instant> {
-        todo!("WP-C")
+        let mut d = self.next_tick;
+        let mut min = |x: Option<Instant>| {
+            if let Some(x) = x {
+                d = Some(d.map_or(x, |cur| cur.min(x)));
+            }
+        };
+        min(self.wake_repost);
+        if let Some(now) = self.last_now {
+            if !self.sleeps {
+                min(self.animator.next_deadline(now));
+            }
+            if self.needs_render || self.needs_layout {
+                min(Some(now));
+            }
+        }
+        d
     }
 
     /// True if `frame` should run now (dirty windows or running animations).
     pub fn needs_frame(&self) -> bool {
-        !self.dirty.is_empty() || self.animator.needs_frame() || self.model.bar_needs_update
+        self.needs_render
+            || self.needs_layout
+            || self.force_refresh
+            || self.model.bar_needs_update
+            || self.model.bar_needs_resize
+            || (!self.sleeps && self.animator.needs_frame())
     }
 
     // ------------------------------------------------------------------------------
@@ -168,8 +526,54 @@ impl Runtime {
         reply: ReplyToken,
         res: &mut dyn Resources,
     ) -> Vec<Effect> {
-        let _ = (args, reply, res);
-        todo!("WP-C: cli.md §2.5")
+        let mut effects = Vec::new();
+        if let Some(text) = self.run_message(args, &mut effects, res) {
+            effects.push(Effect::Reply { reply, text });
+        }
+        effects
+    }
+
+    /// Executes a message; `None` = no reply (`--exit`, `--monitor`).
+    fn run_message(
+        &mut self,
+        args: &[String],
+        effects: &mut Vec<Effect>,
+        res: &mut dyn Resources,
+    ) -> Option<String> {
+        self.stats.ipc_messages += 1;
+        self.anim = None;
+        self.no_reply = false;
+        let cmds = command::parse(args);
+        // Queries see the state as of the last refresh (frames/bounding rects included).
+        if self.needs_layout && cmds.iter().any(|c| matches!(c, Command::Query(_))) {
+            self.run_layout(res);
+        }
+        self.frozen = true;
+        let mut rsp = String::new();
+        let mut refresh = false;
+        for cmd in cmds {
+            if self.exiting {
+                break;
+            }
+            let is_query = matches!(cmd, Command::Query(_));
+            let before = rsp.len();
+            refresh |= self.exec(cmd, &mut rsp, effects, res);
+            if !is_query && rsp.len() > before {
+                effects.push(Effect::Log(rsp[before..].to_string()));
+            }
+        }
+        if refresh {
+            // `bar_needs_resize` is applied by `refresh` (resize before redraw).
+            self.model.bar_needs_update = true;
+        }
+        self.animator.lock_all();
+        self.frozen = false;
+        self.anim = None;
+        if self.no_reply {
+            None
+        } else {
+            Some(rsp)
+        }
     }
 
     /// Executes one command, appending to `rsp`. Returns true if it asked for the
@@ -181,16 +585,249 @@ impl Runtime {
         effects: &mut Vec<Effect>,
         res: &mut dyn Resources,
     ) -> bool {
-        let _ = (cmd, rsp, effects, res);
-        todo!("WP-C: cli.md §3.4")
+        match cmd {
+            Command::Set { target, tokens } => {
+                let ids = self.select(&target, rsp);
+                if !ids.is_empty() {
+                    self.exec_set(&ids, &tokens, rsp, effects, res);
+                }
+                false
+            }
+            Command::Default { pairs, malformed } => {
+                self.exec_default(&pairs, malformed.as_deref(), rsp, effects, res);
+                false
+            }
+            Command::Bar { pairs, malformed } => {
+                self.exec_bar(&pairs, malformed.as_deref(), rsp, effects, res)
+            }
+            Command::Animate { curve, duration } => {
+                self.anim = Some(AnimSpec { curve, duration });
+                false
+            }
+            Command::Add(add) => {
+                self.exec_add(&add, rsp, effects, res);
+                false
+            }
+            Command::AddEvent { name, notification } => {
+                match self.model.events.append(&name, notification.as_deref()) {
+                    AppendResult::Added(_) => {
+                        if let Some(n) = notification {
+                            effects.push(Effect::Platform(PlatformRequest::ObserveNotification(
+                                n,
+                            )));
+                        }
+                    }
+                    AppendResult::Exists => {}
+                    AppendResult::Full => {
+                        let _ = write!(rsp, "[!] Event: Too many events '{name}'\n");
+                    }
+                }
+                false
+            }
+            Command::Clone {
+                name,
+                parent,
+                placement,
+            } => {
+                self.exec_clone(&name, &parent, placement, rsp, effects, res);
+                false
+            }
+            Command::Subscribe { item, events } => {
+                self.exec_subscribe(&item, &events, rsp, effects);
+                false
+            }
+            Command::Push { item, values } => {
+                self.exec_push(&item, &values, rsp);
+                false
+            }
+            Command::Update => {
+                self.exec_update(effects, res);
+                true
+            }
+            Command::Trigger { event, args } => {
+                self.exec_trigger(&event, &args, effects, res);
+                false
+            }
+            Command::Query(target) => {
+                self.exec_query(&target, rsp, res);
+                false
+            }
+            Command::Reorder(names) => {
+                self.exec_reorder(&names, rsp);
+                false
+            }
+            Command::Move {
+                item,
+                before,
+                reference,
+            } => {
+                self.exec_move(&item, before, &reference, rsp);
+                false
+            }
+            Command::Remove(sel) => {
+                let ids = match &sel {
+                    Selector::Name(n) => match self.model.find(n) {
+                        Some(id) => vec![id],
+                        None => {
+                            let _ = write!(rsp, "[!] Remove: Item '{n}' not found\n");
+                            Vec::new()
+                        }
+                    },
+                    Selector::Regex(tok) => self.regex_select(tok, sel.pattern().unwrap_or(""), rsp),
+                };
+                for id in ids {
+                    self.remove_item(id, effects);
+                }
+                true
+            }
+            Command::Rename { old, new } => {
+                self.exec_rename(&old, &new, rsp);
+                false
+            }
+            Command::Exit => {
+                self.send_mach_destroy(effects);
+                self.animator.clear();
+                effects.push(Effect::Exit);
+                self.no_reply = true;
+                self.exiting = true;
+                false
+            }
+            Command::Hotload(tok) => {
+                self.hotload = value::parse_bool(&tok, self.hotload);
+                effects.push(Effect::Platform(PlatformRequest::SetHotload(self.hotload)));
+                false
+            }
+            Command::LoadFont(path) => {
+                effects.push(Effect::Platform(PlatformRequest::LoadFont(path)));
+                false
+            }
+            Command::Reload(path) => {
+                self.reload_with_response(path, rsp, effects, res);
+                false
+            }
+            Command::UnknownDomain(tok) => {
+                let _ = write!(rsp, "[!] Unknown domain '{tok}'\n");
+                false
+            }
+            Command::Monitor(mode) => {
+                match mode {
+                    MonitorMode::Events => self.monitor_events = true,
+                    MonitorMode::Stats => self.monitor_stats = true,
+                    MonitorMode::All => {
+                        self.monitor_events = true;
+                        self.monitor_stats = true;
+                    }
+                }
+                // The connection stays open for the stream: no reply.
+                self.no_reply = true;
+                false
+            }
+            Command::Menu(which) => {
+                let index = which.parse::<usize>().ok().or_else(|| {
+                    self.menu_titles.iter().position(|t| *t == which)
+                });
+                match index {
+                    Some(index) => {
+                        effects.push(Effect::Platform(PlatformRequest::OpenMenu { index }))
+                    }
+                    None => {
+                        let _ = write!(rsp, "[!] Menu: Menu '{which}' not found\n");
+                    }
+                }
+                false
+            }
+            Command::MenuBar(action) => {
+                let hide = match action {
+                    Some(MenuBarAction::Hide) => Some(true),
+                    Some(MenuBarAction::Show) => Some(false),
+                    Some(MenuBarAction::Toggle) => Some(res.menu_bar_visible()),
+                    None => None,
+                };
+                match hide {
+                    Some(h) => {
+                        effects.push(Effect::Platform(PlatformRequest::SetMenuBarHidden(h)))
+                    }
+                    None => {
+                        rsp.push_str(
+                            "[!] Menubar: Invalid argument, expected 'hide', 'show' or 'toggle'\n",
+                        );
+                    }
+                }
+                false
+            }
+        }
     }
 
     /// Resolves a selector (`cli.md` §3.5): exact name or BRE over all names in global order;
     /// appends `[!] Set: Item not found '<name>'\n` / regex messages as appropriate (the
     /// caller decides the error prefix for `--remove`).
     fn select(&self, sel: &Selector, rsp: &mut String) -> Vec<ItemId> {
-        let _ = (sel, rsp);
-        todo!("WP-C: cli.md §3.5")
+        match sel {
+            Selector::Name(n) => match self.model.find(n) {
+                Some(id) => vec![id],
+                None => {
+                    let _ = write!(rsp, "[!] Set: Item not found '{n}'\n");
+                    Vec::new()
+                }
+            },
+            Selector::Regex(tok) => self.regex_select(tok, sel.pattern().unwrap_or(""), rsp),
+        }
+    }
+
+    /// Regex selection (`regcomp` BRE, unanchored `regexec` over all names in order).
+    fn regex_select(&self, token: &str, pattern: &str, rsp: &mut String) -> Vec<ItemId> {
+        let re = command::bre_to_regex(pattern)
+            .ok()
+            .and_then(|p| regex::Regex::new(&p).ok());
+        let Some(re) = re else {
+            let _ = write!(rsp, "[!] Regex: Could not compile regex '{token}'\n");
+            return Vec::new();
+        };
+        let ids: Vec<ItemId> = self
+            .model
+            .items
+            .iter()
+            .filter(|i| i.name.as_deref().is_some_and(|n| re.is_match(n)))
+            .map(|i| i.id)
+            .collect();
+        if ids.is_empty() {
+            let _ = write!(rsp, "[?] Regex: No match found for regex '{token}'\n");
+        }
+        ids
+    }
+
+    /// Runs one property setter on `target` with a fresh `PropCx` (animation setting of the
+    /// current message). Returns the result, the non-fatal response text, the global
+    /// effects and the requests.
+    fn set_prop_on(
+        &mut self,
+        target: AnimTarget,
+        key: &str,
+        value: &str,
+        res: &mut dyn Resources,
+    ) -> (PropResult, String, PropEffects, Vec<PropRequest>) {
+        let anim = self.anim;
+        let Runtime {
+            model,
+            animator,
+            config,
+            ..
+        } = self;
+        let mut cx = PropCx::new(res, animator, &config.home);
+        cx.anim = anim;
+        cx.set_target(target);
+        let r = match target {
+            AnimTarget::Bar => model.bar.set_prop(key, value, &mut cx),
+            AnimTarget::Default => model.default_item.set_prop(key, value, &mut cx),
+            AnimTarget::Item(id) => match model.item_mut(id) {
+                Some(item) => item.set_prop(key, value, &mut cx),
+                None => Ok(false),
+            },
+        };
+        let response = std::mem::take(&mut cx.response);
+        let fx = cx.fx;
+        let requests = std::mem::take(&mut cx.requests);
+        (r, response, fx, requests)
     }
 
     /// `--set`: token-major / item-minor application with `PropCx` (target
@@ -201,10 +838,44 @@ impl Runtime {
         ids: &[ItemId],
         tokens: &[SetToken],
         rsp: &mut String,
+        effects: &mut Vec<Effect>,
         res: &mut dyn Resources,
     ) {
-        let _ = (ids, tokens, rsp, res);
-        todo!("WP-C: cli.md §6.2")
+        for tok in tokens {
+            match tok {
+                SetToken::Malformed(t) => {
+                    let first = self.model.name_of(ids[0]);
+                    let _ = write!(
+                        rsp,
+                        "[!] Set ({}): Expected <key>=<value> pair, but got: '{t}'\n",
+                        name_or_null(first.as_deref())
+                    );
+                }
+                SetToken::Pair { key, value } => {
+                    for &id in ids {
+                        if self.model.item(id).is_none() {
+                            continue;
+                        }
+                        let (r, response, fx, reqs) =
+                            self.set_prop_on(AnimTarget::Item(id), key, value, res);
+                        rsp.push_str(&response);
+                        let changed = match r {
+                            Ok(c) => c,
+                            Err(e) => {
+                                let _ = write!(rsp, "{e}");
+                                false
+                            }
+                        };
+                        let out = self.apply_requests(Some(id), reqs, fx, rsp, effects, res);
+                        if changed && !out.suppress_update {
+                            if let Some(item) = self.model.item_mut(id) {
+                                item.needs_update = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// `--default` (target `AnimTarget::Default`; malformed pair ends the domain).
@@ -213,10 +884,23 @@ impl Runtime {
         pairs: &[(String, String)],
         malformed: Option<&str>,
         rsp: &mut String,
+        effects: &mut Vec<Effect>,
         res: &mut dyn Resources,
     ) {
-        let _ = (pairs, malformed, rsp, res);
-        todo!("WP-C: cli.md §6.3")
+        for (k, v) in pairs {
+            let (r, response, fx, reqs) = self.set_prop_on(AnimTarget::Default, k, v, res);
+            rsp.push_str(&response);
+            if let Err(e) = r {
+                let _ = write!(rsp, "{e}");
+            }
+            self.apply_requests(None, reqs, fx, rsp, effects, res);
+        }
+        if let Some(t) = malformed {
+            let _ = write!(
+                rsp,
+                "[!] Set (default): Expected <key>=<value> pair, but got: '{t}'\n"
+            );
+        }
     }
 
     /// `--bar` (target `AnimTarget::Bar`); returns the refresh flag.
@@ -225,23 +909,109 @@ impl Runtime {
         pairs: &[(String, String)],
         malformed: Option<&str>,
         rsp: &mut String,
+        effects: &mut Vec<Effect>,
         res: &mut dyn Resources,
     ) -> bool {
-        let _ = (pairs, malformed, rsp, res);
-        todo!("WP-C: bar.md §2")
+        let mut refresh = false;
+        for (k, v) in pairs {
+            let (r, response, fx, reqs) = self.set_prop_on(AnimTarget::Bar, k, v, res);
+            rsp.push_str(&response);
+            match r {
+                Ok(c) => refresh |= c,
+                Err(e) => {
+                    let _ = write!(rsp, "{e}");
+                }
+            }
+            refresh |= self.apply_requests(None, reqs, fx, rsp, effects, res).refresh;
+        }
+        if let Some(t) = malformed {
+            let _ = write!(rsp, "[!] Bar: Expected <key>=<value> pair, but got: '{t}'\n");
+        }
+        refresh
     }
 
-    /// Executes `PropRequest`s pushed by a setter on item `id` (or the bar).
+    /// Merges setter side effects into the model (and starts media events).
+    fn merge_fx(&mut self, fx: PropEffects, effects: &mut Vec<Effect>) {
+        self.model.bar_needs_update |= fx.bar_needs_update;
+        self.model.bar_needs_resize |= fx.bar_needs_resize;
+        self.model.might_need_clipping |= fx.might_need_clipping;
+        if fx.begin_media_events && !self.listeners.media {
+            self.listeners.media = true;
+            effects.push(Effect::Platform(PlatformRequest::StartMediaEvents));
+        }
+    }
+
+    /// Executes `PropRequest`s pushed by a setter on item `id` (or the bar / default item
+    /// when `None`).
     fn apply_requests(
         &mut self,
         id: Option<ItemId>,
         reqs: Vec<PropRequest>,
         fx: PropEffects,
         rsp: &mut String,
+        effects: &mut Vec<Effect>,
         res: &mut dyn Resources,
-    ) -> bool {
-        let _ = (id, reqs, fx, rsp, res);
-        todo!("WP-C: item.md §2.3, bar.md §2.3–2.5")
+    ) -> ReqOutcome {
+        self.merge_fx(fx, effects);
+        let mut out = ReqOutcome::default();
+        for r in reqs {
+            match r {
+                PropRequest::RemoveFromParentPopup => {
+                    if let Some(id) = id {
+                        if let Some(p) = self.model.item(id).and_then(|i| i.parent) {
+                            self.popup_remove_item(p, id);
+                        }
+                    }
+                }
+                PropRequest::AddToPopup { host } => match self.model.find(&host) {
+                    Some(h) => {
+                        if let Some(id) = id {
+                            self.popup_add_item(h, id);
+                        }
+                    }
+                    None => {
+                        let name = match id {
+                            Some(id) => self.model.name_of(id),
+                            None => self.model.default_item.name.clone(),
+                        };
+                        let _ = write!(
+                            rsp,
+                            "[!] Item Position ({}): Item '{host}' is not a valid popup host\n",
+                            name_or_null(name.as_deref())
+                        );
+                        out.suppress_update = true;
+                    }
+                },
+                PropRequest::ResetDefaultItem => self.model.default_item.reset_default(),
+                PropRequest::ProviderChanged => {
+                    if let Some(id) = id {
+                        self.configure_provider(id, effects);
+                    }
+                }
+                PropRequest::BarHidden(HiddenRequest::Current) => {
+                    let adid = self.model.active_adid;
+                    if adid >= 1 && adid as usize <= self.model.bars.len() {
+                        let hidden = !self.model.bars[adid as usize - 1].hidden;
+                        self.set_hidden(Some(adid), hidden);
+                        out.refresh = true;
+                    } else {
+                        effects.push(Effect::Log(format!("No bar on display {adid} \n")));
+                    }
+                }
+                PropRequest::BarHidden(HiddenRequest::All(h)) => {
+                    self.set_hidden(None, h);
+                    out.refresh = true;
+                }
+                PropRequest::ResetBars => {
+                    self.reset_bars(res);
+                    out.refresh = true;
+                }
+                PropRequest::MenuBarHidden(h) => {
+                    effects.push(Effect::Platform(PlatformRequest::SetMenuBarHidden(h)));
+                }
+            }
+        }
+        out
     }
 
     /// `--add` (`cli.md` §6.1 / `item.md` §2.1) incl. types, positions, popup hosts, graph /
@@ -255,8 +1025,158 @@ impl Runtime {
         effects: &mut Vec<Effect>,
         res: &mut dyn Resources,
     ) {
-        let _ = (add, rsp, effects, res);
-        todo!("WP-C: cli.md §6.1")
+        let name = add.name.as_str();
+        if self.model.find(name).is_some() {
+            let _ = write!(rsp, "[?] Add: Item '{name}' already exists\n");
+            return;
+        }
+        let id = self.model.create_item(res);
+        let (t, known) = ItemType::from_add_token(&add.item_type);
+        if !known {
+            let _ = write!(
+                rsp,
+                "[?] Add {name}: Invalid type '{}', assuming 'item'\n",
+                add.item_type
+            );
+        }
+        let home = self.config.home.clone();
+        {
+            let Some(item) = self.model.item_mut(id) else {
+                return;
+            };
+            item.set_type(t, &home);
+            if t != ItemType::Bracket && item.set_position(&add.position).is_none() {
+                let _ = write!(rsp, "[!] Add {name}: Illegal position '{}'\n", add.position);
+                self.remove_item(id, effects);
+                return;
+            }
+        }
+        if !self.model.item_mut(id).is_some_and(|i| i.set_name(name)) {
+            let _ = write!(rsp, "[!] Add: Illegal name '{name}'\n");
+            self.remove_item(id, effects);
+            return;
+        }
+
+        if !add.item_type.is_empty() && add.item_type != "item" {
+            let width = add
+                .args
+                .first()
+                .map(|w| value::parse_u32(w))
+                .unwrap_or(0);
+            match t {
+                ItemType::Graph => {
+                    if let Some(item) = self.model.item_mut(id) {
+                        item.graph.setup(width);
+                    }
+                }
+                ItemType::Slider => {
+                    if let Some(item) = self.model.item_mut(id) {
+                        item.slider.setup(width);
+                    }
+                }
+                ItemType::Alias => {
+                    if let Some(item) = self.model.item_mut(id) {
+                        item.alias.setup(name);
+                        let owner = item.alias.owner.clone();
+                        let alias_name = item.alias.name.clone();
+                        effects.push(Effect::Platform(PlatformRequest::RequestScreenCapture));
+                        if item.alias.update_frequency != 0 && !self.capture_disabled {
+                            effects.push(Effect::Platform(PlatformRequest::CaptureAlias {
+                                item: id,
+                                owner,
+                                name: alias_name,
+                                forced: true,
+                            }));
+                        }
+                    }
+                }
+                ItemType::Bracket => {
+                    let mut first_resolved = false;
+                    let members =
+                        std::iter::once(add.position.as_str()).chain(add.args.iter().map(String::as_str));
+                    for tok in members {
+                        if tok.is_empty() {
+                            continue;
+                        }
+                        let resolved = match Selector::parse(tok) {
+                            sel @ Selector::Regex(_) => {
+                                self.regex_select(tok, sel.pattern().unwrap_or(""), rsp)
+                            }
+                            Selector::Name(n) => match self.model.find(&n) {
+                                Some(m) => vec![m],
+                                None => {
+                                    let _ = write!(
+                                        rsp,
+                                        "[?] Add (Group) {name}: Failed to add member '{tok}', item not found\n"
+                                    );
+                                    Vec::new()
+                                }
+                            },
+                        };
+                        if resolved.is_empty() {
+                            continue;
+                        }
+                        if !first_resolved {
+                            first_resolved = true;
+                            let first = self.model.item(resolved[0]);
+                            if let Some(f) = first {
+                                if f.position == Position::Popup {
+                                    let parent = f.parent;
+                                    if let Some(b) = self.model.item_mut(id) {
+                                        b.position = Position::Popup;
+                                    }
+                                    if let Some(p) = parent {
+                                        self.popup_add_item(p, id);
+                                    }
+                                }
+                            }
+                        }
+                        for m in resolved {
+                            group::add_member(&mut self.model, id, m);
+                        }
+                    }
+                }
+                ItemType::AppMenu => {
+                    if self.model.events.flag("menus_change").is_none() {
+                        self.model.events.append("menus_change", None);
+                    }
+                    let app = self.menu_app.clone();
+                    let titles = self.menu_titles.clone();
+                    if let Some(item) = self.model.item_mut(id) {
+                        item.app_menu.app_name = app;
+                        item.app_menu.titles = titles;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Popup host (`p….<host>`; for brackets the first member token, quirk).
+        let pos = add.position.as_str();
+        if pos.starts_with('p') {
+            if let Some((_, host)) = pos.split_once('.') {
+                if !host.is_empty() {
+                    match self.model.find(host) {
+                        None => {
+                            let _ = write!(
+                                rsp,
+                                "[!] Add (Popup) {name}: Item '{host}' is not a valid popup host\n"
+                            );
+                            self.remove_item(id, effects);
+                            return;
+                        }
+                        Some(h) => self.popup_add_item(h, id),
+                    }
+                }
+            }
+        }
+
+        if let Some(item) = self.model.item_mut(id) {
+            item.needs_update = true;
+            if item.provider.kind.is_some() {
+                self.configure_provider(id, effects);
+            }
+        }
     }
 
     /// `--clone` (`item.md` §10.1; D6/D7; popup members not attached).
@@ -264,62 +1184,306 @@ impl Runtime {
         &mut self,
         name: &str,
         parent: &str,
-        placement: Option<crate::command::Placement>,
+        placement: Option<Placement>,
         rsp: &mut String,
+        effects: &mut Vec<Effect>,
         res: &mut dyn Resources,
     ) {
-        let _ = (name, parent, placement, rsp, res);
-        todo!("WP-C: item.md §10.1")
+        let Some(pid) = self.model.find(parent) else {
+            let _ = write!(rsp, "[!] Clone: Parent Item '{parent}' not found\n");
+            return;
+        };
+        if self.model.find(name).is_some() {
+            let _ = write!(rsp, "[?] Clone: Item '{name}' already exists\n");
+            return;
+        }
+        if name.is_empty() {
+            // C creates an item with a NULL name; mbar rejects it (cli.md §6.8).
+            return;
+        }
+        let id = self.model.create_item(res);
+        let Some(ancestor) = self.model.item(pid).cloned() else {
+            return;
+        };
+        if let Some(item) = self.model.item_mut(id) {
+            item.inherit_from(&ancestor, res);
+            item.set_name(name);
+            item.needs_update = true;
+        }
+        match placement {
+            Some(Placement::Before) => self.move_item(id, pid, true),
+            Some(Placement::After) => self.move_item(id, pid, false),
+            None => {}
+        }
+        if self.model.item(id).is_some_and(|i| i.provider.kind.is_some()) {
+            self.configure_provider(id, effects);
+        }
     }
 
     /// `bar_manager_remove_item` (`item.md` §10.5): popup lists, brackets, popup children,
     /// D18 `animator.cancel_target`, provider stop.
     fn remove_item(&mut self, id: ItemId, effects: &mut Vec<Effect>) {
-        let _ = (id, effects);
-        todo!("WP-C: item.md §10.5")
+        let Some(idx) = self.model.index_of(id) else {
+            return;
+        };
+        // Remove it from every popup list (closing popups that become empty).
+        for it in &mut self.model.items {
+            if it.popup.items.contains(&id) {
+                it.popup.items.retain(|m| *m != id);
+                if it.popup.items.is_empty() {
+                    it.popup.frame = None;
+                }
+            }
+        }
+        if self.model.items[idx].is_bracket() {
+            group::destroy_group(&mut self.model, id);
+        }
+        let brackets: Vec<ItemId> = self
+            .model
+            .items
+            .iter()
+            .filter(|i| i.is_bracket() && i.bracket_members.contains(&id))
+            .map(|i| i.id)
+            .collect();
+        for b in brackets {
+            group::remove_member(&mut self.model, b, id);
+        }
+        // Popup children are detached (cli.md §6.4: C leaves a dangling parent).
+        for it in &mut self.model.items {
+            if it.parent == Some(id) {
+                it.parent = None;
+            }
+        }
+        self.animator.cancel_target(AnimTarget::Item(id));
+        let Some(idx) = self.model.index_of(id) else {
+            return;
+        };
+        let item = self.model.items.remove(idx);
+        if item.provider.kind.is_some() {
+            effects.push(Effect::Platform(PlatformRequest::StopProvider { item: id }));
+        }
+        self.model.needs_ordering = true;
+        self.model.bar_needs_update = true;
+    }
+
+    /// Moves `id` directly before/after `reference` in the global order.
+    fn move_item(&mut self, id: ItemId, reference: ItemId, before: bool) {
+        if id == reference {
+            return;
+        }
+        let Some(idx) = self.model.index_of(id) else {
+            return;
+        };
+        let mut item = self.model.items.remove(idx);
+        item.needs_update = true;
+        let Some(r) = self.model.index_of(reference) else {
+            self.model.items.insert(idx, item);
+            return;
+        };
+        let at = if before { r } else { r + 1 };
+        self.model.items.insert(at, item);
+        self.model.needs_ordering = true;
     }
 
     /// `--move` (D8: self-move is a no-op), `--reorder` (D8: duplicates → first wins),
     /// `--rename`, `--push` (D5).
     fn exec_move(&mut self, item: &str, before: bool, reference: &str, rsp: &mut String) {
-        let _ = (item, before, reference, rsp);
-        todo!("WP-C: item.md §10.4")
+        match (self.model.find(item), self.model.find(reference)) {
+            (Some(a), Some(b)) => self.move_item(a, b, before),
+            _ => {
+                let _ = write!(rsp, "[!] Move: Item '{item}' or '{reference}' not found\n");
+            }
+        }
     }
     fn exec_reorder(&mut self, names: &[String], rsp: &mut String) {
-        let _ = (names, rsp);
-        todo!("WP-C: item.md §10.3")
+        let mut order: Vec<ItemId> = Vec::new();
+        for n in names {
+            match self.model.find(n) {
+                Some(id) => {
+                    if !order.contains(&id) {
+                        order.push(id);
+                    }
+                }
+                None => {
+                    let _ = write!(rsp, "[!] Order: Item '{n}' not found\n");
+                }
+            }
+        }
+        if order.is_empty() {
+            return;
+        }
+        let slots: Vec<usize> = self
+            .model
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| order.contains(&i.id))
+            .map(|(k, _)| k)
+            .collect();
+        let original: Vec<ItemId> = slots.iter().map(|&s| self.model.items[s].id).collect();
+        let mut old: Vec<Option<BarItem>> = std::mem::take(&mut self.model.items)
+            .into_iter()
+            .map(Some)
+            .collect();
+        let mut taken: HashMap<ItemId, BarItem> = HashMap::new();
+        for &s in &slots {
+            if let Some(it) = old[s].take() {
+                taken.insert(it.id, it);
+            }
+        }
+        for (k, &s) in slots.iter().enumerate() {
+            if let Some(mut it) = taken.remove(&order[k]) {
+                if it.id != original[k] {
+                    it.needs_update = true;
+                }
+                old[s] = Some(it);
+            }
+        }
+        self.model.items = old.into_iter().flatten().collect();
+        self.model.needs_ordering = true;
     }
     fn exec_rename(&mut self, old: &str, new: &str, rsp: &mut String) {
-        let _ = (old, new, rsp);
-        todo!("WP-C: item.md §10.2")
+        let src = self.model.find(old);
+        if src.is_none() || self.model.find(new).is_some() {
+            let _ = write!(rsp, "[!] Rename: Failed to rename item: {old} -> {new}\n");
+            return;
+        }
+        if let Some(item) = src.and_then(|id| self.model.item_mut(id)) {
+            item.set_name(new);
+        }
     }
     fn exec_push(&mut self, item: &str, values: &[f32], rsp: &mut String) {
-        let _ = (item, values, rsp);
-        todo!("WP-C: item.md §10.6")
+        let Some(id) = self.model.find(item) else {
+            let _ = write!(rsp, "[!] Push: Item '{item}' not found\n");
+            return;
+        };
+        let Some(it) = self.model.item_mut(id) else {
+            return;
+        };
+        if !it.has_graph() {
+            let _ = write!(rsp, "[!] Push: Item '{item}' not a graph\n");
+            return;
+        }
+        for v in values {
+            it.graph.push(*v);
+        }
+        it.needs_update = true;
     }
 
     /// `popup_add_item` / `popup_remove_item` (`item.md` §6.1).
     fn popup_add_item(&mut self, host: ItemId, item: ItemId) {
-        let _ = (host, item);
-        todo!("WP-C: item.md §6.1")
+        if self
+            .model
+            .item(host)
+            .is_none_or(|h| h.popup.items.contains(&item))
+        {
+            return;
+        }
+        if let Some(old) = self.model.item(item).and_then(|i| i.parent) {
+            if old != host {
+                self.popup_remove_item(old, item);
+            }
+        }
+        if let Some(h) = self.model.item_mut(host) {
+            h.popup.items.push(item);
+            h.popup.needs_ordering = true;
+            h.needs_update = true;
+        }
+        if let Some(i) = self.model.item_mut(item) {
+            i.parent = Some(host);
+        }
     }
     fn popup_remove_item(&mut self, host: ItemId, item: ItemId) {
-        let _ = (host, item);
-        todo!("WP-C: item.md §6.1")
+        if let Some(h) = self.model.item_mut(host) {
+            if !h.popup.items.contains(&item) {
+                return;
+            }
+            h.popup.items.retain(|m| *m != item);
+            if h.popup.items.is_empty() {
+                // The window is closed; `popup.drawing` stays on.
+                h.popup.frame = None;
+            }
+            h.needs_update = true;
+        }
     }
 
     /// `--query` (calls `query::query` with a `QueryCx`).
     fn exec_query(&mut self, target: &QueryTarget, rsp: &mut String, res: &mut dyn Resources) {
-        let _ = (target, rsp, res);
-        todo!("WP-C → WP-B query::query")
+        if matches!(target, QueryTarget::Stats) {
+            self.fill_stats();
+        }
+        let extras = if matches!(target, QueryTarget::DefaultMenuItems) {
+            res.menu_extras()
+        } else {
+            None
+        };
+        let cx = QueryCx {
+            model: &self.model,
+            displays: res.displays(),
+            menu_extras: extras.as_deref(),
+            stats: &self.stats,
+            menus: &self.menu_titles,
+        };
+        rsp.push_str(&query::query(target, &cx));
+    }
+
+    /// `--reload [<path>]` inside a message (`[?] Reload: Invalid config path` on a bad path).
+    fn reload_with_response(
+        &mut self,
+        path: Option<String>,
+        rsp: &mut String,
+        effects: &mut Vec<Effect>,
+        res: &mut dyn Resources,
+    ) {
+        let mut resolved = None;
+        if let Some(p) = &path {
+            match std::fs::canonicalize(p) {
+                Ok(abs) => {
+                    let abs = abs.to_string_lossy().into_owned();
+                    self.config.config_path = Some(abs.clone());
+                    resolved = Some(abs);
+                }
+                Err(_) => {
+                    let _ = write!(rsp, "[?] Reload: Invalid config path '{p}'\n");
+                    return;
+                }
+            }
+        }
+        self.reload(resolved, effects, res);
     }
 
     /// `--reload` / hotload (`cli.md` §11): mach helpers get `"k"`, animations dropped, model
     /// re-initialised (events back to built-ins, listeners kept), bars recreated,
     /// `Effect::RunConfig`.
     fn reload(&mut self, path: Option<String>, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
-        let _ = (path, effects, res);
-        todo!("WP-C: cli.md §11")
+        self.send_mach_destroy(effects);
+        for it in &self.model.items {
+            if it.provider.kind.is_some() {
+                effects.push(Effect::Platform(PlatformRequest::StopProvider { item: it.id }));
+            }
+        }
+        self.animator.clear();
+        self.model = Model::new();
+        self.anim = None;
+        self.sleeps = false;
+        self.force_refresh = false;
+        self.dirty.clear();
+        let now = res.now();
+        self.next_tick = Some(now + CLOCK_PERIOD);
+        self.begin_bars(res);
+        effects.push(Effect::RunConfig { path });
+    }
+
+    /// `"k\0"` to every mach helper (`bar_manager_destroy`).
+    fn send_mach_destroy(&self, effects: &mut Vec<Effect>) {
+        for it in &self.model.items {
+            if let Some(service) = &it.mach_helper {
+                effects.push(Effect::Platform(PlatformRequest::MachSend {
+                    service: service.clone(),
+                    payload: MACH_HELPER_DESTROY.to_vec(),
+                }));
+            }
+        }
     }
 
     // ------------------------------------------------------------------------------
@@ -328,9 +1492,40 @@ impl Runtime {
     // animation::marquee.
     // ------------------------------------------------------------------------------
 
+    /// Starts the marquee of icon/label(/knob) of the item at `idx` (`text_animate_scroll`).
+    fn start_marquee(&mut self, idx: usize) {
+        let item = &self.model.items[idx];
+        let target = AnimTarget::Item(item.id);
+        let mut sets = Vec::new();
+        if let Some(a) = animation::marquee(target, "icon.", &item.icon) {
+            sets.push(a);
+        }
+        if let Some(a) = animation::marquee(target, "label.", &item.label) {
+            sets.push(a);
+        }
+        if item.has_slider() {
+            if let Some(a) = animation::marquee(target, "slider.knob.", &item.slider.knob) {
+                sets.push(a);
+            }
+        }
+        if sets.is_empty() {
+            return;
+        }
+        for set in sets {
+            for (i, p) in set.into_iter().enumerate() {
+                if i != 1 {
+                    self.animator.cancel_locked(p.target, &p.path);
+                }
+                self.animator.add(p);
+            }
+        }
+        // Quirk Q8: the marquee resets `--animate` for the rest of the message.
+        self.anim = None;
+    }
+
     /// `bar_item_update(item, sender, forced, env)` (`events.md` §4.2): counter/marquee
     /// handling, gating (`updates`, `update_freq`, `when_shown`), env building (D1), script
-    /// spawn, mach helper send, Lua handler call.
+    /// spawn, mach helper send, Lua handler call. Returns true if something was run.
     fn update_item(
         &mut self,
         id: ItemId,
@@ -338,16 +1533,222 @@ impl Runtime {
         forced: bool,
         env: Option<&EnvVars>,
         effects: &mut Vec<Effect>,
+    ) -> bool {
+        let Some(idx) = self.model.index_of(id) else {
+            return false;
+        };
+        let (is_shown, scroll, counter) = {
+            let it = &self.model.items[idx];
+            (it.associated_bar != 0, it.scroll_texts, it.counter)
+        };
+        if is_shown && scroll && counter % 15 == 0 {
+            self.start_marquee(idx);
+        }
+        let item = &mut self.model.items[idx];
+        item.counter = item.counter.wrapping_add(1);
+        if (!item.updates || (item.update_frequency == 0 && sender.is_none())) && !forced {
+            return false;
+        }
+        let scheduled = item.update_frequency <= item.counter;
+        let should = if item.updates_only_when_shown {
+            is_shown
+        } else {
+            true
+        };
+        if !(((scheduled || sender.is_some()) && should) || forced) {
+            return false;
+        }
+        item.counter = 0;
+        let lua = item
+            .lua_handler
+            .or_else(|| item.script.as_deref().and_then(lua_id));
+        let script = item.script.clone().filter(|s| !s.is_empty());
+        let mach = item.mach_helper.clone();
+        if lua.is_none() && script.is_none() && mach.is_none() {
+            return false;
+        }
+        let sender = sender.unwrap_or(if forced {
+            Sender::Forced
+        } else {
+            Sender::Routine
+        });
+        let name = item.name.clone();
+        let env = script::build_update_env(&mut item.env, env, name.as_deref(), &sender);
+        let mach_payload = mach.map(|service| (service, script::serialize_for_mach(&env)));
+        if let Some(h) = lua {
+            self.stats.lua_callbacks += 1;
+            effects.push(Effect::LuaCallback {
+                handler: h,
+                env: env.into_vec(),
+            });
+        } else if let Some(script) = script {
+            self.note_script_spawn(name.as_deref());
+            effects.push(Effect::RunScript {
+                script,
+                env: env.into_vec(),
+                item: name,
+            });
+        }
+        if let Some((service, payload)) = mach_payload {
+            effects.push(Effect::Platform(PlatformRequest::MachSend { service, payload }));
+        }
+        true
+    }
+
+    /// Runs a `click_script` (shell or `lua:<id>`).
+    fn run_click_script(&mut self, id: ItemId, env: EnvVars, effects: &mut Vec<Effect>) {
+        let Some(item) = self.model.item(id) else {
+            return;
+        };
+        let Some(cs) = item.click_script.clone().filter(|s| !s.is_empty()) else {
+            return;
+        };
+        let name = item.name.clone();
+        if let Some(h) = lua_id(&cs) {
+            self.stats.lua_callbacks += 1;
+            effects.push(Effect::LuaCallback {
+                handler: h,
+                env: env.into_vec(),
+            });
+        } else {
+            self.note_script_spawn(name.as_deref());
+            effects.push(Effect::RunScript {
+                script: cs,
+                env: env.into_vec(),
+                item: name,
+            });
+        }
+    }
+
+    fn note_script_spawn(&mut self, name: Option<&str>) {
+        self.stats.scripts_spawned += 1;
+        let key = name.unwrap_or("(null)");
+        let now = self.last_now;
+        let st = match self.scripts.get_mut(key) {
+            Some(s) => s,
+            None => self.scripts.entry(key.to_string()).or_default(),
+        };
+        st.runs += 1;
+        if let Some(now) = now {
+            if st.pending.len() >= PENDING_SCRIPTS_CAP {
+                st.pending.pop_front();
+            }
+            st.pending.push_back(now);
+        }
+    }
+
+    fn script_finished(&mut self, item: Option<String>, now: Instant) {
+        self.scripts_finished += 1;
+        let Some(name) = item else { return };
+        let Some(st) = self.scripts.get_mut(&name) else {
+            return;
+        };
+        st.finished += 1;
+        if let Some(start) = st.pending.pop_front() {
+            let ms = now.saturating_duration_since(start).as_secs_f64() * 1000.0;
+            st.total_ms += ms;
+            st.max_ms = st.max_ms.max(ms);
+            self.script_total_ms += ms;
+            self.script_finished_timed += 1;
+        }
+    }
+
+    fn count_event(&mut self, name: &str) {
+        match self.stats.events.get_mut(name) {
+            Some(c) => *c += 1,
+            None => {
+                self.stats.events.insert(name.to_string(), 1);
+            }
+        }
+    }
+
+    /// One `--monitor` event line (extension).
+    fn monitor_event(&self, name: &str, sender: &str, info: Option<&str>, items: &[String]) -> Effect {
+        let info = match info {
+            Some(s) => serde_json::from_str::<serde_json::Value>(s)
+                .ok()
+                .filter(|v| v.is_object() || v.is_array())
+                .unwrap_or_else(|| serde_json::Value::String(s.to_string())),
+            None => serde_json::Value::String(String::new()),
+        };
+        let ts_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let v = serde_json::json!({
+            "type": "event",
+            "name": name,
+            "sender": sender,
+            "info": info,
+            "items": items,
+            "ts_ms": ts_ms,
+        });
+        Effect::Monitor(v.to_string())
+    }
+
+    /// Delivers an event to one item directly (mouse events), with stats and monitor.
+    fn deliver(
+        &mut self,
+        id: ItemId,
+        name: &str,
+        forced: bool,
+        env: Option<&EnvVars>,
+        effects: &mut Vec<Effect>,
     ) {
-        let _ = (id, sender, forced, env, effects);
-        todo!("WP-C: events.md §4.2")
+        self.count_event(name);
+        let ran = self.update_item(id, Some(Sender::Event(name.to_string())), forced, env, effects);
+        if self.monitor_events {
+            let items: Vec<String> = if ran {
+                self.model.name_of(id).into_iter().collect()
+            } else {
+                Vec::new()
+            };
+            let info = env.and_then(|e| e.get("INFO"));
+            let line = self.monitor_event(name, name, info, &items);
+            effects.push(line);
+        }
     }
 
     /// `bar_manager_custom_events_trigger(name, env)`: every subscribed item in global order,
     /// non-forced (D16: fresh env per item).
     fn trigger_event(&mut self, ev: EventInfo, effects: &mut Vec<Effect>) {
-        let _ = (ev, effects);
-        todo!("WP-C: events.md §4.1")
+        self.count_event(&ev.name);
+        let mut ran: Vec<String> = Vec::new();
+        if let Some(flag) = self.model.events.flag(&ev.name) {
+            let mut idx = 0;
+            while idx < self.model.items.len() {
+                let item = &self.model.items[idx];
+                idx += 1;
+                if !item.update_mask.contains(flag) {
+                    continue;
+                }
+                let id = item.id;
+                let r = self.update_item(
+                    id,
+                    Some(Sender::Event(ev.name.clone())),
+                    false,
+                    ev.env.as_ref(),
+                    effects,
+                );
+                if r && self.monitor_events {
+                    if let Some(n) = self.model.name_of(id) {
+                        ran.push(n);
+                    }
+                }
+            }
+        }
+        if self.monitor_events {
+            let info = ev.env.as_ref().and_then(|e| e.get("INFO"));
+            let line = self.monitor_event(&ev.name, &ev.name, info, &ran);
+            effects.push(line);
+        }
+    }
+
+    /// Triggers `name` with `INFO=info`.
+    fn trigger_info(&mut self, name: &str, info: String, effects: &mut Vec<Effect>) {
+        let mut env = EnvVars::new();
+        env.set("INFO", info);
+        self.trigger_event(EventInfo::new(name, Some(env)), effects);
     }
 
     /// `--subscribe` (`events.md` §3.3): bits, lazy listeners (`PlatformRequest::Start*`).
@@ -358,8 +1759,38 @@ impl Runtime {
         rsp: &mut String,
         effects: &mut Vec<Effect>,
     ) {
-        let _ = (item, events, rsp, effects);
-        todo!("WP-C: events.md §3.3")
+        let Some(id) = self.model.find(item) else {
+            let _ = write!(rsp, "[!] Subscribe: Item not found '{item}'\n");
+            return;
+        };
+        for ev in events {
+            let Some(flag) = self.model.events.flag(ev) else {
+                let _ = write!(rsp, "[?] Event: '{ev}' not found\n");
+                continue;
+            };
+            match EventKind::from_name(ev) {
+                Some(EventKind::VolumeChange) if !self.listeners.volume => {
+                    self.listeners.volume = true;
+                    effects.push(Effect::Platform(PlatformRequest::StartVolumeEvents));
+                }
+                Some(EventKind::BrightnessChange) if !self.listeners.brightness => {
+                    self.listeners.brightness = true;
+                    effects.push(Effect::Platform(PlatformRequest::StartBrightnessEvents));
+                }
+                Some(EventKind::MediaChange) if !self.listeners.media => {
+                    self.listeners.media = true;
+                    effects.push(Effect::Platform(PlatformRequest::StartMediaEvents));
+                }
+                Some(EventKind::SpaceWindowsChange) if !self.listeners.space_windows => {
+                    self.listeners.space_windows = true;
+                    effects.push(Effect::Platform(PlatformRequest::StartSpaceWindowEvents));
+                }
+                _ => {}
+            }
+            if let Some(it) = self.model.item_mut(id) {
+                it.update_mask.insert(flag);
+            }
+        }
     }
 
     /// `--trigger` (`events.md` §7): forced OS handlers for the built-ins listed in
@@ -371,27 +1802,258 @@ impl Runtime {
         effects: &mut Vec<Effect>,
         res: &mut dyn Resources,
     ) {
-        let _ = (event, args, effects, res);
-        todo!("WP-C: events.md §7")
+        if !event::is_forced_trigger(event) {
+            let env = event::trigger_env(args);
+            self.trigger_event(EventInfo::new(event, Some(env)), effects);
+            return;
+        }
+        match event {
+            "space_change" => self.handle_space_change(true, effects, res),
+            "display_change" => self.handle_display_change(effects, res),
+            "space_windows_change" => self.forced_space_windows(effects, res),
+            "volume_change" => self.forced_volume(effects, res),
+            "media_change" => self.forced_media(effects),
+            "wifi_change" => self.forced_wifi(effects, res),
+            "power_source_change" => self.forced_power(effects, res),
+            _ => {}
+        }
+    }
+
+    fn forced_wifi(&mut self, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
+        let ssid = match res.query_system(SystemQuery::Wifi) {
+            Some(SystemValue::Text(s)) => s,
+            _ => String::new(),
+        };
+        self.trigger_info("wifi_change", ssid, effects);
+    }
+
+    fn forced_volume(&mut self, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
+        let v = match res.query_system(SystemQuery::Volume) {
+            Some(SystemValue::Level(v)) => v,
+            _ => 0.0,
+        };
+        self.trigger_info("volume_change", event::level_info(v), effects);
+    }
+
+    fn forced_brightness(&mut self, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
+        let v = match res.query_system(SystemQuery::Brightness) {
+            Some(SystemValue::Level(v)) => v,
+            _ => 0.0,
+        };
+        self.trigger_info("brightness_change", event::level_info(v), effects);
+    }
+
+    fn forced_power(&mut self, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
+        if let Some(SystemValue::Power(p)) = res.query_system(SystemQuery::PowerSource) {
+            self.trigger_info("power_source_change", p.as_str().to_string(), effects);
+        }
+    }
+
+    fn forced_front_app(&mut self, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
+        if let Some(SystemValue::Text(name)) = res.query_system(SystemQuery::FrontApp) {
+            self.trigger_info("front_app_switched", name, effects);
+        }
+    }
+
+    fn forced_media(&mut self, effects: &mut Vec<Effect>) {
+        if self.listeners.media {
+            effects.push(Effect::Platform(PlatformRequest::RefreshMedia));
+        }
+    }
+
+    fn forced_space_windows(&mut self, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
+        if !self.listeners.space_windows {
+            return;
+        }
+        if let Some(SystemValue::SpaceWindows(infos)) = res.query_system(SystemQuery::SpaceWindows)
+        {
+            for info in infos {
+                self.trigger_info("space_windows_change", info, effects);
+            }
+        }
     }
 
     /// `--update` = `bar_manager_update(forced=true)` (`events.md` §8.2).
     fn exec_update(&mut self, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
-        let _ = (effects, res);
-        todo!("WP-C: events.md §8.2")
+        if self.sleeps {
+            return;
+        }
+        self.handle_space_change(true, effects, res);
+        self.forced_wifi(effects, res);
+        self.forced_volume(effects, res);
+        self.forced_brightness(effects, res);
+        self.forced_power(effects, res);
+        self.forced_front_app(effects, res);
+        self.forced_media(effects);
+        self.forced_space_windows(effects, res);
+        self.count_event("forced");
+        let mut ran = Vec::new();
+        let mut idx = 0;
+        while idx < self.model.items.len() {
+            let id = self.model.items[idx].id;
+            idx += 1;
+            if self.update_item(id, None, true, None, effects) && self.monitor_events {
+                if let Some(n) = self.model.name_of(id) {
+                    ran.push(n);
+                }
+            }
+        }
+        if self.monitor_events {
+            let line = self.monitor_event("forced", "forced", None, &ran);
+            effects.push(line);
+        }
+        self.force_refresh = true;
+    }
+
+    /// Input::Timer: routine tick and delayed wake.
+    fn on_timer(&mut self, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
+        let now = res.now();
+        if let Some(t) = self.wake_repost {
+            if now >= t {
+                self.wake_repost = None;
+                self.system_woke(effects, res);
+            }
+        }
+        if let Some(t) = self.next_tick {
+            if now >= t {
+                self.routine_tick(effects, res);
+                // Missed fires are skipped, not caught up (CFRunLoopTimer semantics).
+                let mut next = t + CLOCK_PERIOD;
+                while next <= now {
+                    next += CLOCK_PERIOD;
+                }
+                self.next_tick = Some(next);
+            }
+        }
     }
 
     /// 1 s routine clock (`bar_manager_update(false)`, `events.md` §8.1): routine updates,
     /// marquee starts, alias recapture requests (`Alias::tick`).
     fn routine_tick(&mut self, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
-        let _ = (effects, res);
-        todo!("WP-C: events.md §8.1")
+        let _ = res;
+        if self.frozen || self.sleeps {
+            return;
+        }
+        self.count_event("routine");
+        let mut ran = Vec::new();
+        let mut idx = 0;
+        while idx < self.model.items.len() {
+            let id = self.model.items[idx].id;
+            if self.update_item(id, None, false, None, effects) && self.monitor_events {
+                if let Some(n) = self.model.name_of(id) {
+                    ran.push(n);
+                }
+            }
+            let capture_disabled = self.capture_disabled;
+            let item = &mut self.model.items[idx];
+            if item.has_alias() && item.is_shown() && item.alias.tick(false) && !capture_disabled {
+                effects.push(Effect::Platform(PlatformRequest::CaptureAlias {
+                    item: id,
+                    owner: item.alias.owner.clone(),
+                    name: item.alias.name.clone(),
+                    forced: false,
+                }));
+            }
+            idx += 1;
+        }
+        if self.monitor_events && !ran.is_empty() {
+            let line = self.monitor_event("routine", "routine", None, &ran);
+            effects.push(line);
+        }
+        if self.monitor_stats {
+            self.fill_stats();
+            let text = query::stats_json(&self.stats, self.model.items.len());
+            let line = match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(serde_json::Value::Object(mut map)) => {
+                    let mut out = serde_json::Map::new();
+                    out.insert("type".into(), serde_json::Value::String("stats".into()));
+                    out.append(&mut map);
+                    serde_json::Value::Object(out).to_string()
+                }
+                _ => "{\"type\":\"stats\"}".to_string(),
+            };
+            effects.push(Effect::Monitor(line));
+        }
     }
 
     /// OS notifications (`events.md` §2, §5).
     fn handle_os_event(&mut self, ev: OsEvent, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
-        let _ = (ev, effects, res);
-        todo!("WP-C: events.md §5")
+        match ev {
+            OsEvent::FrontAppSwitched { name, .. } => {
+                let mut env = EnvVars::new();
+                if let Some(n) = name {
+                    env.set("INFO", n);
+                }
+                self.trigger_event(EventInfo::new("front_app_switched", Some(env)), effects);
+            }
+            OsEvent::SpaceChanged => self.handle_space_change(false, effects, res),
+            OsEvent::ActiveDisplayChanged => self.handle_display_change(effects, res),
+            OsEvent::MenuBarHiddenChanged => {
+                self.model.bar_needs_resize = true;
+                self.model.bar_needs_update = true;
+            }
+            OsEvent::SystemWillSleep => self.system_will_sleep(effects),
+            OsEvent::SystemWoke => self.system_woke(effects, res),
+            OsEvent::VolumeChanged(v) => {
+                self.trigger_info("volume_change", event::level_info(v), effects)
+            }
+            OsEvent::BrightnessChanged(v) => {
+                self.trigger_info("brightness_change", event::level_info(v), effects)
+            }
+            OsEvent::PowerSourceChanged(p) => {
+                self.trigger_info("power_source_change", p.as_str().to_string(), effects)
+            }
+            OsEvent::WifiChanged(s) => self.trigger_info("wifi_change", s, effects),
+            OsEvent::MediaChanged(info) => self.trigger_info("media_change", info, effects),
+            OsEvent::MediaArtwork(img) => {
+                self.model.current_artwork = img;
+                for it in &mut self.model.items {
+                    if it.background.image.link
+                        || it.icon.background.image.link
+                        || it.label.background.image.link
+                    {
+                        it.needs_update = true;
+                    }
+                }
+            }
+            OsEvent::SpaceWindowsChanged(info) => {
+                self.trigger_info("space_windows_change", info, effects)
+            }
+            OsEvent::DistributedNotification { name, info } => {
+                if let Some(ev) = self.model.events.name_for_notification(&name) {
+                    let ev = ev.to_string();
+                    let mut env = EnvVars::new();
+                    if let Some(i) = info {
+                        env.set("INFO", i);
+                    }
+                    self.trigger_event(EventInfo::new(ev, Some(env)), effects);
+                }
+            }
+            OsEvent::ConfigChanged => {
+                if self.hotload {
+                    let path = None;
+                    self.reload(path, effects, res);
+                }
+            }
+            OsEvent::CaptureDisabled(d) => self.capture_disabled = d,
+        }
+    }
+
+    /// `(dsid, sid, fullscreen)` of the current space of display `display`.
+    fn space_state(res: &dyn Resources, display: u32) -> (u64, u32, bool) {
+        let dsid = res
+            .displays()
+            .iter()
+            .find(|d| d.id == display)
+            .map(|d| d.current_space)
+            .unwrap_or(0);
+        if dsid == 0 {
+            return (0, 0, false);
+        }
+        match res.spaces().iter().position(|s| s.id == dsid) {
+            Some(p) => (dsid, p as u32 + 1, res.spaces()[p].fullscreen),
+            None => (dsid, 0, false),
+        }
     }
 
     /// `bar_manager_handle_space_change(forced)` (`events.md` §5.2, `bar.md` §6.4–6.5):
@@ -402,37 +2064,113 @@ impl Runtime {
         effects: &mut Vec<Effect>,
         res: &mut dyn Resources,
     ) {
-        let _ = (forced, effects, res);
-        todo!("WP-C: events.md §5.2")
+        let show_fs = self.model.bar.show_in_fullscreen;
+        let mut force = false;
+        let mut infos = Vec::with_capacity(self.model.bars.len());
+        for i in 0..self.model.bars.len() {
+            let (dsid, sid, fullscreen) = Self::space_state(res, self.model.bars[i].display);
+            let bar = &mut self.model.bars[i];
+            bar.sid = sid;
+            let was_shown = bar.shown;
+            bar.shown = !fullscreen || show_fs;
+            if !was_shown && bar.shown {
+                self.model.needs_ordering = true;
+            }
+            force |= was_shown != bar.shown;
+            bar.dsid = dsid;
+            infos.push(BarSpace {
+                adid: bar.adid,
+                sid: bar.sid,
+            });
+        }
+        let info = event::space_change_info(&infos);
+        self.update_space_components(forced, res);
+        self.trigger_info("space_change", info, effects);
+        if force {
+            self.force_refresh = true;
+        }
+    }
+
+    /// `bar_manager_update_space_components(forced)` (`events.md` §5.2.1).
+    fn update_space_components(&mut self, forced: bool, res: &dyn Resources) {
+        for idx in 0..self.model.items.len() {
+            if self.model.items[idx].item_type != ItemType::Space {
+                continue;
+            }
+            if !self.model.items[idx].overrides_association {
+                let sp = self.model.items[idx].associated_space;
+                let space = if sp == 0 { u32::MAX } else { sp.trailing_zeros() };
+                let adid = if space == u32::MAX || space == 0 {
+                    None
+                } else {
+                    res.spaces().get(space as usize - 1).map(|s| s.display)
+                };
+                self.model.items[idx].associated_display = match adid {
+                    Some(a) => bit32(a),
+                    None => 1 << 30,
+                };
+            }
+            for b in 0..self.model.bars.len() {
+                let (adid, sid) = (self.model.bars[b].adid, self.model.bars[b].sid);
+                let item = &mut self.model.items[idx];
+                if bit32(adid) & item.associated_display == 0 || sid == 0 {
+                    continue;
+                }
+                let in_space = item.associated_space & bit32(sid) != 0;
+                if (!item.selected || forced) && in_space {
+                    item.selected = true;
+                    item.updates = true;
+                    item.env.set("SELECTED", "true");
+                } else if (item.selected || forced) && !in_space {
+                    item.selected = false;
+                    item.updates = true;
+                    item.env.set("SELECTED", "false");
+                } else {
+                    item.updates = false;
+                }
+            }
+        }
     }
 
     /// `bar_manager_handle_display_change` (`events.md` §5.3).
     fn handle_display_change(&mut self, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
-        let _ = (effects, res);
-        todo!("WP-C: events.md §5.3")
+        let adid = res.active_display();
+        self.model.active_adid = adid;
+        self.trigger_info("display_change", event::display_change_info(adid), effects);
     }
 
     /// `bar_manager_poll_active_display` before every input.
     fn poll_active_display(&mut self, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
-        let _ = (effects, res);
-        todo!("WP-C: events.md §1.1")
+        if self.model.bars.is_empty() && self.started.is_none() {
+            return;
+        }
+        if res.active_display() != self.model.active_adid {
+            self.handle_display_change(effects, res);
+        }
     }
 
     /// `bar_manager_display_changed` (`events.md` §9.3): full reset of bars, forced refresh,
     /// `display_change`, forced `space_change`.
     fn displays_changed(&mut self, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
-        let _ = (effects, res);
-        todo!("WP-C: events.md §9.3")
+        self.model.active_adid = res.active_display();
+        self.reset_bars(res);
+        self.force_refresh = true;
+        self.handle_display_change(effects, res);
+        self.handle_space_change(true, effects, res);
     }
 
     /// Sleep / wake (`events.md` §9.1–9.2) incl. the +500 ms `system_woke` re-post.
     fn system_will_sleep(&mut self, effects: &mut Vec<Effect>) {
-        let _ = effects;
-        todo!("WP-C: events.md §9.1")
+        self.trigger_event(EventInfo::new("system_will_sleep", None), effects);
+        self.sleeps = true;
     }
     fn system_woke(&mut self, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
-        let _ = (effects, res);
-        todo!("WP-C: events.md §9.2")
+        if self.sleeps {
+            self.sleeps = false;
+            self.wake_repost = Some(res.now() + WAKE_REPOST_DELAY);
+        }
+        self.displays_changed(effects, res);
+        self.trigger_event(EventInfo::new("system_woke", None), effects);
     }
 
     // ------------------------------------------------------------------------------
@@ -443,15 +2181,94 @@ impl Runtime {
     // ------------------------------------------------------------------------------
 
     fn handle_mouse(&mut self, m: MouseInput, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
-        let _ = (m, effects, res);
-        todo!("WP-C: events.md §6")
+        match m.kind {
+            MouseKind::Up { .. } => self.on_click(&m, effects),
+            MouseKind::Dragged => self.on_drag(&m),
+            MouseKind::Moved => self.sync_hover(m.point, effects),
+            MouseKind::Entered | MouseKind::Exited => self.on_enter_exit(&m, effects),
+            MouseKind::Scrolled { delta } => self.on_scroll(&m, delta, effects, res),
+        }
     }
+
+    /// The emulated window under `p`.
+    fn hit(&self, p: Point) -> WindowHit {
+        match &self.layout {
+            Some(l) => layout::window_at(&self.model, l, p),
+            None => WindowHit::None,
+        }
+    }
+
+    /// `get_item_by_wid` with the point fallback for brackets / no item window.
+    fn click_target(&self, p: Point) -> (WindowHit, Option<ItemId>) {
+        let hit = self.hit(p);
+        let mut item = match hit {
+            WindowHit::Item(id) => Some(id),
+            _ => None,
+        };
+        if item.is_none_or(|id| self.model.item(id).is_none_or(|i| i.is_bracket())) {
+            item = layout::item_at_point(&self.model, p);
+        }
+        (hit, item)
+    }
+
+    /// First display (adid) on which the item's virtual window contains `p`.
+    fn adid_of(item: &BarItem, p: Point) -> Option<u32> {
+        item.frames
+            .iter()
+            .position(|f| f.is_some_and(|r| r.contains(p)))
+            .map(|i| i as u32 + 1)
+    }
+
     /// `event_mouse_up` → `bar_item_on_click` (§6.2) incl. slider finalisation (D2) and
     /// app_menu `PlatformRequest::OpenMenu`.
     fn on_click(&mut self, m: &MouseInput, effects: &mut Vec<Effect>) {
-        let _ = (m, effects);
-        todo!("WP-C: events.md §6.2")
+        let MouseKind::Up {
+            button,
+            button_code,
+        } = m.kind
+        else {
+            return;
+        };
+        let (_, item) = self.click_target(m.point);
+        let Some(id) = item else { return };
+        let mut env = event::click_env(button, button_code, m.modifiers);
+        let active = self.model.active_adid;
+        let Some(it) = self.model.item_mut(id) else {
+            return;
+        };
+        let adid = Self::adid_of(it, m.point).unwrap_or(active);
+        let local = layout::item_local_point(it, adid, m.point);
+        if it.has_slider() {
+            let inside = local.is_some_and(|l| layout::slider_track_contains(it, l));
+            if it.slider.is_dragged || inside {
+                if let Some(l) = local {
+                    if it.slider.handle_drag(l) {
+                        it.needs_update = true;
+                    }
+                }
+                it.slider.is_dragged = false;
+                let pct = it.slider.percentage.to_string();
+                it.env.set("PERCENTAGE", pct);
+            } else {
+                return;
+            }
+        }
+        if it.item_type == ItemType::AppMenu {
+            if let Some(index) = local.and_then(|l| layout::app_menu_title_at(it, l)) {
+                effects.push(Effect::Platform(PlatformRequest::OpenMenu { index }));
+            }
+        }
+        let subscribed = it.update_mask.has(EventKind::MouseClicked);
+        let persistent = it.env.clone();
+        let click_env = script::build_click_script_env(&env, &persistent);
+        self.run_click_script(id, click_env, effects);
+        if subscribed {
+            self.deliver(id, "mouse.clicked", true, Some(&env), effects);
+        } else {
+            env.clear();
+        }
     }
+
     /// `event_mouse_scrolled` (§6.3).
     fn on_scroll(
         &mut self,
@@ -460,19 +2277,221 @@ impl Runtime {
         effects: &mut Vec<Effect>,
         res: &mut dyn Resources,
     ) {
-        let _ = (m, delta, effects, res);
-        todo!("WP-C: events.md §6.3")
+        let Some(total) = self.scroll.feed(delta, res.now()) else {
+            return;
+        };
+        let (hit, item) = self.click_target(m.point);
+        let Some(id) = item else {
+            match hit {
+                WindowHit::Bar(adid) => {
+                    let over = self.model.bar(adid).is_some_and(|b| b.mouse_over);
+                    if over && !self.any_popup_mouse_over() {
+                        let env = event::scroll_global_env(total, adid, m.modifiers);
+                        self.trigger_event(EventInfo::new("mouse.scrolled.global", Some(env)), effects);
+                    }
+                }
+                WindowHit::Popup(host) => {
+                    let (over, adid) = self
+                        .model
+                        .item(host)
+                        .map(|h| (h.popup.mouse_over, h.popup.adid))
+                        .unwrap_or((false, 0));
+                    if over && !self.any_bar_mouse_over() {
+                        let env = event::scroll_global_env(total, adid, m.modifiers);
+                        self.trigger_event(EventInfo::new("mouse.scrolled.global", Some(env)), effects);
+                    }
+                }
+                _ => {}
+            }
+            self.scroll.reset();
+            return;
+        };
+        if self
+            .model
+            .item(id)
+            .is_some_and(|i| i.update_mask.has(EventKind::MouseScrolled))
+        {
+            let env = event::scroll_env(total, m.modifiers);
+            self.deliver(id, "mouse.scrolled", true, Some(&env), effects);
+        }
+        self.scroll.reset();
     }
+
+    fn any_popup_mouse_over(&self) -> bool {
+        self.model
+            .items
+            .iter()
+            .any(|i| i.popup.drawing && i.popup.mouse_over)
+    }
+
+    fn any_bar_mouse_over(&self) -> bool {
+        self.model.bars.iter().any(|b| b.mouse_over)
+    }
+
+    /// Frame of bar window `adid` (layout result, else the stored bar frame).
+    fn bar_window_frame(&self, adid: u32) -> Option<Rect> {
+        self.layout
+            .as_ref()
+            .and_then(|l| l.bars.iter().find(|b| b.adid == adid).map(|b| b.frame))
+            .or_else(|| self.model.bar(adid).map(|b| b.frame))
+    }
+
+    /// `bar_item_mouse_entered`.
+    fn mouse_entered(&mut self, id: ItemId, effects: &mut Vec<Effect>) {
+        let Some(it) = self.model.item(id) else { return };
+        if it.update_mask.has(EventKind::MouseEntered) && !it.mouse_over {
+            self.deliver(id, "mouse.entered", true, None, effects);
+        }
+        if let Some(it) = self.model.item_mut(id) {
+            it.mouse_over = true;
+        }
+    }
+
+    /// `bar_item_mouse_exited` (no `mouse_over` precondition).
+    fn mouse_exited(&mut self, id: ItemId, effects: &mut Vec<Effect>) {
+        let Some(it) = self.model.item(id) else { return };
+        if it.update_mask.has(EventKind::MouseExited) {
+            self.deliver(id, "mouse.exited", true, None, effects);
+        }
+        if let Some(it) = self.model.item_mut(id) {
+            it.mouse_over = false;
+        }
+    }
+
+    /// Synthesized item enter/exit: items with a tracking area (subscribed to
+    /// `mouse.entered` or `mouse.exited`) get entered when the pointer moves into one of
+    /// their virtual windows and exited when it leaves (`events.md` §6.4/§6.5).
+    fn sync_hover(&mut self, p: Point, effects: &mut Vec<Effect>) {
+        let track = EventKind::MouseEntered.bit() | EventKind::MouseExited.bit();
+        let mut idx = 0;
+        while idx < self.model.items.len() {
+            let it = &self.model.items[idx];
+            idx += 1;
+            if it.update_mask.0 & track == 0 {
+                continue;
+            }
+            let id = it.id;
+            let inside = it.drawing && it.contains_point(p);
+            if inside && !it.mouse_over {
+                self.mouse_entered(id, effects);
+            } else if !inside && it.mouse_over {
+                // Moving from an item into its own popup keeps the hover.
+                let into_popup = it.update_mask.has(EventKind::MouseExitedGlobal)
+                    && layout::popup_at_point(&self.model, p) == Some(id);
+                if !into_popup {
+                    self.mouse_exited(id, effects);
+                }
+            }
+        }
+    }
+
     /// `event_mouse_entered` / `event_mouse_exited` (§6.4/§6.5) for bar/popup windows, and
     /// synthesized item enter/exit from pointer motion (`MouseKind::Moved`).
     fn on_enter_exit(&mut self, m: &MouseInput, effects: &mut Vec<Effect>) {
-        let _ = (m, effects);
-        todo!("WP-C: events.md §6.4–6.5")
+        let p = m.point;
+        match (m.kind, m.window) {
+            (MouseKind::Entered, Some(WindowKey::Bar(adid))) => {
+                let over_popup = self.any_popup_mouse_over();
+                if let Some(bar) = self.model.bars.iter_mut().find(|b| b.adid == adid) {
+                    if !bar.mouse_over && !over_popup {
+                        bar.mouse_over = true;
+                        self.trigger_event(EventInfo::new("mouse.entered.global", None), effects);
+                    }
+                }
+            }
+            (MouseKind::Entered, Some(WindowKey::Popup(host))) => {
+                let over_bar = self.any_bar_mouse_over();
+                if let Some(h) = self.model.item_mut(host) {
+                    if !h.popup.mouse_over && !over_bar {
+                        h.popup.mouse_over = true;
+                        self.trigger_event(EventInfo::new("mouse.entered.global", None), effects);
+                    }
+                }
+            }
+            (MouseKind::Exited, Some(WindowKey::Bar(adid))) => {
+                let origin = self.bar_window_frame(adid).unwrap_or(Rect::ZERO);
+                let target = layout::popup_at_point(&self.model, p);
+                let over_origin = contains_half_open(&origin.inset(1.0, 1.0), p);
+                if !over_origin && target.is_none() {
+                    if let Some(b) = self.model.bars.iter_mut().find(|b| b.adid == adid) {
+                        b.mouse_over = false;
+                    }
+                    self.exit_global(effects);
+                } else if !over_origin {
+                    if let Some(b) = self.model.bars.iter_mut().find(|b| b.adid == adid) {
+                        b.mouse_over = false;
+                    }
+                    if let Some(h) = target.and_then(|t| self.model.item_mut(t)) {
+                        h.popup.mouse_over = true;
+                    }
+                }
+            }
+            (MouseKind::Exited, Some(WindowKey::Popup(host))) => {
+                let origin = self
+                    .model
+                    .item(host)
+                    .and_then(|h| h.popup.frame)
+                    .unwrap_or(Rect::ZERO);
+                let target = layout::bar_at_point(&self.model, p);
+                let over_origin = contains_half_open(&origin.inset(1.0, 1.0), p);
+                if !over_origin && target.is_none() {
+                    if let Some(h) = self.model.item_mut(host) {
+                        h.popup.mouse_over = false;
+                    }
+                    self.exit_global(effects);
+                } else if !over_origin {
+                    if let Some(b) = target.and_then(|a| self.model.bars.iter_mut().find(|b| b.adid == a)) {
+                        b.mouse_over = true;
+                    }
+                    let mask = match self.model.item_mut(host) {
+                        Some(h) => {
+                            h.popup.mouse_over = false;
+                            h.update_mask
+                        }
+                        None => Default::default(),
+                    };
+                    if (mask.has(EventKind::MouseExited) || mask.has(EventKind::MouseExitedGlobal))
+                        && layout::item_at_point(&self.model, p) != Some(host)
+                    {
+                        self.mouse_exited(host, effects);
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.sync_hover(p, effects);
     }
+
+    /// Leaving the union of bars and popups: `mouse.exited.global`, then `mouse.exited` to
+    /// every subscribed item (Quirk Q6).
+    fn exit_global(&mut self, effects: &mut Vec<Effect>) {
+        self.trigger_event(EventInfo::new("mouse.exited.global", None), effects);
+        let mut idx = 0;
+        while idx < self.model.items.len() {
+            let id = self.model.items[idx].id;
+            idx += 1;
+            self.mouse_exited(id, effects);
+        }
+    }
+
     /// `event_mouse_dragged` (§6.6).
     fn on_drag(&mut self, m: &MouseInput) {
-        let _ = m;
-        todo!("WP-C: events.md §6.6")
+        let Some(id) = self.item_under(m.point) else {
+            return;
+        };
+        let active = self.model.active_adid;
+        let Some(it) = self.model.item_mut(id) else {
+            return;
+        };
+        if !it.has_slider() {
+            return;
+        }
+        let adid = Self::adid_of(it, m.point).unwrap_or(active);
+        if let Some(local) = layout::item_local_point(it, adid, m.point) {
+            if it.slider.handle_drag(local) {
+                it.needs_update = true;
+            }
+        }
     }
 
     // ------------------------------------------------------------------------------
@@ -483,34 +2502,276 @@ impl Runtime {
     /// `bar_manager_begin` / `bar_manager_reset` (`bar.md` §6.6): one `BarState` per selected
     /// display (`displays` pattern, main mode), `any_bar_hidden` applied in pattern mode.
     fn begin_bars(&mut self, res: &mut dyn Resources) {
-        let _ = res;
-        todo!("WP-C: bar.md §6.6")
+        self.model.bars.clear();
+        let pattern = self.model.bar.displays;
+        let hidden = self.model.bar.any_bar_hidden;
+        let mut bars = Vec::new();
+        if pattern == DISPLAY_MAIN {
+            if let Some(d) = res.displays().first() {
+                bars.push(BarState::new(d.id, d.adid));
+            }
+        } else {
+            for d in res.displays() {
+                if d.adid >= 1 && pattern & bit32(d.adid - 1) != 0 {
+                    let mut b = BarState::new(d.id, d.adid);
+                    b.hidden = hidden;
+                    bars.push(b);
+                }
+            }
+        }
+        for b in &mut bars {
+            let (dsid, sid, fullscreen) = Self::space_state(res, b.display);
+            b.dsid = dsid;
+            b.sid = sid;
+            // `bar_create` ignores `show_in_fullscreen` (quirk).
+            b.shown = !fullscreen;
+        }
+        self.model.bars = bars;
+        self.model.active_adid = res.active_display();
+        self.model.needs_ordering = true;
+        self.model.bar_needs_update = true;
+        self.model.bar_needs_resize = true;
+    }
+
+    /// `bar_manager_reset`: drop every bar association and recreate the bars.
+    fn reset_bars(&mut self, res: &mut dyn Resources) {
+        for it in &mut self.model.items {
+            it.associated_bar = 0;
+        }
+        self.begin_bars(res);
+    }
+
+    /// `bar_manager_resize`: recompute every bar window frame.
+    fn resize_bars(&mut self, res: &mut dyn Resources) {
+        let visible = res.menu_bar_visible();
+        for i in 0..self.model.bars.len() {
+            let did = self.model.bars[i].display;
+            if let Some(d) = res.displays().iter().find(|d| d.id == did) {
+                let f = layout::bar_frame(&self.model.bar, d, visible);
+                self.model.bars[i].frame = f;
+            }
+        }
+        self.model.bar_needs_resize = false;
+        self.needs_layout = true;
+        self.needs_render = true;
     }
 
     /// `bar_manager_set_hidden` (`bar.md` §2.3) incl. closing all popups when hiding.
+    /// `adid = Some(n)` addresses `bars[n-1]` (quirk); `None` = all bars.
     fn set_hidden(&mut self, adid: Option<u32>, hidden: bool) {
-        let _ = (adid, hidden);
-        todo!("WP-C: bar.md §2.3")
+        match adid {
+            Some(a) => {
+                if let Some(b) = self.model.bars.get_mut(a as usize - 1) {
+                    b.hidden = hidden;
+                }
+            }
+            None => {
+                for b in &mut self.model.bars {
+                    b.hidden = hidden;
+                }
+                self.model.bar.any_bar_hidden = hidden;
+            }
+        }
+        if hidden {
+            for it in &mut self.model.items {
+                it.popup.set_drawing(false);
+            }
+        }
+        self.model.bar_needs_update = true;
     }
 
     /// `bar_manager_bar_needs_redraw` (`bar.md` §5.2) for one bar.
     fn bar_needs_redraw(&self, adid: u32) -> bool {
-        let _ = adid;
-        todo!("WP-C: bar.md §5.2")
+        let m = &self.model;
+        if m.bar_needs_update {
+            return true;
+        }
+        let Some(bar) = m.bar(adid) else {
+            return false;
+        };
+        let mask = bit32(adid) as u64;
+        let sid_bit = bit32(bar.sid);
+        for item in &m.items {
+            let draws = m.draws_item(bar, item);
+            if item.needs_update && draws {
+                return true;
+            }
+            if !item.drawing && item.associated_bar != 0 {
+                return true;
+            }
+            if item.ignore_association {
+                continue;
+            }
+            let drawn_here = ((item.associated_bar as u64) << 1) & mask != 0;
+            let in_display = (item.associated_display as u64) & mask != 0;
+            if draws && in_display && !drawn_here {
+                return true;
+            }
+            if draws && item.associated_to_active_display && m.active_adid == adid && !drawn_here
+            {
+                return true;
+            }
+            if !item.associated_to_active_display
+                && item.associated_display > 0
+                && !in_display
+                && drawn_here
+            {
+                return true;
+            }
+            if item.drawing
+                && item.associated_to_active_display
+                && drawn_here
+                && adid != m.active_adid
+            {
+                return true;
+            }
+            if item.item_type == ItemType::Space {
+                continue;
+            }
+            if item.associated_space > 0 && item.associated_space & sid_bit == 0 && drawn_here {
+                return true;
+            }
+            if draws
+                && item.associated_space > 0
+                && item.associated_space & sid_bit != 0
+                && !drawn_here
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Window properties of bar windows.
+    fn bar_props(&self) -> WinProps {
+        let b = &self.model.bar;
+        WinProps {
+            level: b.window_level,
+            blur: b.blur_radius,
+            shadow: b.shadow,
+            sticky: b.sticky,
+            font_smoothing: b.font_smoothing,
+        }
+    }
+
+    /// `bar_manager_refresh(forced)` (`bar.md` §5.2): the redraw decision. Marks the windows
+    /// to re-render, updates `associated_bar` bits of redrawn bars and clears the dirty
+    /// flags. No-op while frozen.
+    fn refresh(&mut self, forced: bool, res: &mut dyn Resources) {
+        if self.frozen {
+            return;
+        }
+        let forced = forced | std::mem::take(&mut self.force_refresh);
+        if forced {
+            for it in &mut self.model.items {
+                it.associated_bar = 0;
+                it.needs_update = true;
+            }
+        }
+        if forced || self.model.bar_needs_resize {
+            self.resize_bars(res);
+        }
+        let props = self.bar_props();
+        let props_changed = self.emitted_bars.values().any(|e| e.props != props);
+        for i in 0..self.model.bars.len() {
+            let (adid, sid) = (self.model.bars[i].adid, self.model.bars[i].sid);
+            if !(forced || props_changed || self.bar_needs_redraw(adid)) {
+                continue;
+            }
+            if sid < 1 || adid < 1 {
+                continue;
+            }
+            self.dirty.insert(WindowKey::Bar(adid));
+            let bit = bit32(adid - 1);
+            for idx in 0..self.model.items.len() {
+                let draws = self.model.draws_item(&self.model.bars[i], &self.model.items[idx]);
+                let it = &mut self.model.items[idx];
+                if draws {
+                    it.associated_bar |= bit;
+                } else {
+                    it.associated_bar &= !bit;
+                }
+            }
+        }
+        // Popups: re-render when the host or a member changed, or the blur changed.
+        for host in &self.model.items {
+            if !host.popup.drawing || host.popup.items.is_empty() {
+                continue;
+            }
+            let blur_changed = self
+                .emitted_popups
+                .get(&host.id)
+                .is_some_and(|e| e.blur != host.popup.blur_radius);
+            let dirty = forced
+                || blur_changed
+                || host.needs_update
+                || host
+                    .popup
+                    .items
+                    .iter()
+                    .any(|m| self.model.item(*m).is_some_and(|i| i.needs_update));
+            if dirty {
+                self.dirty.insert(WindowKey::Popup(host.id));
+            }
+        }
+        if !self.dirty.is_empty() {
+            self.needs_layout = true;
+            self.needs_render = true;
+        }
+        for it in &mut self.model.items {
+            it.needs_update = false;
+        }
+        self.model.needs_ordering = false;
+        self.model.bar_needs_update = false;
+    }
+
+    /// One layout pass over everything (`layout::layout`), timed for `--query stats`.
+    fn run_layout(&mut self, res: &mut dyn Resources) {
+        let t = Instant::now();
+        let l = layout::layout(&mut self.model, res);
+        self.layout_times.push(t.elapsed().as_micros() as u64);
+        self.layout = Some(l);
+        self.needs_layout = false;
+        self.needs_render = true;
     }
 
     /// Applies animator steps: resolves `AnimTarget` (Bar → `BarProps::anim_set`, Default →
     /// default item, Item → `BarItem::anim_set`), marks owners dirty (`events.md` §10.7),
     /// merges `PropEffects`.
     fn apply_anim_steps(&mut self, steps: Vec<AnimStep>) {
-        let _ = steps;
-        todo!("WP-C: events.md §10.7")
+        for s in steps {
+            let mut fx = PropEffects::default();
+            let changed = match s.target {
+                AnimTarget::Bar => self.model.bar.anim_set(&s.path, s.value, &mut fx),
+                AnimTarget::Default => self.model.default_item.anim_set(&s.path, s.value, &mut fx),
+                AnimTarget::Item(id) => match self.model.item_mut(id) {
+                    Some(it) => it.anim_set(&s.path, s.value, &mut fx),
+                    None => false,
+                },
+            };
+            self.model.bar_needs_update |= fx.bar_needs_update;
+            self.model.bar_needs_resize |= fx.bar_needs_resize;
+            self.model.might_need_clipping |= fx.might_need_clipping;
+            if changed {
+                self.mark_dirty(s.target);
+            }
+        }
     }
 
     /// Marks the windows showing `id` dirty (or everything for `AnimTarget::Bar`/`Default`).
     fn mark_dirty(&mut self, target: AnimTarget) {
-        let _ = target;
-        todo!("WP-C")
+        match target {
+            AnimTarget::Bar | AnimTarget::Default => self.model.bar_needs_update = true,
+            AnimTarget::Item(id) => {
+                if let Some(it) = self.model.item_mut(id) {
+                    it.needs_update = true;
+                    let parent = it.parent.filter(|_| it.position == Position::Popup);
+                    if let Some(p) = parent {
+                        self.dirty.insert(WindowKey::Popup(p));
+                    }
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------------------
@@ -520,8 +2781,23 @@ impl Runtime {
 
     /// (Re)configures the platform provider of an item after `PropRequest::ProviderChanged`.
     fn configure_provider(&mut self, id: ItemId, effects: &mut Vec<Effect>) {
-        let _ = (id, effects);
-        todo!("WP-C: EXTENSIONS.md providers")
+        let Some(item) = self.model.item(id) else {
+            return;
+        };
+        let cfg = &item.provider;
+        let req = match cfg.kind {
+            None => PlatformRequest::StopProvider { item: id },
+            Some(k) => PlatformRequest::StartProvider {
+                item: id,
+                provider: k.name().to_string(),
+                freq: cfg.freq.or(Some(k.default_freq())),
+                args: cfg
+                    .args
+                    .clone()
+                    .or_else(|| k.default_args().map(str::to_string)),
+            },
+        };
+        effects.push(Effect::Platform(req));
     }
 
     /// `Input::ProviderSample`: label/icon update (as `--set`) + script run with
@@ -533,40 +2809,117 @@ impl Runtime {
         effects: &mut Vec<Effect>,
         res: &mut dyn Resources,
     ) {
-        let _ = (id, values, effects, res);
-        todo!("WP-C: EXTENSIONS.md providers")
+        let Some(item) = self.model.item(id) else {
+            return;
+        };
+        if item.provider.kind.is_none() {
+            return;
+        }
+        let out = provider::apply_sample(&item.provider, &values);
+        self.anim = None;
+        for (key, v) in [("label", out.label), ("icon", out.icon)] {
+            let Some(v) = v else { continue };
+            let (r, _, fx, reqs) = self.set_prop_on(AnimTarget::Item(id), key, &v, res);
+            self.merge_fx(fx, effects);
+            let _ = reqs;
+            if matches!(r, Ok(true)) {
+                if let Some(it) = self.model.item_mut(id) {
+                    it.needs_update = true;
+                }
+            }
+        }
+        self.count_event("provider");
+        let mut env = EnvVars::new();
+        env.set("INFO", out.info);
+        self.update_item(id, Some(Sender::Provider), false, Some(&env), effects);
     }
 
     /// `Input::AliasImage` (`components.md` §9.6): `Alias::apply_capture`, redraw on change.
     fn alias_image(
         &mut self,
         id: ItemId,
-        image: Option<crate::platform::ImageInfo>,
+        image: Option<ImageInfo>,
         window_id: u32,
-        frame: crate::geometry::Rect,
+        frame: Rect,
         disabled: bool,
     ) {
-        let _ = (id, image, window_id, frame, disabled);
-        todo!("WP-C: components.md §9.6")
+        let Some(it) = self.model.item_mut(id) else {
+            return;
+        };
+        if !it.has_alias() {
+            return;
+        }
+        if it.alias.apply_capture(image, window_id, frame, disabled, false) {
+            it.needs_update = true;
+        }
     }
 
     /// `Input::MenuTitles`: update every `app_menu` item, fire `menus_change` (INFO = JSON
     /// array of titles).
     fn menu_titles(&mut self, app: String, titles: Vec<String>, effects: &mut Vec<Effect>) {
-        let _ = (app, titles, effects);
-        todo!("WP-C: EXTENSIONS.md app_menu")
+        let changed = self.menu_app != app || self.menu_titles != titles;
+        if !changed {
+            return;
+        }
+        for it in &mut self.model.items {
+            if it.item_type == ItemType::AppMenu {
+                it.app_menu.app_name = app.clone();
+                it.app_menu.titles = titles.clone();
+                it.app_menu.hovered = None;
+                it.needs_update = true;
+            }
+        }
+        let info = serde_json::to_string(&titles).unwrap_or_else(|_| "[]".to_string());
+        self.menu_app = app;
+        self.menu_titles = titles;
+        self.trigger_info("menus_change", info, effects);
     }
 
     /// `Input::Lua` (commands with callbacks, in-process subscriptions).
     fn handle_lua(&mut self, req: LuaRequest, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
-        let _ = (req, effects, res);
-        todo!("WP-C: mbar-lua contract")
+        match req {
+            LuaRequest::Command { args, callback } => {
+                let rsp = self.run_message(&args, effects, res).unwrap_or_default();
+                if let Some(handler) = callback {
+                    self.stats.lua_callbacks += 1;
+                    effects.push(Effect::LuaCallback {
+                        handler,
+                        env: vec![("RESPONSE".to_string(), rsp)],
+                    });
+                }
+            }
+            LuaRequest::Subscribe {
+                item,
+                events,
+                handler,
+            } => {
+                let mut rsp = String::new();
+                match self.model.find(&item).and_then(|id| self.model.item_mut(id)) {
+                    Some(it) => {
+                        it.lua_handler = Some(handler);
+                        let evs: Vec<String> = events
+                            .into_iter()
+                            .filter(|e| !matches!(e.as_str(), "routine" | "forced" | "*"))
+                            .collect();
+                        self.exec_subscribe(&item, &evs, &mut rsp, effects);
+                    }
+                    None => {
+                        let _ = write!(rsp, "[!] Subscribe: Item not found '{item}'\n");
+                    }
+                }
+                if !rsp.is_empty() {
+                    effects.push(Effect::Log(rsp));
+                }
+            }
+        }
     }
 
-    /// Hover tracking helper for synthesized item enter/exit.
+    /// Hover tracking helper: the item whose (emulated) window is topmost under `p`.
     fn item_under(&self, p: Point) -> Option<ItemId> {
-        let _ = p;
-        todo!("WP-C")
+        match self.hit(p) {
+            WindowHit::Item(id) => Some(id),
+            _ => None,
+        }
     }
 
     /// Whether an item type participates in alias recapture.
@@ -574,5 +2927,55 @@ impl Runtime {
         self.model
             .item(id)
             .is_some_and(|i| i.item_type == ItemType::Alias)
+    }
+
+    /// Fills the derived fields of `stats` (`--query stats`, `--monitor stats`).
+    fn fill_stats(&mut self) {
+        if let (Some(s), Some(n)) = (self.started, self.last_now) {
+            self.stats.uptime_s = n.saturating_duration_since(s).as_secs_f64();
+        }
+        self.stats.windows = (self.emitted_bars.len() + self.emitted_popups.len()) as u32;
+        self.stats.frame_time_us = self.frame_times.summary();
+        self.stats.layout_time_us = self.layout_times.summary();
+        self.stats.redraws_by_window = self
+            .redraws
+            .iter()
+            .map(|(k, v)| {
+                let name = match k {
+                    WindowKey::Bar(a) => format!("bar:{a}"),
+                    WindowKey::Popup(h) => {
+                        let adid = self.model.item(*h).map(|i| i.popup.adid).unwrap_or(0);
+                        format!(
+                            "popup:{}:{adid}",
+                            name_or_null(self.model.name_of(*h).as_deref())
+                        )
+                    }
+                };
+                (name, *v)
+            })
+            .collect();
+        self.stats.scripts_running = self
+            .stats
+            .scripts_spawned
+            .saturating_sub(self.scripts_finished)
+            .min(u32::MAX as u64) as u32;
+        self.stats.script_avg_ms = if self.script_finished_timed > 0 {
+            self.script_total_ms / self.script_finished_timed as f64
+        } else {
+            0.0
+        };
+        self.stats.script_max_ms = self.scripts.values().map(|s| s.max_ms).fold(0.0, f64::max);
+        self.stats.scripts_by_item = self
+            .scripts
+            .iter()
+            .map(|(k, s)| {
+                let avg = if s.finished > 0 {
+                    s.total_ms / s.finished as f64
+                } else {
+                    0.0
+                };
+                (k.clone(), (s.runs, avg, s.max_ms))
+            })
+            .collect();
     }
 }
