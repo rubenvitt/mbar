@@ -141,6 +141,27 @@ pub struct BarViewIvars {
 
 define_class!(
     // SAFETY:
+    // - NSPanel has no special subclassing requirements; we only override one method.
+    // - `BarPanel` does not implement `Drop`.
+    #[unsafe(super(NSPanel, NSWindow, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "MbarBarPanel"]
+    struct BarPanel;
+
+    impl BarPanel {
+        /// AppKit moves windows out of the menu bar strip, even while the menu bar is
+        /// auto-hidden, which would push a top bar below it (on a notched display
+        /// `y_offset`/`--bar` changes then have no effect). SketchyBar's SkyLight windows are
+        /// never constrained, so the frame is kept exactly as given.
+        #[unsafe(method(constrainFrameRect:toScreen:))]
+        fn constrain_frame_rect(&self, frame: NSRect, _screen: Option<&NSScreen>) -> NSRect {
+            frame
+        }
+    }
+);
+
+define_class!(
+    // SAFETY:
     // - NSView has no special subclassing requirements; we only override event methods.
     // - `BarView` does not implement `Drop`.
     #[unsafe(super(NSView, NSResponder, NSObject))]
@@ -348,13 +369,18 @@ impl BarWindow {
     pub fn new(mtm: MainThreadMarker, renderer: &Renderer, frame: Rect) -> Self {
         let (x, y, w, h) = util::top_left_to_appkit(frame, primary_screen_height(mtm));
         let rect = NSRect::new(NSPoint::new(x, y), NSSize::new(w.max(1.0), h.max(1.0)));
-        let window = NSPanel::initWithContentRect_styleMask_backing_defer(
-            NSPanel::alloc(mtm),
-            rect,
-            NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
-            NSBackingStoreType::Buffered,
-            false,
-        );
+        // SAFETY: `BarPanel` is an `NSPanel` subclass without ivars, so NSPanel's
+        // designated initializer fully initializes it.
+        let window: Retained<BarPanel> = unsafe {
+            msg_send![
+                BarPanel::alloc(mtm),
+                initWithContentRect: rect,
+                styleMask: NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
+                backing: NSBackingStoreType::Buffered,
+                defer: false,
+            ]
+        };
+        let window = Retained::into_super(window);
         // SAFETY: we own the window through `Retained`; AppKit must not release it again
         // when it is closed.
         unsafe { window.setReleasedWhenClosed(false) };
