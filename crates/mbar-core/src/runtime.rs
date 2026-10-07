@@ -1375,7 +1375,7 @@ impl Runtime {
         if self
             .model
             .item(host)
-            .is_none_or(|h| h.popup.items.contains(&item))
+            .map_or(true, |h| h.popup.items.contains(&item))
         {
             return;
         }
@@ -2205,7 +2205,7 @@ impl Runtime {
             WindowHit::Item(id) => Some(id),
             _ => None,
         };
-        if item.is_none_or(|id| self.model.item(id).is_none_or(|i| i.is_bracket())) {
+        if item.map_or(true, |id| self.model.item(id).map_or(true, |i| i.is_bracket())) {
             item = layout::item_at_point(&self.model, p);
         }
         (hit, item)
