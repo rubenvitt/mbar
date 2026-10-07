@@ -503,6 +503,13 @@ impl Runtime {
         d
     }
 
+    /// Tells the runtime which `--monitor` streams still have subscribers, so it stops
+    /// building event lines / stats snapshots nobody reads (extension).
+    pub fn set_monitor(&mut self, events: bool, stats: bool) {
+        self.monitor_events = events;
+        self.monitor_stats = stats;
+    }
+
     /// True if `frame` should run now (dirty windows or running animations).
     pub fn needs_frame(&self) -> bool {
         self.needs_render
@@ -1421,12 +1428,13 @@ impl Runtime {
         } else {
             None
         };
+        let menus_allowed = !matches!(target, QueryTarget::Menus) || res.accessibility_trusted();
         let cx = QueryCx {
             model: &self.model,
             displays: res.displays(),
             menu_extras: extras.as_deref(),
             stats: &self.stats,
-            menus: &self.menu_titles,
+            menus: menus_allowed.then_some(self.menu_titles.as_slice()),
         };
         rsp.push_str(&query::query(target, &cx));
     }

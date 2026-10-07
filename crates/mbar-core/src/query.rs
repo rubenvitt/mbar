@@ -45,8 +45,8 @@ pub struct QueryCx<'a> {
     /// `None` = no Screen Recording permission.
     pub menu_extras: Option<&'a [MenuExtra]>,
     pub stats: &'a Stats,
-    /// Front app menu titles (`--query menus`).
-    pub menus: &'a [String],
+    /// Front app menu titles (`--query menus`); `None` = no Accessibility permission.
+    pub menus: Option<&'a [String]>,
 }
 
 /// Executes one `--query`. Returns the full response text (JSON or the exact error
@@ -80,7 +80,10 @@ pub fn query(target: &QueryTarget, cx: &QueryCx) -> String {
         },
         QueryTarget::Menus => match item_by_name("menus") {
             Some(item) => item_json(model, item),
-            None => menus_json(cx.menus),
+            None => match cx.menus {
+                Some(titles) => menus_json(titles),
+                None => MENUS_NO_PERMISSION.to_string(),
+            },
         },
     }
 }
@@ -284,6 +287,10 @@ pub fn stats_monitor_line(stats: &Stats, items: usize) -> String {
         .collect();
     format!("{{\"type\":\"stats\",{}}}\n", body.join(","))
 }
+
+/// Response of `--query menus` without the Accessibility permission (extension).
+pub const MENUS_NO_PERMISSION: &str =
+    "[!] Query (menus): Accessibility permission not given. Grant it in System Settings > Privacy & Security > Accessibility.\n";
 
 /// `--query menus` (extension): JSON array of the front application's top-level titles,
 /// on one line (`["Finder","File"]\n`; trim the newline to reuse it as the

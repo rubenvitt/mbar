@@ -168,6 +168,11 @@ pub trait Resources {
     fn menu_extras(&mut self) -> Option<Vec<MenuExtra>>;
     /// Synchronous system read for forced events; `None` = no value / not available.
     fn query_system(&mut self, q: SystemQuery) -> Option<SystemValue>;
+    /// Whether the Accessibility permission (needed for `app_menu`, `--menu` and
+    /// `--query menus`) is granted. Platforms without such a permission return `true`.
+    fn accessibility_trusted(&mut self) -> bool {
+        true
+    }
 }
 
 /// Identifies the request an IPC reply belongs to.

@@ -537,10 +537,17 @@ impl Driver {
         if !frame.ends_with('\n') {
             frame.push('\n');
         }
+        let before = self.monitors.len();
         self.monitors.retain_mut(|m| {
             !m.wants(stats)
                 || mbar_ipc::socket::write_frame(&mut m.stream, frame.as_bytes()).is_ok()
         });
+        if self.monitors.len() != before {
+            // Some subscribers went away: stop producing lines nobody reads.
+            let events = self.monitors.iter().any(|m| m.wants(false));
+            let stats = self.monitors.iter().any(|m| m.wants(true));
+            self.rt.set_monitor(events, stats);
+        }
     }
 }
 

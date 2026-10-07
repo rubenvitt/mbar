@@ -39,7 +39,7 @@ fn run_with(
         displays,
         menu_extras,
         stats,
-        menus,
+        menus: Some(menus),
     };
     query(&target, &cx)
 }
@@ -618,4 +618,19 @@ fn menus_json_array() {
         &titles
     )
     .starts_with("{\n\t\"name\": \"menus\""));
+}
+
+#[test]
+fn menus_without_accessibility_permission() {
+    let model = Model::new();
+    let cx = QueryCx {
+        model: &model,
+        displays: &[],
+        menu_extras: Some(&[]),
+        stats: &Stats::default(),
+        menus: None,
+    };
+    let out = query(&QueryTarget::Menus, &cx);
+    assert!(out.starts_with("[!]"));
+    assert!(out.to_lowercase().contains("accessibility"));
 }
