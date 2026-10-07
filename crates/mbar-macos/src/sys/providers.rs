@@ -69,7 +69,7 @@ impl Kind {
             Kind::Memory => Some(Duration::from_secs(5)),
             Kind::Disk => Some(Duration::from_secs(60)),
             // Fallback poll; IOPS notifications drive it normally.
-            Kind::Battery => Some(Duration::from_secs(120)),
+            Kind::Battery => Some(Duration::from_secs(60)),
             Kind::Volume | Kind::Wifi | Kind::FrontApp | Kind::Media => None,
         }
     }

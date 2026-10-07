@@ -1,10 +1,16 @@
 //! `power_source_change` (`docs/spec/events.md` §5.8) and battery readings for the
 //! `battery` provider: IOKit power-source notifications on the main run loop.
+//!
+//! `IOPSNotificationCreateRunLoopSource` alone fires too rarely for a live percentage
+//! (powerd posts it mainly when the time-remaining estimate changes, so while charging or
+//! on AC the percentage could lag by minutes). The percent-change and any-power-source
+//! notify(3) keys are therefore observed as well, via the Darwin notify center.
 
 use crate::sys::util;
 use crate::sys::{Sink, SysEvent};
 use objc2_core_foundation::{
-    kCFRunLoopDefaultMode, CFDictionary, CFRetained, CFRunLoop, CFRunLoopSource,
+    kCFRunLoopDefaultMode, CFDictionary, CFNotificationCenter, CFNotificationName,
+    CFNotificationSuspensionBehavior, CFRetained, CFRunLoop, CFRunLoopSource, CFString,
 };
 use objc2_io_kit::{
     IOPSCopyPowerSourcesInfo, IOPSCopyPowerSourcesList, IOPSGetPowerSourceDescription,
@@ -168,6 +174,47 @@ unsafe extern "C-unwind" fn power_callback(_ctx: *mut c_void) {
     handle(false);
 }
 
+/// notify(3) keys from `IOPowerSources.h`: `kIOPSNotifyPercentChange` (internal battery
+/// percentage changed) and `kIOPSNotifyAnyPowerSource` (any power source info changed).
+const NOTIFY_KEYS: [&str; 2] = [
+    "com.apple.system.powersources.percent",
+    "com.apple.system.powersources",
+];
+
+/// Observer identity for the Darwin notify center (only used as a key).
+static OBSERVER: u8 = 0;
+
+unsafe extern "C-unwind" fn darwin_callback(
+    _center: *mut CFNotificationCenter,
+    _observer: *mut c_void,
+    _name: *const CFNotificationName,
+    _object: *const c_void,
+    _info: *const CFDictionary,
+) {
+    handle(false);
+}
+
+/// Observes [`NOTIFY_KEYS`]; callbacks arrive on the main run loop.
+fn observe_notify_keys() {
+    let Some(center) = CFNotificationCenter::darwin_notify_center() else {
+        log::warn!("Darwin notify center unavailable");
+        return;
+    };
+    for key in NOTIFY_KEYS {
+        let name = CFString::from_str(key);
+        // SAFETY: static callback and observer key; the Darwin center ignores `object`.
+        unsafe {
+            center.add_observer(
+                &OBSERVER as *const u8 as *const c_void,
+                Some(darwin_callback),
+                Some(&name),
+                std::ptr::null(),
+                CFNotificationSuspensionBehavior::DeliverImmediately,
+            );
+        }
+    }
+}
+
 /// Installs the IOPS run-loop source on the main run loop (idempotent; callable from any
 /// thread). `sink` (if given) receives [`SysEvent::PowerSourceChange`] on state changes.
 pub fn start(sink: Option<Sink>) {
@@ -191,6 +238,8 @@ pub fn start(sink: Option<Sink>) {
         main.add_source(Some(&source), mode);
     }
     s.source = Some(SendSource(source));
+    drop(s);
+    observe_notify_keys();
 }
 
 /// Registers a callback run (on the main thread) after every IOPS change notification
