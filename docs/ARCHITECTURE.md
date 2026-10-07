@@ -31,7 +31,7 @@ crates/
   mbar-macos/           everything that touches Apple frameworks (cfg(target_os="macos"))
   mbar-lua/             embedded Lua 5.4 config/scripting (mlua), in-process callbacks
   mbar/                 the binary: client mode, daemon mode, headless platform
-  mbar-ui/              separate management app (egui), talks to the daemon over IPC
+  mbar-ui/              separate management app (GPUI + gpui-kit), talks to the daemon over IPC
 ```
 
 ### mbar-core
@@ -140,7 +140,9 @@ Config lookup prefers `init.lua` over `mbarrc` in the same directory.
 
 ## Management UI (`mbar-ui`)
 
-A separate, optional app so the bar process stays small. Built with egui; it is an IPC
+A separate, optional app so the bar process stays small. Built with
+[GPUI](https://www.gpui.rs) (Zed's GPU UI framework, Metal on macOS) and
+[gpui-kit](https://gpui-kit.com) components (tables, tree, inputs, dock layout). It is an IPC
 client of the daemon and uses only public commands plus a few query extensions
 (`--query stats`, `--monitor`):
 
@@ -151,6 +153,10 @@ client of the daemon and uses only public commands plus a few query extensions
   slowest handlers.
 * **System**: permission status (Accessibility for `app_menu`, Screen Recording for
   aliases), native menu-bar auto-hide toggle, launch at login, reload config.
+
+The bar itself does **not** use GPUI: it needs exact control over window levels,
+all-spaces behaviour, private blur and a minimal memory footprint, so it keeps its own
+small Metal renderer.
 
 ## Performance design
 

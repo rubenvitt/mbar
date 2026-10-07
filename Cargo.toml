@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/mbar-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+repository = "https://github.com/rubenvitt/mbar"
+rust-version = "1.80"
+
+[workspace.dependencies]
+mbar-core = { path = "crates/mbar-core" }
+mbar-ipc = { path = "crates/mbar-ipc" }
+mbar-macos = { path = "crates/mbar-macos" }
+mbar-lua = { path = "crates/mbar-lua" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+libc = "0.2"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+opt-level = 3
