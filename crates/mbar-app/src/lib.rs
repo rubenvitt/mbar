@@ -8,3 +8,9 @@ pub mod bundle;
 pub mod config;
 pub mod update;
 pub mod version;
+
+/// Bundle identifier of mbar.app and label of its login item.
+pub const BUNDLE_ID: &str = "dev.rubeen.mbar";
+/// Distributed notification the daemon posts to make a running `mbar-ui` show the
+/// Sparkle update dialog.
+pub const UPDATE_NOTIFICATION: &str = "dev.rubeen.mbar.checkForUpdates";
