@@ -836,6 +836,11 @@ mod tests {
     /// Sends one request over a socket pair; returns the client end.
     fn req_socket(d: &mut Driver, res: &mut HeadlessResources, args: &[&str]) -> UnixStream {
         let (server, client) = UnixStream::pair().unwrap();
+        // Set the timeout before the request runs: once the driver has replied and
+        // dropped its end, macOS rejects `setsockopt` on the disconnected socket (EINVAL).
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         d.handle_event(
             Event::Request {
                 args: s(args),
@@ -844,9 +849,6 @@ mod tests {
             res,
         );
         let _ = d.poll(res);
-        client
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
         client
     }
 

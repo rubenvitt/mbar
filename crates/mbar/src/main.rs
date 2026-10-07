@@ -423,7 +423,16 @@ mod tests {
         let mut name = dir.clone().into_os_string().into_vec();
         name.extend_from_slice(b"/rc\xff");
         let path = OsString::from_vec(name);
-        std::fs::write(&path, "").unwrap();
+        if let Err(e) = std::fs::write(&path, "") {
+            // APFS/HFS+ (macOS) only accept UTF-8 file names and reject this one with
+            // EILSEQ. Such a path cannot exist there, so `-c` must report the unresolvable
+            // path as an error instead of panicking.
+            assert_eq!(e.raw_os_error(), Some(libc::EILSEQ), "{e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            let mode = dispatch(&[OsString::from("-c"), path]);
+            assert!(matches!(mode, Mode::Error(_)), "{mode:?}");
+            return;
+        }
         let mode = dispatch(&[OsString::from("-c"), path.clone()]);
         let expected = std::fs::canonicalize(&path).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
