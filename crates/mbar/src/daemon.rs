@@ -124,9 +124,13 @@ pub fn run(bar_name: String, opts: DaemonOptions) -> ! {
     }
 
     // The bundle's agent plist cannot name a per-user log path; redirect stdout/stderr
-    // to ~/Library/Logs/mbar.log like `make install-agent` does.
+    // to ~/Library/Logs/mbar.log like `make install-agent` does. A start from a terminal
+    // keeps its output.
     #[cfg(target_os = "macos")]
-    if bundle.is_some() && std::env::var_os("MBAR_NO_LOG_REDIRECT").is_none() {
+    if bundle.is_some()
+        && std::env::var_os("MBAR_NO_LOG_REDIRECT").is_none()
+        && unsafe { libc::isatty(2) } == 0
+    {
         let home = std::env::var("HOME").unwrap_or_default();
         if !home.is_empty() {
             let path = std::path::Path::new(&home).join("Library/Logs/mbar.log");

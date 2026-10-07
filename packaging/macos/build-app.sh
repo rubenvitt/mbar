@@ -45,8 +45,11 @@ plutil -lint "$C/Info.plist" >/dev/null
 # Sparkle (cached per version, checksum-verified).
 CACHE="$DIST/.cache"; mkdir -p "$CACHE"
 TARBALL="$CACHE/Sparkle-$SPARKLE_VERSION.tar.xz"
-[ -f "$TARBALL" ] || curl -fsSL -o "$TARBALL" "https://github.com/sparkle-project/Sparkle/releases/download/$SPARKLE_VERSION/Sparkle-$SPARKLE_VERSION.tar.xz"
-echo "$SPARKLE_SHA256  $TARBALL" | shasum -a 256 -c - >/dev/null
+if [ ! -f "$TARBALL" ]; then
+  curl -fsSL -o "$TARBALL.part" "https://github.com/sparkle-project/Sparkle/releases/download/$SPARKLE_VERSION/Sparkle-$SPARKLE_VERSION.tar.xz"
+  mv "$TARBALL.part" "$TARBALL"
+fi
+echo "$SPARKLE_SHA256  $TARBALL" | shasum -a 256 -c - >/dev/null || { rm -f "$TARBALL"; echo "Sparkle checksum mismatch" >&2; exit 1; }
 rm -rf "$CACHE/sparkle" && mkdir -p "$CACHE/sparkle" && tar -xJf "$TARBALL" -C "$CACHE/sparkle"
 ditto "$CACHE/sparkle/Sparkle.framework" "$C/Frameworks/Sparkle.framework"
 
@@ -55,7 +58,10 @@ sign() {
   else codesign -f -s "$IDENTITY" -o runtime --timestamp "$@"; fi
 }
 SP="$C/Frameworks/Sparkle.framework/Versions/B"
-for x in "$SP"/XPCServices/*.xpc; do sign "$x"; done
+# Downloader.xpc carries entitlements (sandbox, network client) that re-signing must keep.
+for x in "$SP"/XPCServices/*.xpc; do
+  if [ "$(basename "$x")" = Downloader.xpc ]; then sign --preserve-metadata=entitlements "$x"; else sign "$x"; fi
+done
 sign "$SP/Autoupdate"
 sign "$SP/Updater.app"
 sign "$C/Frameworks/Sparkle.framework"
