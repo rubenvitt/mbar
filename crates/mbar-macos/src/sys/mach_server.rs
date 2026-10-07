@@ -136,6 +136,15 @@ impl MachReply {
         self.send_inner(response)
     }
 
+    /// Releases the reply right without answering (e.g. `--exit`); the client times out.
+    pub fn discard(mut self) {
+        if !self.sent && self.port != MACH_PORT_NULL {
+            // SAFETY: we own one send right on `port`.
+            unsafe { mach_port_deallocate(mach_task_self(), self.port) };
+        }
+        self.sent = true;
+    }
+
     fn send_inner(&mut self, response: &str) -> bool {
         if self.sent || self.port == MACH_PORT_NULL {
             self.sent = true;

@@ -23,6 +23,7 @@ pub(crate) mod util;
 pub mod alias;
 pub mod displays;
 pub mod events;
+pub mod hotload;
 pub mod mach_server;
 pub mod menus;
 pub mod mouse;
@@ -124,6 +125,8 @@ pub enum SysEvent {
     },
     /// Global/local mouse monitor event (see [`mouse`]).
     Mouse(MouseEvent),
+    /// The config directory changed while `--hotload` is on (rate limited, see [`hotload`]).
+    ConfigChanged,
     /// A script spawned by [`script::ScriptRunner`] exited (or was killed).
     ScriptFinished {
         id: u64,
