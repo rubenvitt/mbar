@@ -29,7 +29,9 @@ crates/
   mbar-core/            platform-independent, fully unit tested on Linux
   mbar-ipc/             wire protocol: Unix socket (all platforms) + mach (macOS)
   mbar-macos/           everything that touches Apple frameworks (cfg(target_os="macos"))
+  mbar-lua/             embedded Lua 5.4 config/scripting (mlua), in-process callbacks
   mbar/                 the binary: client mode, daemon mode, headless platform
+  mbar-ui/              separate management app (egui), talks to the daemon over IPC
 ```
 
 ### mbar-core
@@ -118,6 +120,37 @@ Pure logic. No Apple types, no threads, no I/O except what is injected.
 * On Linux the daemon runs with the **headless platform** (no windows, monospace text
   metrics). It still runs scripts, timers, events and answers queries — used for
   integration tests of full configs.
+
+## Configuration & scripting
+
+Two equivalent ways to configure, both first-class:
+
+1. **Shell** (`mbarrc` / `sketchybarrc`): unchanged SketchyBar workflow, scripts are
+   spawned per event/update exactly like SketchyBar.
+2. **Lua 5.4** (`init.lua`), embedded via `mlua` in the daemon. API modelled on SbarLua
+   (`mbar.add`, `mbar.set`, `mbar.bar`, `mbar.default`, `mbar.subscribe`,
+   `mbar.animate`, `mbar.trigger`, `mbar.query`, `mbar.exec`, `mbar.delay`) with
+   additions for native providers and menus. Event handlers are **Lua functions running
+   in-process** — no fork/exec per event, which is the single biggest speed-up over
+   shell-script configs. `mbar.exec` runs shell commands asynchronously and calls back
+   with their output. A LuaLS type-definition file (`lua/mbar.d.lua`) ships for
+   autocompletion and type checking in editors.
+
+Config lookup prefers `init.lua` over `mbarrc` in the same directory.
+
+## Management UI (`mbar-ui`)
+
+A separate, optional app so the bar process stays small. Built with egui; it is an IPC
+client of the daemon and uses only public commands plus a few query extensions
+(`--query stats`, `--monitor`):
+
+* **Inspector**: live tree of bars, items, brackets, popups; edit any property live,
+  copy the resulting `mbar --set ...` / Lua line.
+* **Events**: live event log (event name, sender, INFO, which items/handlers ran).
+* **Performance**: frame times, redraws per window, script spawns and durations,
+  slowest handlers.
+* **System**: permission status (Accessibility for `app_menu`, Screen Recording for
+  aliases), native menu-bar auto-hide toggle, launch at login, reload config.
 
 ## Performance design
 
