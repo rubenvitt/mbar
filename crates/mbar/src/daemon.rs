@@ -140,6 +140,10 @@ pub fn run(bar_name: String, opts: DaemonOptions) -> ! {
         lock,
         signals,
     };
+    // Runs only where the platform has an update runner (`updater::spawn`).
+    if let Some(b) = bundle {
+        crate::updater::spawn(b, &setup.driver.home);
+    }
     crate::platform::platform_main(setup)
 }
 
