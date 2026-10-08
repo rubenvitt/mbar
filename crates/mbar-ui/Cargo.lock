@@ -3876,14 +3876,14 @@ dependencies = [
 
 [[package]]
 name = "mbar-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "mbar-ipc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "log",
@@ -3892,7 +3892,7 @@ dependencies = [
 
 [[package]]
 name = "mbar-ui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-channel",
  "block2 0.6.2",
