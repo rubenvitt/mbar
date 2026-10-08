@@ -8,9 +8,14 @@ use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationOptions, NSApplicationDelegate, NSRunningApplication,
+    NSApplication, NSApplicationActivationOptions, NSApplicationDelegate,
+    NSApplicationTerminateReply, NSRunningApplication,
 };
-use objc2_foundation::{NSDistributedNotificationCenter, NSString};
+use objc2_foundation::{NSAppleEventManager, NSDistributedNotificationCenter, NSString};
+
+/// `kAEQuitReason` ('why?'): set on the quit Apple event for log out, restart and shut
+/// down, absent when someone just quits the app.
+const AE_QUIT_REASON: u32 = u32::from_be_bytes(*b"why?");
 
 /// Whether a process of the app `bundle_id` whose executable is named `executable` runs
 /// in this session, this process excluded. The bundle's daemon (`Contents/MacOS/mbar`)
@@ -52,6 +57,28 @@ define_class!(
             show_ui();
             false
         }
+
+        // "Quit mbar" (Dock, app switchers, `quit app id …`) reaches the daemon when the
+        // UI is not running; the bar keeps running. Log out, restart and shut down still
+        // end it. The daemon's own exit path stops the run loop without `terminate:`.
+        #[unsafe(method(applicationShouldTerminate:))]
+        fn should_terminate(&self, _app: &NSApplication) -> NSApplicationTerminateReply {
+            let system_quit = NSAppleEventManager::sharedAppleEventManager()
+                .currentAppleEvent()
+                .is_some_and(|ev| {
+                    // SAFETY: `-[NSAppleEventDescriptor attributeDescriptorForKeyword:]`
+                    // takes an AEKeyword (FourCharCode) and returns a descriptor or nil.
+                    let reason: Option<Retained<NSObject>> =
+                        unsafe { msg_send![&*ev, attributeDescriptorForKeyword: AE_QUIT_REASON] };
+                    reason.is_some()
+                });
+            if system_quit {
+                NSApplicationTerminateReply::TerminateNow
+            } else {
+                log::info!("ignoring a request to quit the bar (quit the bar with `mbar --exit`)");
+                NSApplicationTerminateReply::TerminateCancel
+            }
+        }
     }
 );
 
@@ -76,8 +103,9 @@ fn show_ui() {
 }
 
 /// The daemon inside mbar.app shares the bundle identifier with the UI, so Finder and
-/// `open` treat "open mbar.app" as reopening the running daemon. This delegate forwards
-/// that to the UI. Call once on the main thread, before the run loop.
+/// `open` treat "open mbar.app" as reopening the running daemon, and "quit mbar" can
+/// reach the daemon. This delegate forwards a reopen to the UI and ignores a plain quit.
+/// Call once on the main thread, before the run loop.
 pub fn forward_reopen_to_ui(mtm: MainThreadMarker, bundle_id: &str, bundle_root: PathBuf) {
     if REOPEN_TARGET
         .set((bundle_id.to_string(), bundle_root))
