@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/rubenvitt/mbar/compare/v0.3.2...v0.3.3) (2026-10-08)
+
+
+### Bug Fixes
+
+* **macos:** no Dock icon for the bar daemon ([#17](https://github.com/rubenvitt/mbar/issues/17)) ([b360825](https://github.com/rubenvitt/mbar/commit/b360825fe6bb6b93ce38c078a0f7152efcd99ac7))
+
 ## [0.3.2](https://github.com/rubenvitt/mbar/compare/v0.3.1...v0.3.2) (2026-10-08)
 
 
