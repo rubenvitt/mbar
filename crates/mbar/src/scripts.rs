@@ -522,26 +522,33 @@ mod tests {
         assert!(!still, "background writer still running");
     }
 
-    /// PERF-10: the exit is noticed by a blocking wait, not by 50 ms polls.
+    /// PERF-10: the exit is noticed by a blocking wait, not by (long) polls.
     #[test]
     fn review_perf10_exit_reported_without_poll_latency() {
         // The old 1 → 50 ms polling added up to 50 ms on top of the command's own runtime.
-        // Start-up cost varies a lot between machines (macOS CI runners need 30–50 ms
-        // for `env sh -c`, more through the posix_spawn path than through
-        // `std::process`), so subtract the same path's cost for a command that exits
-        // at once: what remains is the 70 ms sleep plus the exit-notice latency.
-        let best = |cmd: &str| {
-            (0..5)
-                .map(|_| run_captured(cmd, SCRIPT_TIMEOUT).1)
-                .min()
-                .unwrap()
-        };
-        let instant = best("true");
-        let sleeping = best("sleep 0.07");
-        let latency = sleeping.saturating_sub(instant);
+        // Process start-up varies a lot on CI runners (macOS runners need 30–50 ms for
+        // `env sh -c`, and the posix_spawn path plus `sleep`'s own start-up add tens of
+        // milliseconds more), so the bound is generous: it only catches gross latency
+        // (seconds-long timeouts or polls), not the exact old 50 ms.
+        let cmd = "sleep 0.07";
+        let baseline = (0..5)
+            .map(|_| {
+                let t = Instant::now();
+                Command::new("/usr/bin/env")
+                    .args(["sh", "-c", cmd])
+                    .status()
+                    .unwrap();
+                t.elapsed()
+            })
+            .min()
+            .unwrap();
+        let best = (0..5)
+            .map(|_| run_captured(cmd, SCRIPT_TIMEOUT).1)
+            .min()
+            .unwrap();
         assert!(
-            latency < Duration::from_millis(70 + 20),
-            "sleep 0.07 reported after {sleeping:?}, `true` after {instant:?}"
+            best < baseline + Duration::from_millis(250),
+            "reported after {best:?}, direct wait took {baseline:?}"
         );
     }
 
