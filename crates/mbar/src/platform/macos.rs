@@ -248,6 +248,14 @@ impl Platform for MacPlatform {
             }
         };
         let app = App::accessory(mtm);
+        // Inside mbar.app: opening the app while the bar runs shows the management UI.
+        if let Some(root) = std::env::current_exe()
+            .ok()
+            .and_then(|e| std::fs::canonicalize(e).ok())
+            .and_then(|e| mbar_app::bundle::bundle_root_from_exe(&e))
+        {
+            mbar_macos::sys::apps::forward_reopen_to_ui(mtm, mbar_app::BUNDLE_ID, root);
+        }
 
         let shared = SHARED
             .get_or_init(|| {
