@@ -104,10 +104,22 @@ fn main() {
             };
             // Daemon version sync: inside mbar.app, restart a running daemon whose version
             // differs from the bundle's. A no-op outside a bundle (dev builds, Linux).
+            // Opening the app also brings the bar up: when the login item is set up but
+            // the default bar does not answer, launchd is asked to start it.
             if let Some(bundle) = mbar_ui_model::system::current_bundle() {
                 let client = Client::new(bar_name.clone());
                 cx.background_executor()
                     .spawn(async move {
+                        #[cfg(target_os = "macos")]
+                        if client.bar_name() == mbar_ipc::DEFAULT_BAR_NAME
+                            && client.status() == mbar_ui_model::ipc::DaemonStatus::NotRunning
+                            && mac::login_item::status() == mac::login_item::LoginItem::Enabled
+                        {
+                            if let Err(e) = views::onboarding::start_login_item() {
+                                eprintln!("mbar-ui: {e}");
+                            }
+                            return;
+                        }
                         mbar_ui_model::system::sync_daemon_version(&client, &bundle.short_version);
                     })
                     .detach();
