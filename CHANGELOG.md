@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/rubenvitt/mbar/compare/v0.3.1...v0.3.2) (2026-10-08)
+
+
+### Bug Fixes
+
+* **macos:** reopening mbar.app shows the settings window, quitting it keeps the bar ([#15](https://github.com/rubenvitt/mbar/issues/15)) ([f00aa56](https://github.com/rubenvitt/mbar/commit/f00aa56a1c3b5b338bd5c68e99910b30c0332601))
+
 ## [0.3.1](https://github.com/rubenvitt/mbar/compare/v0.3.0...v0.3.1) (2026-10-08)
 
 
