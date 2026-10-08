@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "mbar"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "log",
@@ -179,14 +179,14 @@ dependencies = [
 
 [[package]]
 name = "mbar-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "mbar-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fancy-regex",
  "log",
@@ -197,7 +197,7 @@ dependencies = [
 
 [[package]]
 name = "mbar-ipc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "log",
@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "mbar-lua"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "log",
  "mlua",
@@ -215,7 +215,7 @@ dependencies = [
 
 [[package]]
 name = "mbar-macos"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "block2",
  "dispatch2",
