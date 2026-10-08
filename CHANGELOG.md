@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/rubenvitt/mbar/compare/v0.3.0...v0.3.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* **ui:** opening mbar.app starts the bar when it is not running ([#13](https://github.com/rubenvitt/mbar/issues/13)) ([5938a59](https://github.com/rubenvitt/mbar/commit/5938a592ec712c0fe16ded22d989335f1be93fff))
+
 ## [0.3.0](https://github.com/rubenvitt/mbar/compare/v0.2.0...v0.3.0) (2026-10-08)
 
 
