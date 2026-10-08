@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/rubenvitt/mbar/compare/v0.2.0...v0.3.0) (2026-10-08)
+
+
+### Features
+
+* **macos:** mbar app icon ([#11](https://github.com/rubenvitt/mbar/issues/11)) ([f7a5c5e](https://github.com/rubenvitt/mbar/commit/f7a5c5eb056fab1f4a2ffc1794048f548871b91c))
+
+
+### Bug Fixes
+
+* **ui:** restart mbar off the UI thread; re-register the login item after the legacy agent is removed ([#10](https://github.com/rubenvitt/mbar/issues/10)) ([8956808](https://github.com/rubenvitt/mbar/commit/89568083cc8ad72ad1eefccd23d6116d3c22dfdc))
+
 ## [0.2.0](https://github.com/rubenvitt/mbar/compare/v0.1.0...v0.2.0) (2026-10-08)
 
 
