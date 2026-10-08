@@ -557,6 +557,24 @@ impl SetupView {
     }
 }
 
+/// Starts the default bar through its login item: registers it when needed, kicks the
+/// launchd job and registers it from scratch when launchd still cannot spawn it.
+pub fn start_login_item() -> Result<String, String> {
+    if login_item::status() != LoginItem::Enabled {
+        login_item::register()?;
+    }
+    let _ = sys::kickstart_daemon();
+    if daemon_running() {
+        return Ok("Started mbar (login item)".into());
+    }
+    register_fresh()?;
+    if daemon_running() {
+        Ok("Registered the login item again; mbar is running".into())
+    } else {
+        Err("launchd does not start mbar; see ~/Library/Logs/mbar.log".into())
+    }
+}
+
 /// Unregisters and registers the login item again, then gives launchd a moment.
 fn register_fresh() -> Result<(), String> {
     let _ = login_item::unregister();
