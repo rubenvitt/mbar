@@ -52,10 +52,10 @@ fn main() {
             #[cfg(target_os = "macos")]
             {
                 let update_mode = args.update;
-                if update_mode {
-                    // Only Sparkle's dialog: no Dock icon, no main window.
-                    mac::app::set_accessory(true);
-                }
+                // Info.plist marks the bundle LSUIElement so the bar daemon (same bundle)
+                // never shows in the Dock; the management window makes itself a regular
+                // app. Only Sparkle's dialog (`--update`): no Dock icon, no main window.
+                mac::app::set_accessory(update_mode);
                 let updater = std::rc::Rc::new(mac::sparkle::Updater::start(move || {
                     if update_mode {
                         mac::app::terminate();

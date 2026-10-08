@@ -526,28 +526,22 @@ mod tests {
     #[test]
     fn review_perf10_exit_reported_without_poll_latency() {
         // The old 1 → 50 ms polling added up to 50 ms on top of the command's own runtime.
-        // Process start-up cost varies a lot between machines (macOS CI runners need
-        // 30–50 ms for `env sh -c`), so compare against a baseline: the same command
-        // started and waited for directly with `std::process`.
-        let cmd = "sleep 0.07";
-        let baseline = (0..5)
-            .map(|_| {
-                let t = Instant::now();
-                Command::new("/usr/bin/env")
-                    .args(["sh", "-c", cmd])
-                    .status()
-                    .unwrap();
-                t.elapsed()
-            })
-            .min()
-            .unwrap();
-        let best = (0..5)
-            .map(|_| run_captured(cmd, SCRIPT_TIMEOUT).1)
-            .min()
-            .unwrap();
+        // Start-up cost varies a lot between machines (macOS CI runners need 30–50 ms
+        // for `env sh -c`, more through the posix_spawn path than through
+        // `std::process`), so subtract the same path's cost for a command that exits
+        // at once: what remains is the 70 ms sleep plus the exit-notice latency.
+        let best = |cmd: &str| {
+            (0..5)
+                .map(|_| run_captured(cmd, SCRIPT_TIMEOUT).1)
+                .min()
+                .unwrap()
+        };
+        let instant = best("true");
+        let sleeping = best("sleep 0.07");
+        let latency = sleeping.saturating_sub(instant);
         assert!(
-            best < baseline + Duration::from_millis(25),
-            "reported after {best:?}, direct wait took {baseline:?}"
+            latency < Duration::from_millis(70 + 20),
+            "sleep 0.07 reported after {sleeping:?}, `true` after {instant:?}"
         );
     }
 
