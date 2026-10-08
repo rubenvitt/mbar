@@ -173,17 +173,34 @@ impl SystemView {
         cx.notify();
         self.shared.spawn_blocking(
             cx,
-            |client| sys::start_daemon(client.bar_name()),
+            {
+                // Inside mbar.app the default bar belongs to launchd (login item); a
+                // direct start would run beside a broken or stopped login item.
+                #[cfg(target_os = "macos")]
+                let via_launchd = self.app.is_some();
+                #[cfg(not(target_os = "macos"))]
+                let via_launchd = false;
+                move |client| -> Result<String, String> {
+                    #[cfg(target_os = "macos")]
+                    if via_launchd && client.bar_name() == mbar_ipc::DEFAULT_BAR_NAME {
+                        return super::onboarding::start_login_item();
+                    }
+                    let _ = via_launchd;
+                    sys::start_daemon(client.bar_name())
+                        .map(|path| format!("Started {}", path.display()))
+                        .map_err(|e| e.to_string())
+                }
+            },
             |this, result, cx| {
                 cx.notify();
                 match result {
-                    Ok(path) => {
+                    Ok(msg) => {
                         this.check_status(cx);
-                        Some(Notification::info(format!("Started {}", path.display())))
+                        Some(Notification::info(msg))
                     }
                     Err(e) => {
                         this.starting = false;
-                        Some(Notification::error(e.to_string()).title("Could not start mbar"))
+                        Some(Notification::error(e).title("Could not start mbar"))
                     }
                 }
             },
