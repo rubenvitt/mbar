@@ -32,3 +32,9 @@ mbar-app = { path = "../mbar-app" }
 serde_json = { version = "1", features = ["preserve_order"] }
 gpui-kit = { version = "0.7.1", optional = true }
 async-channel = { version = "2", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"

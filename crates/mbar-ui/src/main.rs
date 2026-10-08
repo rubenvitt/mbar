@@ -3,6 +3,8 @@
 //! The UI is an IPC client of the daemon. All IPC runs on GPUI's background executor or
 //! on the dedicated `--monitor` thread; the UI thread never blocks on a socket.
 
+#[cfg(target_os = "macos")]
+mod mac;
 mod views;
 
 use gpui_kit::component::Theme;
@@ -10,7 +12,7 @@ use gpui_kit::*;
 use mbar_ui_model::ipc::Client;
 use mbar_ui_model::model::parse_cli_args;
 
-actions!(mbar_ui, [Quit]);
+actions!(mbar_ui, [Quit, CheckForUpdates]);
 
 fn main() {
     let args = match parse_cli_args(std::env::args().skip(1)) {
@@ -46,6 +48,51 @@ fn main() {
                 }
             })
             .detach();
+
+            #[cfg(target_os = "macos")]
+            {
+                let update_mode = args.update;
+                if update_mode {
+                    // Only Sparkle's dialog: no Dock icon, no main window.
+                    mac::app::set_accessory(true);
+                }
+                let updater = std::rc::Rc::new(mac::sparkle::Updater::start(move || {
+                    if update_mode {
+                        mac::app::terminate();
+                    }
+                }));
+                if let Some(u) = updater.as_ref() {
+                    // The daemon found an update while this window is open.
+                    let shared = updater.clone();
+                    mac::app::on_distributed(mbar_app::UPDATE_NOTIFICATION, move || {
+                        if let Some(u) = shared.as_ref() {
+                            u.check_in_background();
+                        }
+                    });
+                    if update_mode {
+                        u.check_in_background();
+                    }
+                }
+                if update_mode {
+                    if updater.is_none() {
+                        std::process::exit(0);
+                    }
+                    cx.set_global(mac::UpdaterGlobal(updater));
+                    return;
+                }
+                let shared = updater.clone();
+                cx.on_action(move |_: &CheckForUpdates, _cx: &mut App| {
+                    if let Some(u) = shared.as_ref() {
+                        u.check_now();
+                    }
+                });
+                cx.set_menus([Menu::new("mbar").items([
+                    MenuItem::action("Check for Updates…", CheckForUpdates),
+                    MenuItem::separator(),
+                    MenuItem::action("Quit mbar", Quit),
+                ])]);
+                cx.set_global(mac::UpdaterGlobal(updater));
+            }
 
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(1100.), px(720.)), cx)),

@@ -105,9 +105,8 @@ pub struct StateFile {
     pub path: PathBuf,
 }
 
-// TODO(Task 6, macOS): drop this `allow` once `MacSystem::load_state`/`save_state`
-// delegate to `StateFile::load`/`StateFile::save`.
-#[cfg_attr(not(test), allow(dead_code))]
+// Used by the macOS runner only (and the tests).
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
 impl StateFile {
     pub fn in_home(home: &str) -> StateFile {
         StateFile {
@@ -149,27 +148,112 @@ fn check_due(last: u64, now: u64) -> bool {
     now < last || now - last >= CHECK_INTERVAL_SECS
 }
 
-/// The system runner for this platform, or `None` where there is none (yet).
-///
-/// TODO(Task 6, macOS): under `#[cfg(target_os = "macos")]` return
-/// `Some(Box::new(real::MacSystem { bundle_root: bundle.root.clone(), state }))` and keep
-/// `None` on other platforms. `real::MacSystem` (a `#[cfg(target_os = "macos")] mod
-/// real` in this file, fields `bundle_root: PathBuf`, `state: StateFile`, so it is
-/// `Send`) implements [`System`] as in the plan's Task 6 Step 4:
-/// - `fetch`: `/usr/bin/curl -fsSL --max-time 30 <url>`, `None` on non-zero exit;
-/// - `os_version`: `/usr/bin/sw_vers -productVersion`;
-/// - `auto_checks` / `feed_override`: `/usr/bin/defaults read dev.rubeen.mbar
-///   SUEnableAutomaticChecks` (`1`/`true`/`YES` → true) / `SUFeedURL` (empty → `None`);
-/// - `ui_running`: `mbar_macos::sys::apps::is_app_running("dev.rubeen.mbar")`;
-/// - `notify_ui`: `mbar_macos::sys::apps::post_distributed("dev.rubeen.mbar.checkForUpdates")`;
-/// - `open_ui_update`: `/usr/bin/open -b dev.rubeen.mbar --args --update`;
-/// - `restart_self`: `/bin/launchctl kickstart -k gui/<libc::getuid()>/dev.rubeen.mbar`;
-/// - `now`: `SystemTime` Unix seconds;
-/// - `load_state` / `save_state`: `self.state.load()` / `self.state.save(json)`;
-/// - `bundle_build`: `mbar_app::bundle::read_bundle(&self.bundle_root).map(|b| b.build)`.
+/// The system runner for this platform, or `None` where there is none.
 fn platform_system(bundle: &AppBundle, state: StateFile) -> Option<Box<dyn System + Send>> {
-    let _ = (bundle, state);
-    None
+    #[cfg(target_os = "macos")]
+    return Some(Box::new(real::MacSystem {
+        bundle_root: bundle.root.clone(),
+        state,
+    }));
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (bundle, state);
+        None
+    }
+}
+
+/// `curl`/`defaults`/`open`/`launchctl` runner.
+#[cfg(target_os = "macos")]
+mod real {
+    use super::{StateFile, System};
+    use mbar_app::{BUNDLE_ID, UPDATE_NOTIFICATION};
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
+
+    pub struct MacSystem {
+        pub bundle_root: PathBuf,
+        pub state: StateFile,
+    }
+
+    /// Trimmed stdout of a successful run, `None` otherwise.
+    fn output(cmd: &str, args: &[&str]) -> Option<String> {
+        let out = Command::new(cmd)
+            .args(args)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
+    impl System for MacSystem {
+        fn fetch(&self, url: &str) -> Option<String> {
+            let body = output("/usr/bin/curl", &["-fsSL", "--max-time", "30", url]);
+            if body.is_none() {
+                log::warn!("update check: could not fetch {url}");
+            }
+            body
+        }
+        fn os_version(&self) -> String {
+            output("/usr/bin/sw_vers", &["-productVersion"]).unwrap_or_default()
+        }
+        fn auto_checks(&self) -> Option<bool> {
+            output(
+                "/usr/bin/defaults",
+                &["read", BUNDLE_ID, "SUEnableAutomaticChecks"],
+            )
+            .map(|s| matches!(s.as_str(), "1" | "true" | "YES"))
+        }
+        fn feed_override(&self) -> Option<String> {
+            output("/usr/bin/defaults", &["read", BUNDLE_ID, "SUFeedURL"]).filter(|s| !s.is_empty())
+        }
+        fn ui_running(&self) -> bool {
+            mbar_macos::sys::apps::is_app_running(BUNDLE_ID, "mbar-ui")
+        }
+        fn notify_ui(&self) {
+            mbar_macos::sys::apps::post_distributed(UPDATE_NOTIFICATION);
+        }
+        fn open_ui_update(&self) {
+            // By path and `-n`: the daemon itself is a running process of this bundle,
+            // so `open -b` could just activate it instead of launching the UI.
+            if let Err(e) = Command::new("/usr/bin/open")
+                .arg("-n")
+                .arg("-a")
+                .arg(&self.bundle_root)
+                .args(["--args", "--update"])
+                .status()
+            {
+                log::warn!("update check: cannot open mbar.app: {e}");
+            }
+        }
+        fn restart_self(&self) {
+            let target = format!("gui/{}/{BUNDLE_ID}", unsafe { libc::getuid() });
+            log::warn!("update check: newer mbar.app on disk, restarting ({target})");
+            if let Err(e) = Command::new("/bin/launchctl")
+                .args(["kickstart", "-k", &target])
+                .status()
+            {
+                log::warn!("update check: cannot restart: {e}");
+            }
+        }
+        fn now(&self) -> u64 {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        }
+        fn load_state(&self) -> String {
+            self.state.load()
+        }
+        fn save_state(&self, json: &str) -> Result<(), String> {
+            self.state.save(json)
+        }
+        fn bundle_build(&self) -> Option<u64> {
+            mbar_app::bundle::read_bundle(&self.bundle_root).map(|b| b.build)
+        }
+    }
 }
 
 /// Starts the check thread: first check after 120 s, then every 24 h. Only when the

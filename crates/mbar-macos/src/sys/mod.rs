@@ -21,6 +21,7 @@ pub(crate) mod skylight;
 pub(crate) mod util;
 
 pub mod alias;
+pub mod apps;
 pub mod displays;
 pub mod events;
 pub mod hotload;
