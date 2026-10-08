@@ -8,6 +8,7 @@ use std::time::Duration;
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
+    notification::Notification,
     switch::Switch,
     v_flex, ActiveTheme as _, Disableable as _, Sizable as _,
 };
@@ -382,8 +383,18 @@ impl SetupView {
                     .outline()
                     .label("Restart mbar")
                     .tooltip("Screen Recording takes effect after a restart")
-                    .on_click(cx.listener(|_, _, _, _| {
-                        let _ = sys::kickstart_daemon();
+                    // `launchctl kickstart -k` waits for the old daemon to exit (and
+                    // for launchd's spawn throttle): never on the UI thread.
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.shared.spawn_blocking(
+                            cx,
+                            |_| sys::kickstart_daemon(),
+                            |_, result, _| {
+                                result.err().map(|e| {
+                                    Notification::error(e.to_string()).title("Restart mbar")
+                                })
+                            },
+                        );
                     })),
             )
         } else {
@@ -546,6 +557,33 @@ impl SetupView {
     }
 }
 
+/// Unregisters and registers the login item again, then gives launchd a moment.
+fn register_fresh() -> Result<(), String> {
+    let _ = login_item::unregister();
+    login_item::register()?;
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    Ok(())
+}
+
+/// Whether launchd runs the login item's job (`launchctl print gui/<uid>/dev.rubeen.mbar`).
+fn daemon_running() -> bool {
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    std::process::Command::new("/bin/launchctl")
+        .arg("print")
+        .arg(format!(
+            "gui/{}/{}",
+            sys::current_uid(),
+            mbar_app::BUNDLE_ID
+        ))
+        .stderr(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .any(|l| l.trim() == "state = running")
+        })
+}
+
 /// Runs one step (background thread).
 fn run(step: Step, plan: &SetupPlan, remove_brew: bool) -> Result<String, String> {
     match step {
@@ -570,8 +608,11 @@ fn run(step: Step, plan: &SetupPlan, remove_brew: bool) -> Result<String, String
             let result = ob::run_commands(&cmds);
             // The legacy agent shares the launchd label; its bootout stopped ours too,
             // even when a later command failed.
-            let reregister = (was_registered && ob::cleanup_stops_login_item(&plan.old))
-                .then(login_item::register);
+            // Removing the legacy plist also drops launchd's background-task record
+            // for the label, so a plain `register()` would leave a job that cannot
+            // spawn ("Unable to resolve <BTM uuid>"): register from scratch.
+            let reregister =
+                (was_registered && ob::cleanup_stops_login_item(&plan.old)).then(register_fresh);
             let mut log = result?;
             if let Some(r) = reregister {
                 r?;
@@ -619,8 +660,15 @@ fn run(step: Step, plan: &SetupPlan, remove_brew: bool) -> Result<String, String
         }
         Step::LoginItem => {
             login_item::register()?;
+            if login_item::status() == LoginItem::Enabled && !daemon_running() {
+                register_fresh()?;
+            }
             match login_item::status() {
-                LoginItem::Enabled => Ok("Registered; mbar is running".into()),
+                LoginItem::Enabled if daemon_running() => Ok("Registered; mbar is running".into()),
+                LoginItem::Enabled => Err(
+                    "Registered, but launchd does not start mbar; see ~/Library/Logs/mbar.log"
+                        .into(),
+                ),
                 LoginItem::RequiresApproval => {
                     login_item::open_settings();
                     Err("Allow mbar in System Settings → General → Login Items, then retry".into())
