@@ -35,7 +35,7 @@ rm -f "$ZIP"; ditto -c -k --keepParent "$APP" "$ZIP"
 SIGN_UPDATE="$DIST/.cache/sparkle/bin/sign_update"
 [ -x "$SIGN_UPDATE" ] || { echo "$SIGN_UPDATE not found: run 'make app' first" >&2; exit 1; }
 if [ -n "${SPARKLE_KEY_FILE:-}" ]; then SIG=$("$SIGN_UPDATE" --ed-key-file "$SPARKLE_KEY_FILE" "$ZIP")
-else SIG=$("$SIGN_UPDATE" "$ZIP"); fi
+else SIG=$("$SIGN_UPDATE" --account "${SPARKLE_ACCOUNT:-mbar}" "$ZIP"); fi
 
 # 3. DMG with an /Applications link.
 STAGE=$DIST/dmg-stage; rm -rf "$STAGE" "$DMG"; mkdir -p "$STAGE"
