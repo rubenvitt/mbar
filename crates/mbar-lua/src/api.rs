@@ -16,6 +16,7 @@ pub(crate) const KEY_HOST_COMMAND: &str = "mbar.host.command";
 pub(crate) const KEY_HOST_SPAWN: &str = "mbar.host.spawn";
 pub(crate) const KEY_HOST_SCHEDULE: &str = "mbar.host.schedule";
 pub(crate) const KEY_HOST_AEROSPACE: &str = "mbar.host.aerospace";
+pub(crate) const KEY_HOST_ON: &str = "mbar.host.on";
 pub(crate) const KEY_HANDLERS: &str = "mbar.handlers";
 pub(crate) const KEY_CALLBACKS: &str = "mbar.callbacks";
 const KEY_ITEM_MT: &str = "mbar.item_mt";
@@ -115,14 +116,14 @@ pub(crate) fn flush(lua: &Lua, st: &Shared) -> Result<String> {
 // Handlers
 // ---------------------------------------------------------------------------
 
-fn new_id(st: &Shared) -> u64 {
+pub(crate) fn new_id(st: &Shared) -> u64 {
     let mut s = st.borrow_mut();
     s.next_id += 1;
     s.next_id
 }
 
 /// Registry entry `{ events = { [event] = fn }, any = fn? }` for handler `id`.
-fn handler_entry(lua: &Lua, id: u64) -> Result<Table> {
+pub(crate) fn handler_entry(lua: &Lua, id: u64) -> Result<Table> {
     let handlers: Table = lua.named_registry_value(KEY_HANDLERS)?;
     if let Some(t) = handlers.raw_get::<Option<Table>>(id)? {
         return Ok(t);

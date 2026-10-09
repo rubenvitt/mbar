@@ -21,8 +21,9 @@
 //! * `Platform(StartAerospace)` handled here on every platform (aerospace design
 //!   §Binary): one `mbar_aerospace::subscribe` whose callbacks post `Input::Aerospace` /
 //!   `Input::AerospaceStatus`; it lives until the driver exits. Lua `mbar.aerospace.run`
-//!   / `query` commands run in order on one worker thread ([`AerospaceWorker`]) and come
-//!   back as [`Event::LuaAerospaceDone`].
+//!   / `query` commands run in order on one worker thread ([`AerospaceWorker`], bounded
+//!   queue) and come back as [`Event::LuaAerospaceDone`]; `mbar.aerospace.on` handlers are
+//!   item-less runtime handlers (`LuaRequest::On`).
 //!
 //! Lua re-entrancy (`docs/LUA.md`, `mbar_lua` crate docs): while the engine runs, the
 //! engine is taken out of the driver; `Host::command` feeds the runtime synchronously and
@@ -33,7 +34,9 @@
 //! ([`Driver::next_deadline`] is "now" while work is queued).
 
 use mbar_core::command::MonitorMode;
-use mbar_core::platform::{Effect, FrameOutput, Input, PlatformRequest, ReplyToken, Resources};
+use mbar_core::platform::{
+    Effect, FrameOutput, Input, LuaRequest, PlatformRequest, ReplyToken, Resources,
+};
 use mbar_core::{Runtime, RuntimeConfig};
 use mbar_lua::{AerospaceResult, Host, LuaEngine};
 use std::collections::{HashMap, VecDeque};
@@ -714,25 +717,55 @@ impl Driver {
             args,
             reply: callback.map(|id| (self.lua_generation, id)),
         };
-        let sent = match &self.aerospace_worker {
-            Some(w) => w.tx.send(job).map_err(|e| e.0),
-            None => Err(job),
+        let failure = match &self.aerospace_worker {
+            Some(w) => match w.tx.try_send(job) {
+                Ok(()) => None,
+                Err(TrySendError::Full(job)) => {
+                    log::warn!(
+                        "lua: {AEROSPACE_QUEUE_FULL}: dropping aerospace {:?}",
+                        job.args
+                    );
+                    Some((job, AEROSPACE_QUEUE_FULL))
+                }
+                Err(TrySendError::Disconnected(job)) => {
+                    self.aerospace_worker = None;
+                    Some((job, AEROSPACE_NO_THREAD))
+                }
+            },
+            None => Some((job, AEROSPACE_NO_THREAD)),
         };
-        if let Err(job) = sent {
-            // No worker thread: report the failure like a transport error.
-            self.aerospace_worker = None;
-            if let Some((generation, id)) = job.reply {
-                (self.post)(Event::LuaAerospaceDone {
-                    generation,
-                    id,
-                    result: AerospaceResult {
-                        exit_code: -1,
-                        stdout: String::new(),
-                        stderr: "cannot start the AeroSpace command thread".into(),
-                    },
-                });
-            }
+        // Report the failure like a transport error.
+        if let Some((
+            AerospaceJob {
+                reply: Some((generation, id)),
+                ..
+            },
+            why,
+        )) = failure
+        {
+            (self.post)(Event::LuaAerospaceDone {
+                generation,
+                id,
+                result: AerospaceResult {
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: why.into(),
+                },
+            });
         }
+    }
+
+    /// Lua `mbar.aerospace.on`: registers an item-less handler in the runtime
+    /// (`LuaRequest::On`); its effects (the connection start, the current state for the
+    /// new handler) are applied like those of a Lua command.
+    fn lua_on(&mut self, events: Vec<String>, handler: u64, res: &mut dyn Resources) {
+        if self.exit {
+            return;
+        }
+        let fx = self
+            .rt
+            .handle(Input::Lua(LuaRequest::On { events, handler }), res);
+        self.apply(fx);
     }
 
     // ------------------------------------------------------------------ --monitor
@@ -825,22 +858,38 @@ struct AerospaceJob {
     reply: Option<(u64, u64)>,
 }
 
+/// Pending Lua `mbar.aerospace` commands the worker queue holds; a command beyond that
+/// fails right away ([`AEROSPACE_QUEUE_FULL`]) instead of piling up while AeroSpace hangs.
+const AEROSPACE_QUEUE: usize = 64;
+/// `stderr` of a command rejected because the queue is full.
+const AEROSPACE_QUEUE_FULL: &str = "mbar: too many pending AeroSpace commands";
+/// `stderr` of a command that could not be queued because there is no worker thread.
+const AEROSPACE_NO_THREAD: &str = "cannot start the AeroSpace command thread";
+
 /// The thread that runs Lua `mbar.aerospace` commands (blocking socket / CLI calls, up to
 /// `mbar_aerospace::ANSWER_TIMEOUT` each) one after another, so the main loop never waits
-/// for AeroSpace and commands reach it in the order Lua issued them. Ends when the
-/// driver drops the sender.
+/// for AeroSpace and commands reach it in the order Lua issued them. The queue is bounded
+/// ([`AEROSPACE_QUEUE`]). Ends when the driver drops the sender.
 struct AerospaceWorker {
-    tx: mpsc::Sender<AerospaceJob>,
+    tx: SyncSender<AerospaceJob>,
 }
 
 impl AerospaceWorker {
     fn spawn(post: Post) -> Option<AerospaceWorker> {
-        let (tx, rx) = mpsc::channel::<AerospaceJob>();
+        Self::spawn_with(post, |args| aerospace_result(mbar_aerospace::run(args)))
+    }
+
+    /// [`AerospaceWorker::spawn`] with the function that runs one command (tests).
+    fn spawn_with(
+        post: Post,
+        run: impl Fn(&[String]) -> AerospaceResult + Send + 'static,
+    ) -> Option<AerospaceWorker> {
+        let (tx, rx) = mpsc::sync_channel::<AerospaceJob>(AEROSPACE_QUEUE);
         let spawned = std::thread::Builder::new()
             .name("mbar-aerospace-run".into())
             .spawn(move || {
                 while let Ok(job) = rx.recv() {
-                    let result = aerospace_result(mbar_aerospace::run(&job.args));
+                    let result = run(&job.args);
                     match job.reply {
                         Some((generation, id)) => post(Event::LuaAerospaceDone {
                             generation,
@@ -912,6 +961,10 @@ impl Host for LuaHost<'_, '_> {
 
     fn aerospace(&mut self, args: Vec<String>, callback: Option<u64>) {
         self.d.lua_aerospace(args, callback);
+    }
+
+    fn on_events(&mut self, events: Vec<String>, handler: u64) {
+        self.d.lua_on(events, handler, self.res);
     }
 }
 
@@ -1244,14 +1297,30 @@ mod tests {
 
     /// Aerospace design §Binary: `StartAerospace` is handled by the driver (one
     /// subscription, repeated requests ignored), never handed to the platform, and the
-    /// subscription ends with the daemon.
+    /// subscription ends with the daemon. `--query aerospace` alone never connects.
     #[test]
     fn start_aerospace_is_handled_by_the_driver() {
         let (mut d, mut res) = driver();
         assert!(d.aerospace.is_none());
         let q = req(&mut d, &mut res, &["--query", "aerospace"]).unwrap();
-        assert!(q.contains("\"connected\""), "{q}");
+        assert!(q.contains("\"active\": \"off\""), "{q}");
+        assert!(d.aerospace.is_none(), "--query aerospace must not connect");
+        req(
+            &mut d,
+            &mut res,
+            &[
+                "--add",
+                "item",
+                "a",
+                "left",
+                "--subscribe",
+                "a",
+                "aerospace_workspace_change",
+            ],
+        );
         assert!(d.aerospace.is_some());
+        let q = req(&mut d, &mut res, &["--query", "aerospace"]).unwrap();
+        assert!(q.contains("\"active\": \"on\""), "{q}");
         d.apply(vec![Effect::Platform(PlatformRequest::StartAerospace)]);
         assert!(d.aerospace.is_some());
         assert!(
@@ -1263,6 +1332,65 @@ mod tests {
         req(&mut d, &mut res, &["--exit"]);
         assert!(d.exit_requested());
         assert!(d.aerospace.is_none(), "subscription must stop on exit");
+    }
+
+    /// The Lua command queue is bounded: while AeroSpace hangs, commands beyond
+    /// `AEROSPACE_QUEUE` fail at once (`exit_code = -1`) instead of piling up.
+    #[test]
+    fn aerospace_command_queue_is_bounded() {
+        let (mut d, _res) = driver();
+        let done: Arc<Mutex<Vec<(u64, AerospaceResult)>>> = Arc::default();
+        let post: Post = {
+            let done = done.clone();
+            Arc::new(move |e| {
+                if let Event::LuaAerospaceDone { id, result, .. } = e {
+                    done.lock().unwrap().push((id, result));
+                }
+            })
+        };
+        d.post = post.clone();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        d.aerospace_worker = AerospaceWorker::spawn_with(post, move |args| {
+            // Hangs like an unresponsive AeroSpace until the test releases it.
+            let _ = release_rx.lock().unwrap().recv();
+            AerospaceResult {
+                exit_code: 0,
+                stdout: args.join(" "),
+                stderr: String::new(),
+            }
+        });
+        // `request_aerospace` must not start a real subscription in this test.
+        let _ = d.rt.request_aerospace();
+        let total = AEROSPACE_QUEUE as u64 + 10;
+        for id in 1..=total {
+            d.lua_aerospace(vec!["workspace".into(), id.to_string()], Some(id));
+        }
+        // At most one job in progress plus a full queue are accepted.
+        let rejected: Vec<(u64, AerospaceResult)> = done.lock().unwrap().drain(..).collect();
+        assert!(rejected.len() >= 9, "{} rejected", rejected.len());
+        for (id, r) in &rejected {
+            assert!(*id > AEROSPACE_QUEUE as u64, "job {id} rejected");
+            assert_eq!(r.exit_code, -1);
+            assert_eq!(r.stderr, AEROSPACE_QUEUE_FULL);
+        }
+        // Released, the accepted ones complete in order.
+        let accepted = total as usize - rejected.len();
+        for _ in 0..accepted {
+            release_tx.send(()).unwrap();
+        }
+        let start = Instant::now();
+        while done.lock().unwrap().len() < accepted {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "jobs did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let finished = done.lock().unwrap();
+        let ids: Vec<u64> = finished.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, (1..=accepted as u64).collect::<Vec<_>>());
+        assert!(finished.iter().all(|(_, r)| r.exit_code == 0));
     }
 
     /// A Lua `mbar.aerospace` result for an earlier config generation is dropped.

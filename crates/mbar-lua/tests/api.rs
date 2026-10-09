@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use mbar_lua::{parse_script, AerospaceResult, Host, LuaEngine, AEROSPACE_CARRIER};
+use mbar_lua::{parse_script, AerospaceResult, Host, LuaEngine};
 
 /// Records every message; answers `--query` from a table.
 #[derive(Default)]
@@ -11,6 +11,7 @@ struct Mock {
     spawned: Vec<(String, Option<u64>)>,
     scheduled: Vec<(Duration, u64)>,
     aerospace: Vec<(Vec<String>, Option<u64>)>,
+    on: Vec<(Vec<String>, u64)>,
 }
 
 impl Host for Mock {
@@ -37,6 +38,10 @@ impl Host for Mock {
 
     fn aerospace(&mut self, args: Vec<String>, callback: Option<u64>) {
         self.aerospace.push((args, callback));
+    }
+
+    fn on_events(&mut self, events: Vec<String>, handler: u64) {
+        self.on.push((events, handler));
     }
 }
 
@@ -1008,112 +1013,77 @@ fn aerospace_argument_validation() {
     assert!(host.aerospace.is_empty(), "{:?}", host.aerospace);
 }
 
-/// `mbar.aerospace.on`: one hidden carrier item, subscribed once per event; every
-/// function registered for an event runs, in order, with the handler env.
+/// `mbar.aerospace.on`: no item and no command; every call registers its own item-less
+/// handler with the host, which calls it with the event's env (dispatch on `SENDER`).
 #[test]
-fn aerospace_on_uses_one_carrier_item() {
+fn aerospace_on_registers_item_less_handlers() {
     let (mut engine, mut host) = run(r#"
         mbar.aerospace.on("workspace_change", function(env)
             mbar.set("a", { label = env.FOCUSED_WORKSPACE .. "/" .. env.info.prev_workspace })
         end)
         mbar.aerospace.on("aerospace_workspace_change", function(env)
-            mbar.set("b", { label = env.NAME })
+            mbar.set("b", { label = tostring(env.NAME) })
         end)
         mbar.aerospace.on("mode_change", function(env)
             mbar.set("m", { label = env.MODE })
         end)
     "#);
-    let c = AEROSPACE_CARRIER;
+    assert!(host.messages.is_empty(), "{:?}", host.messages);
+    assert!(host.aerospace.is_empty());
+    let ids: Vec<u64> = host.on.iter().map(|(_, id)| *id).collect();
     assert_eq!(
-        host.messages,
-        vec![argv(&[
-            "--add",
-            "item",
-            c,
-            "left",
-            "--set",
-            c,
-            "drawing=off",
-            "--set",
-            c,
-            "script=lua:1",
-            "--subscribe",
-            c,
-            "aerospace_workspace_change",
-            "--set",
-            c,
-            "script=lua:1",
-            "--subscribe",
-            c,
-            "aerospace_mode_change",
-        ])]
+        host.on,
+        vec![
+            (argv(&["aerospace_workspace_change"]), ids[0]),
+            (argv(&["aerospace_workspace_change"]), ids[1]),
+            (argv(&["aerospace_mode_change"]), ids[2]),
+        ]
     );
-    assert!(
-        host.aerospace.is_empty(),
-        "the subscription starts the connection"
-    );
-    host.messages.clear();
+    assert!(ids[0] != ids[1] && ids[1] != ids[2] && ids[0] != ids[2]);
 
+    let ws = env(&[
+        ("SENDER", "aerospace_workspace_change"),
+        ("INFO", r#"{"focused_workspace":"2","prev_workspace":"1"}"#),
+        ("FOCUSED_WORKSPACE", "2"),
+        ("PREV_WORKSPACE", "1"),
+    ]);
+    engine.run_handler(ids[0], &ws, &mut host).unwrap();
+    engine.run_handler(ids[1], &ws, &mut host).unwrap();
     engine
         .run_handler(
-            1,
-            &env(&[
-                ("NAME", c),
-                ("SENDER", "aerospace_workspace_change"),
-                ("INFO", r#"{"focused_workspace":"2","prev_workspace":"1"}"#),
-                ("FOCUSED_WORKSPACE", "2"),
-                ("PREV_WORKSPACE", "1"),
-            ]),
+            ids[2],
+            &env(&[("SENDER", "aerospace_mode_change"), ("MODE", "service")]),
             &mut host,
         )
         .unwrap();
+    // Another sender reaches no handler.
     engine
-        .run_handler(
-            1,
-            &env(&[
-                ("NAME", c),
-                ("SENDER", "aerospace_mode_change"),
-                ("MODE", "service"),
-            ]),
-            &mut host,
-        )
-        .unwrap();
-    // Pseudo senders reach no handler.
-    engine
-        .run_handler(1, &env(&[("NAME", c), ("SENDER", "forced")]), &mut host)
+        .run_handler(ids[2], &env(&[("SENDER", "forced")]), &mut host)
         .unwrap();
     assert_eq!(
         host.messages,
         vec![
-            argv(&[
-                "--set",
-                "a",
-                "label=2/1",
-                "--set",
-                "b",
-                &format!("label={c}")
-            ]),
+            argv(&["--set", "a", "label=2/1"]),
+            argv(&["--set", "b", "label=nil"]),
             argv(&["--set", "m", "label=service"]),
         ]
     );
 }
 
-/// A failing `on` handler does not stop the others; its error is reported.
+/// A failing `on` handler does not stop the others (each is its own handler).
 #[test]
 fn aerospace_on_handler_errors() {
     let (mut engine, mut host) = run(r#"
         mbar.aerospace.on("focus_change", function() error("first fails") end)
         mbar.aerospace.on("focus_change", function(env) mbar.set("x", { label = env.WINDOW_ID }) end)
     "#);
-    host.messages.clear();
+    let focus = env(&[("SENDER", "aerospace_focus_change"), ("WINDOW_ID", "7")]);
     let e = engine
-        .run_handler(
-            1,
-            &env(&[("SENDER", "aerospace_focus_change"), ("WINDOW_ID", "7")]),
-            &mut host,
-        )
+        .run_handler(host.on[0].1, &focus, &mut host)
         .unwrap_err();
     assert!(e.to_string().contains("first fails"), "{e}");
+    let second = host.on[1].1;
+    engine.run_handler(second, &focus, &mut host).unwrap();
     assert_eq!(host.messages, vec![argv(&["--set", "x", "label=7"])]);
 }
 

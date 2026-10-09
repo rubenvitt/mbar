@@ -174,3 +174,45 @@ fn answer_timeout_is_an_io_error() {
     assert!(matches!(err, Error::Io(_)), "{err:?}");
     assert!(start.elapsed() < Duration::from_secs(3));
 }
+
+/// A server without the socket protocol is remembered per socket file: later commands
+/// go straight to the CLI instead of waiting for the handshake timeout again; a new
+/// socket file (AeroSpace restarted) is tried again.
+#[test]
+fn a_server_without_the_protocol_is_remembered() {
+    let cli = fake_cli(ECHO_CLI);
+    let path = temp_path(".sock");
+    let mut server = FakeServer::start(
+        &path,
+        Spec {
+            handshake: Handshake::Silent,
+            ..Spec::default()
+        },
+    );
+    let mut c = config(&path, Some(cli.path()));
+    c.handshake_timeout = Duration::from_millis(800);
+    let start = Instant::now();
+    assert_cli_answer(run_with(&c, &args(&["workspace", "3"])).unwrap());
+    assert!(start.elapsed() >= Duration::from_millis(700));
+    assert_eq!(server.connections(), 1);
+    for _ in 0..3 {
+        let start = Instant::now();
+        assert_cli_answer(run_with(&c, &args(&["workspace", "3"])).unwrap());
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+    assert_eq!(server.connections(), 1, "the socket is not tried again");
+    // Without a CLI the remembered handshake failure is the error.
+    let err = run_with(&config(&path, None), &args(&["workspace", "3"])).unwrap_err();
+    assert!(matches!(err, Error::Protocol(_)), "{err:?}");
+
+    // AeroSpace restarts with a server that speaks the protocol (new socket file).
+    server.stop();
+    let server = FakeServer::start(&path, Spec::default());
+    let answer = run_with(&c, &args(&["workspace", "3"])).unwrap();
+    assert_eq!(answer.stdout, "ran workspace 3");
+    assert_eq!(server.connections(), 1);
+}

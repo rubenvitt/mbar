@@ -39,9 +39,10 @@ struct FakeAerospace {
 }
 
 /// AeroSpace's initial state after `subscribe` (it sends workspace, focus, monitor and
-/// mode right away).
+/// mode right away; the initial workspace event names the workspace as its own
+/// previous one).
 const INITIAL_EVENTS: [&str; 2] = [
-    r#"{"_event":"focused-workspace-changed","prevWorkspace":"","workspace":"1"}"#,
+    r#"{"_event":"focused-workspace-changed","prevWorkspace":"1","workspace":"1"}"#,
     r#"{"_event":"mode-changed","mode":"main"}"#,
 ];
 
@@ -397,23 +398,40 @@ fn wait_lines(path: &Path, pred: impl Fn(&[String]) -> bool) -> Vec<String> {
 
 // ---------------------------------------------------------------------------- tests
 
-/// `--query aerospace` alone starts the connection and then shows its status and the
-/// initial state AeroSpace sends after `subscribe`.
+/// `--query aerospace` never starts the connection (mbar.app polls it); the first
+/// subscription does, and the query then shows the status and the initial state
+/// AeroSpace sends after `subscribe`.
 #[test]
-fn query_starts_the_connection() {
+fn query_reports_and_a_subscription_connects() {
     let sb = Sandbox::new();
     let server = sb.server();
     let _d = sb.daemon();
     assert_eq!(server.subscribers(), 0, "connected before first use");
 
     let first = sb.query("aerospace");
-    assert!(first.get("connected").is_some(), "{first}");
+    assert_eq!(first["active"], "off", "{first}");
+    assert_eq!(first["connected"], "off", "{first}");
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(server.subscribers(), 0, "--query aerospace connected");
+
+    let out = sb.mbar(&[
+        "--add",
+        "item",
+        "a",
+        "left",
+        "--subscribe",
+        "a",
+        "aerospace_mode_change",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
     let v = sb.wait_for("aerospace", "connected with state", |v| {
         v["connected"] == "on" && v["focused_workspace"] == "1" && v["mode"] == "main"
     });
     assert_eq!(v["transport"], "socket");
+    assert_eq!(v["active"], "on");
     assert_eq!(v["server_version"], SERVER_VERSION);
     assert_eq!(v["error"], "");
+    assert_eq!(v["prev_workspace"], "", "initial event: prev == workspace");
     server.wait_subscribed();
     assert_eq!(server.subscribers(), 1, "one subscription");
 
@@ -421,8 +439,8 @@ fn query_starts_the_connection() {
     let v = sb.wait_for("aerospace", "monitor event", |v| v["monitor"] == 2);
     assert_eq!(v["focused_workspace"], "5");
     assert_eq!(v["prev_workspace"], "1");
-    // Asking again does not open a second subscription.
-    sb.query("aerospace");
+    // More subscriptions do not open a second stream.
+    sb.mbar(&["--subscribe", "a", "aerospace_workspace_change"]);
     thread::sleep(Duration::from_millis(100));
     assert_eq!(server.subscribers(), 1);
 }
@@ -461,10 +479,31 @@ fn shell_config_scripts_and_provider() {
     server.wait_subscribed();
     sb.wait_label("ws", "1");
     sb.wait_label("mode", "main");
+    // A shell loop subscribing after AeroSpace sent its state: the late item gets the
+    // stored state at once.
+    let out = sb.mbar(&[
+        "--add",
+        "item",
+        "space.late",
+        "left",
+        "--set",
+        "space.late",
+        &format!("script={}", plugin.display()),
+        "--subscribe",
+        "space.late",
+        "aerospace_workspace_change",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    wait_lines(&marker, |l| {
+        l.iter()
+            .any(|x| x.starts_with("space.late aerospace_workspace_change 1"))
+    });
     server.push(r#"{"_event":"focused-workspace-changed","prevWorkspace":"1","workspace":"2"}"#);
     wait_lines(&marker, |l| {
         l.iter()
             .any(|x| x == "space.ws aerospace_workspace_change 2 1")
+            && l.iter()
+                .any(|x| x == "space.late aerospace_workspace_change 2 1")
     });
     sb.wait_label("ws", "2");
     server.push(r#"{"_event":"mode-changed","mode":"service"}"#);
@@ -493,6 +532,7 @@ fn lua_config_on_run_query_and_reload() {
     std::fs::write(
         dir.join("init.lua"),
         r#"
+mbar.default({ updates = "when_shown", update_freq = 30 })
 mbar.add("item", "ws", { label = "none" })
 mbar.aerospace.on("workspace_change", function(env)
   mbar.set("ws", { label = env.FOCUSED_WORKSPACE .. "<" .. env.PREV_WORKSPACE })
@@ -533,9 +573,9 @@ end)
         ]
     );
 
-    // The carrier item exists, does not draw, and its handler gets the events.
-    let carrier = sb.query("__mbar_aerospace");
-    assert_eq!(carrier["geometry"]["drawing"], "off", "{carrier}");
+    // The handlers are item-less: no helper item in the bar.
+    let bar = stdout(&sb.mbar(&["--query", "bar"]));
+    assert!(!bar.contains("aerospace"), "{bar}");
     server.wait_subscribed();
     // The initial state (workspace 1) may or may not have reached the handlers yet.
     server.push(r#"{"_event":"focused-workspace-changed","prevWorkspace":"1","workspace":"2"}"#);
@@ -543,10 +583,15 @@ end)
     sb.wait_for("ws", "second handler", |v| v["icon"]["value"] == "i2");
     assert_eq!(label(&v), "2<1");
 
-    // --reload: fresh items and Lua state; the connection stays, the handlers are back.
+    // --reload: fresh items and Lua state; the connection stays, the handlers are back
+    // and get the stored state at once (AeroSpace does not resend it).
+    sb.mbar(&["--set", "ws", "label=manual", "icon=manual"]);
     let out = sb.mbar(&["--reload"]);
     assert!(out.status.success(), "{}", stderr(&out));
-    sb.wait_label("ws", "none");
+    sb.wait_label("ws", "2<1");
+    sb.wait_for("ws", "second handler after reload", |v| {
+        v["icon"]["value"] == "i2"
+    });
     sb.wait_label("run", "0:1,2,3,");
     assert_eq!(server.subscribers(), 1, "the connection survives --reload");
     server.push(r#"{"_event":"focused-workspace-changed","prevWorkspace":"2","workspace":"3"}"#);
@@ -590,7 +635,15 @@ fn reconnects_after_a_server_restart() {
     let sb = Sandbox::new();
     let mut server = sb.server();
     let _d = sb.daemon();
-    sb.query("aerospace");
+    sb.mbar(&[
+        "--add",
+        "item",
+        "a",
+        "left",
+        "--subscribe",
+        "a",
+        "aerospace_mode_change",
+    ]);
     sb.wait_for("aerospace", "connected", |v| v["connected"] == "on");
     server.wait_subscribed();
 
@@ -610,4 +663,42 @@ fn reconnects_after_a_server_restart() {
     sb.wait_for("aerospace", "event after reconnect", |v| {
         v["focused_workspace"] == "4"
     });
+}
+
+/// `updates=off` as the default item does not affect `mbar.aerospace.on`, and after
+/// `--reload` the re-registered handler gets the current state right away (AeroSpace
+/// does not resend it on the surviving connection).
+#[test]
+fn lua_on_with_updates_off_and_state_after_reload() {
+    let sb = Sandbox::new();
+    let server = sb.server();
+    let dir = sb.config_dir();
+    std::fs::write(
+        dir.join("init.lua"),
+        r#"
+mbar.default({ updates = false })
+mbar.add("item", "ws", { label = "none" })
+mbar.aerospace.on("workspace_change", function(env)
+  mbar.set("ws", { label = "ws" .. env.FOCUSED_WORKSPACE })
+end)
+mbar.aerospace.on("mode_change", function(env)
+  mbar.set("ws", { icon = env.MODE })
+end)
+"#,
+    )
+    .unwrap();
+    let _d = sb.daemon();
+    sb.wait_label("ws", "ws1");
+    sb.wait_for("ws", "mode", |v| v["icon"]["value"] == "main");
+    server.wait_subscribed();
+    server.push(r#"{"_event":"focused-workspace-changed","prevWorkspace":"1","workspace":"2"}"#);
+    sb.wait_label("ws", "ws2");
+
+    let out = sb.mbar(&["--reload"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    // The fresh item starts as "none"; the handler registered by the re-run config is
+    // called with the stored state without any new AeroSpace event.
+    sb.wait_label("ws", "ws2");
+    sb.wait_for("ws", "mode after reload", |v| v["icon"]["value"] == "main");
+    assert_eq!(server.subscribers(), 1);
 }

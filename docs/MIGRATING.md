@@ -547,12 +547,21 @@ process starts at all.
 
 1. Remove the `exec-on-workspace-change` line from `~/.aerospace.toml` (or
    `~/.config/aerospace/aerospace.toml`). If it stays, items get
-   `aerospace_workspace_change` twice. That is harmless, but costs the forks.
-   The setup in `mbar.app` lists these lines.
+   `aerospace_workspace_change` twice, and the forked trigger arrives 10–50 ms
+   after mbar's own event: after quick switches it can overwrite the newer
+   event, and the wrong workspace stays highlighted. The setup in `mbar.app`
+   lists these lines. The same applies to triggers of the other built-in names
+   (`aerospace_mode_change`, `aerospace_focus_change`,
+   `aerospace_monitor_change`, `aerospace_window_detected`,
+   `aerospace_binding_triggered`): if your config already fires custom events
+   with these names, for example from `on-mode-changed` or `on-focus-changed`,
+   remove those triggers too, or the items get each event twice.
 2. Keep your `sketchybarrc`. The AeroSpace items and their plugin scripts keep
    working unchanged: `aerospace_workspace_change` is built in and sets
-   `FOCUSED_WORKSPACE`, as the trigger did. `--add event
-   aerospace_workspace_change` is accepted and does nothing.
+   `FOCUSED_WORKSPACE` (and `AEROSPACE_FOCUSED_WORKSPACE`), as the trigger did.
+   `--add event aerospace_workspace_change` is accepted; it only registers the
+   name, which is harmless. Items that subscribe after mbar connected (the
+   `for sid …` loop) get the current workspace right away.
 3. Optionally, move the items to Lua (below): handlers then run inside mbar,
    and `mbar.aerospace.run` replaces `click_script="aerospace workspace …"`.
 
@@ -640,11 +649,13 @@ connected and how (socket or CLI fallback).
 ### Notes
 
 - mbar connects only when the config uses AeroSpace: an `aerospace_*`
-  subscription, `provider=aerospace`, `--query aerospace` or `mbar.aerospace`.
+  subscription, `provider=aerospace` or `mbar.aerospace`. `--query aerospace`
+  only reports (`"active": "off"` until one of these happened).
 - When AeroSpace restarts, mbar reconnects by itself (backoff up to 30 s).
 - AeroSpace versions without the socket protocol work through the
   `aerospace` CLI (`aerospace subscribe --all`). Versions whose CLI has no
   `subscribe` either get no events; keep the `exec-on-workspace-change` line
-  there.
+  there. While mbar is not connected, that trigger also updates the focused
+  workspace mbar knows, so `provider=aerospace` and `--query aerospace` work.
 - Other `exec-on-workspace-change` commands (not the SketchyBar trigger) are
   not affected. Keep them.
