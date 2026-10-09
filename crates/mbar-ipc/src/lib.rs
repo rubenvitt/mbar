@@ -258,6 +258,20 @@ pub fn try_send(bar_name: &str, args: &[String]) -> Result<String, SendError> {
     socket::exchange(&mut stream, &payload).map_err(SendError::Failed)
 }
 
+/// Whether the bootstrap service `name` is registered, i.e. some process serves it
+/// (e.g. JankyBorders' `git.felix.borders`). One `bootstrap_look_up`: cheap and never
+/// blocks. Always `false` off macOS (no bootstrap server).
+#[cfg(target_os = "macos")]
+pub fn service_registered(name: &str) -> bool {
+    mach::is_registered(name)
+}
+
+/// Off macOS there is no bootstrap server: nothing is registered.
+#[cfg(not(target_os = "macos"))]
+pub fn service_registered(_name: &str) -> bool {
+    false
+}
+
 /// Whether a daemon serves `bar_name`: its mach service is registered (macOS) or its
 /// socket accepts a connection from this user. Sends no request (the daemon logs the
 /// empty connection at debug level, like the probe in [`socket::Server::bind`]).
@@ -307,6 +321,14 @@ mod tests {
         assert_eq!(program_name("/x/bottom_bar"), "bottom_bar");
         assert_eq!(program_name(""), "mbar");
         assert_eq!(bar_name_from_argv0(""), "mbar");
+    }
+
+    /// Unregistered services report `false` (always, off macOS); a NUL in the name is no
+    /// valid service name rather than a panic.
+    #[test]
+    fn unregistered_services() {
+        assert!(!service_registered("dev.rubeen.mbar-test.not-registered"));
+        assert!(!service_registered("bad\0name"));
     }
 
     #[test]
