@@ -11,6 +11,11 @@
 //! * numbers keep their integer form when integral (`14.0` → `14`);
 //! * numbers under a color key (`color`, `*_color`) become `0x%08x`;
 //! * keys are emitted in sorted order so output is deterministic.
+//!
+//! `mbar.borders` uses [`flatten_borders`] instead: its values follow the
+//! JankyBorders grammar (design doc `2026-10-09-borders-design.md` §4,
+//! `docs/spec/borders.md` §2.3), so color tables compile to `glow(…)` /
+//! `gradient(…)` strings and lists become comma-joined values.
 
 use mlua::{Function, Result, Table, Value};
 
@@ -137,4 +142,106 @@ fn flatten_into(
         }
     }
     Ok(())
+}
+
+/// Keys of `mbar.borders` whose list value is joined with `,` (spec BR-PARSE-08).
+const BORDER_LIST_KEYS: [&str; 2] = ["blacklist", "whitelist"];
+
+/// A border color component: a number (`0x%08x`) or a string, verbatim.
+fn border_color_part(what: &str, v: &Value) -> Result<String> {
+    match v {
+        Value::Integer(_) | Value::Number(_) | Value::String(_) => format_scalar("color", v),
+        other => Err(mlua::Error::runtime(format!(
+            "mbar.borders: expected a color for '{what}', got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// Compiles a color table to the JankyBorders color syntax (spec BR-PARSE-05):
+/// `{ glow = c }` → `glow(c)`,
+/// `{ gradient = { top_left = a, bottom_right = b } }` →
+/// `gradient(top_left=a,bottom_right=b)`, and the `top_right`/`bottom_left` form.
+fn border_color_table(key: &str, t: &Table) -> Result<String> {
+    let bad = || {
+        mlua::Error::runtime(format!(
+            "mbar.borders: '{key}' must be a color, {{ glow = <color> }} or \
+             {{ gradient = {{ top_left = <color>, bottom_right = <color> }} }} \
+             (or top_right/bottom_left)"
+        ))
+    };
+    let (positional, named) = split_table(t)?;
+    if !positional.is_empty() || named.len() != 1 {
+        return Err(bad());
+    }
+    let (kind, value) = &named[0];
+    match (kind.as_str(), value) {
+        ("glow", v) => Ok(format!(
+            "glow({})",
+            border_color_part(&format!("{key}.glow"), v)?
+        )),
+        ("gradient", Value::Table(g)) => {
+            let (positional, named) = split_table(g)?;
+            if !positional.is_empty() || named.len() != 2 {
+                return Err(bad());
+            }
+            let get = |name: &str| named.iter().find(|(k, _)| k == name).map(|(_, v)| v);
+            for (first, second) in [("top_left", "bottom_right"), ("top_right", "bottom_left")] {
+                if let (Some(a), Some(b)) = (get(first), get(second)) {
+                    let a = border_color_part(&format!("{key}.gradient.{first}"), a)?;
+                    let b = border_color_part(&format!("{key}.gradient.{second}"), b)?;
+                    return Ok(format!("gradient({first}={a},{second}={b})"));
+                }
+            }
+            Err(bad())
+        }
+        _ => Err(bad()),
+    }
+}
+
+/// Flattens the property table of `mbar.borders` into `key=value` tokens
+/// (design doc §4). Scalars follow [`format_scalar`] (booleans `on`/`off`,
+/// numbers under `*_color` as `0x%08x`, integral widths without a decimal
+/// point); color keys also take glow/gradient tables; `blacklist`/`whitelist`
+/// take lists (joined with `,`; an empty list clears the filter); `apply_to`
+/// is sent as JankyBorders' `apply-to`. Other tables and functions are errors.
+pub(crate) fn flatten_borders(props: &Table) -> Result<Vec<String>> {
+    let (positional, named) = split_table(props)?;
+    if !positional.is_empty() {
+        return Err(mlua::Error::runtime(
+            "mbar.borders: property tables need named keys (got a list at the top level)",
+        ));
+    }
+    let mut out = Vec::with_capacity(named.len());
+    for (k, v) in named {
+        let key = if k == "apply_to" {
+            "apply-to".to_string()
+        } else {
+            k
+        };
+        let value = match &v {
+            Value::Table(t) if is_color_key(&key) => border_color_table(&key, t)?,
+            Value::Table(t) if BORDER_LIST_KEYS.contains(&key.as_str()) => {
+                let (positional, named) = split_table(t)?;
+                if !named.is_empty() {
+                    return Err(mlua::Error::runtime(format!(
+                        "mbar.borders: '{key}' must be a list of process names"
+                    )));
+                }
+                positional
+                    .iter()
+                    .map(|v| format_scalar(&key, v))
+                    .collect::<Result<Vec<_>>>()?
+                    .join(",")
+            }
+            Value::Table(_) => {
+                return Err(mlua::Error::runtime(format!(
+                    "mbar.borders: property '{key}' does not take a table"
+                )))
+            }
+            other => format_scalar(&key, other)?,
+        };
+        out.push(format!("{key}={value}"));
+    }
+    Ok(out)
 }

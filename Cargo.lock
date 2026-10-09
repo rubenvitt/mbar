@@ -209,6 +209,7 @@ name = "mbar-lua"
 version = "0.3.3"
 dependencies = [
  "log",
+ "mbar-core",
  "mlua",
  "serde_json",
 ]

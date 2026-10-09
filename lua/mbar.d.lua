@@ -252,6 +252,25 @@
 ---@field image? string|mbar.ImageProps
 ---@field shadow? mbar.Bool
 
+---A window border color (JankyBorders syntax): a solid `0xAARRGGBB`, a glow,
+---or a two-color gradient. Strings are sent verbatim (`"glow(0xffe1e3e4)"`).
+---@alias mbar.BorderColor mbar.Color|{ glow: mbar.Color }|{ gradient: { top_left: mbar.Color, bottom_right: mbar.Color } }|{ gradient: { top_right: mbar.Color, bottom_left: mbar.Color } }
+
+---Window border settings (`--borders`, the JankyBorders options).
+---@class mbar.BordersProps
+---@field drawing? mbar.Bool Borders are off until the first `mbar.borders` call
+---@field active_color? mbar.BorderColor Focused window (default 0xffe1e3e4)
+---@field inactive_color? mbar.BorderColor Other windows (default 0x00000000)
+---@field background_color? mbar.BorderColor Fill behind windows (default 0x00000000: off)
+---@field width? number Border width in points (default 4.0)
+---@field style? "round"|"square"|"uniform"
+---@field order? "above"|"below"
+---@field hidpi? boolean
+---@field ax_focus? boolean Track focus through Accessibility (default: on when trusted)
+---@field blacklist? string[]|string Process names that get no border
+---@field whitelist? string[]|string Only these process names get a border
+---@field apply_to? integer Window id: the other keys apply to this window only (sent as `apply-to`)
+
 ------------------------------------------------------------------------------
 -- Item objects
 ------------------------------------------------------------------------------
@@ -323,6 +342,11 @@ function mbar.set(name, props) end
 ---Sets bar properties.
 ---@param props mbar.BarProps
 function mbar.bar(props) end
+
+---Configures the window borders (`--borders ...`, the JankyBorders options).
+---Color tables become `glow(...)` / `gradient(...)`, lists join with `,`.
+---@param props mbar.BordersProps
+function mbar.borders(props) end
 
 ---Sets defaults for items added afterwards.
 ---@param props mbar.ItemProps
