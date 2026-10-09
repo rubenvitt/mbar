@@ -1,4 +1,5 @@
-//! System integration: displays, spaces, events, mouse, menus, aliases, providers, mach.
+//! System integration: displays, spaces, window borders, events, mouse, menus, aliases,
+//! providers, mach.
 //!
 //! Every OS source reports through one [`Sink`]. A sink may be called from **any** thread
 //! (most sources call it on the main thread: NSWorkspace/distributed notifications,
@@ -17,11 +18,13 @@ use objc2_core_graphics::CGImage;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub(crate) mod notify;
 pub(crate) mod skylight;
 pub(crate) mod util;
 
 pub mod alias;
 pub mod apps;
+pub mod borders;
 pub mod displays;
 pub mod events;
 pub mod hotload;

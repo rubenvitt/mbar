@@ -1,5 +1,8 @@
-//! System: daemon status and start, reload, native menu bar auto-hide, permission
-//! hints and launch at login.
+//! System: daemon status and start, reload, native menu bar auto-hide, window borders
+//! (`--query borders` / `--borders drawing=…`, design doc
+//! `docs/superpowers/specs/2026-10-09-borders-design.md` §5; plus stopping and removing
+//! a Homebrew JankyBorders that is still there after setup), permission hints and
+//! launch at login.
 
 use std::time::Duration;
 
@@ -12,6 +15,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::*;
 use mbar_ui_model::ipc::DaemonStatus;
+use mbar_ui_model::model::BordersInfo;
+use mbar_ui_model::onboarding as ob;
 use mbar_ui_model::system::{
     self as sys, Permissions, ACCESSIBILITY_SETTINGS_URL, SCREEN_RECORDING_SETTINGS_URL,
 };
@@ -59,6 +64,13 @@ pub struct SystemView {
     reloading: bool,
     permissions: Option<Permissions>,
     menubar_hidden: Option<bool>,
+    /// `--query borders`; `None` until read or while the daemon is gone.
+    borders: Option<Result<BordersInfo, String>>,
+    reading_borders: bool,
+    /// Homebrew state, for JankyBorders left over after setup (setup does not run
+    /// again once completed).
+    brew: ob::BrewState,
+    removing_brew_borders: bool,
     launch_agent: bool,
     /// Running from mbar.app on macOS: login item, updates and setup instead of the
     /// source-build hints.
@@ -96,6 +108,10 @@ impl SystemView {
             reloading: false,
             permissions: None,
             menubar_hidden: None,
+            borders: None,
+            reading_borders: false,
+            brew: ob::BrewState::default(),
+            removing_brew_borders: false,
             launch_agent: sys::launch_agent_path().is_some_and(|p| p.exists()),
             #[cfg(target_os = "macos")]
             app: sys::current_bundle().map(|bundle| AppState {
@@ -108,6 +124,7 @@ impl SystemView {
         };
         view.check_status(cx);
         view.read_menubar(cx);
+        view.read_brew(cx);
         view
     }
 
@@ -127,10 +144,12 @@ impl SystemView {
                 this.checking = false;
                 let became_connected =
                     status == DaemonStatus::Connected && this.status != DaemonStatus::Connected;
+                let connected = status == DaemonStatus::Connected;
                 if status != this.status {
-                    if status != DaemonStatus::Connected {
+                    if !connected {
                         // Probed through the daemon; stale once it is gone.
                         this.permissions = None;
+                        this.borders = None;
                     }
                     this.status = status;
                     cx.notify();
@@ -139,7 +158,86 @@ impl SystemView {
                     this.starting = false;
                     this.probe_permissions(cx);
                 }
+                // A reload or a `borders …` call elsewhere changes it: follow the poll.
+                if connected {
+                    this.read_borders(cx);
+                }
                 None
+            },
+        );
+    }
+
+    fn read_borders(&mut self, cx: &mut Context<Self>) {
+        if self.reading_borders {
+            return;
+        }
+        self.reading_borders = true;
+        self.shared.spawn_blocking(
+            cx,
+            |client| client.query_borders().map_err(|e| e.to_string()),
+            |this, borders, cx| {
+                this.reading_borders = false;
+                if this.borders.as_ref() != Some(&borders) {
+                    this.borders = Some(borders);
+                    cx.notify();
+                }
+                None
+            },
+        );
+    }
+
+    fn set_borders(&mut self, on: bool, cx: &mut Context<Self>) {
+        // Optimistic; re-read the real state afterwards.
+        if let Some(Ok(b)) = &mut self.borders {
+            b.drawing = on;
+        }
+        cx.notify();
+        self.shared.spawn_blocking(
+            cx,
+            move |client| client.set_borders_drawing(on),
+            |this, result, cx| {
+                this.read_borders(cx);
+                result
+                    .err()
+                    .map(|e| Notification::error(e.to_string()).title("Window borders"))
+            },
+        );
+    }
+
+    fn read_brew(&mut self, cx: &mut Context<Self>) {
+        self.shared.spawn_blocking(
+            cx,
+            |_| ob::detect_brew(ob::find_brew().as_deref()),
+            |this, brew, cx| {
+                if this.brew != brew {
+                    this.brew = brew;
+                    cx.notify();
+                }
+                None
+            },
+        );
+    }
+
+    /// The JankyBorders part of the setup's cleanup: `brew services stop borders`,
+    /// `brew uninstall borders`.
+    fn remove_brew_borders(&mut self, cx: &mut Context<Self>) {
+        self.removing_brew_borders = true;
+        cx.notify();
+        let brew = self.brew.clone();
+        self.shared.spawn_blocking(
+            cx,
+            move |_| {
+                let cmds = ob::borders_cleanup_commands(&brew, ob::find_brew().as_deref(), true);
+                ob::run_commands(&cmds)
+            },
+            |this, result, cx| {
+                this.removing_brew_borders = false;
+                this.read_brew(cx);
+                cx.notify();
+                Some(match result {
+                    Ok(_) => Notification::success("Stopped and removed JankyBorders"),
+                    Err(e) => Notification::error(e).title("JankyBorders"),
+                })
             },
         );
     }
@@ -311,7 +409,7 @@ impl SystemView {
             PathsD::Stale(old) => (format!("/etc/paths.d/mbar is stale ({old})"), true),
         };
         let command_line = section("Command line", cx).child(setting_row(
-            "`mbar` and `sketchybar` in new terminals",
+            "`mbar`, `sketchybar` and `borders` in new terminals",
             paths_text,
             Button::new("fix-paths-d")
                 .small()
@@ -453,6 +551,69 @@ impl Render for SystemView {
             cx,
         ));
 
+        let borders_info = match &self.borders {
+            Some(Ok(b)) => Some(b),
+            _ => None,
+        };
+        let borders_status = match &self.borders {
+            Some(Ok(b)) => b.summary(),
+            Some(Err(e)) => format!("Unavailable: {e}"),
+            None if connected => "Reading…".to_string(),
+            None => "mbar is not running".to_string(),
+        };
+        let brew_borders = ob::brew_borders_warning(&self.brew).map(|warning| {
+            h_flex()
+                .w_full()
+                .gap_3()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(cx.theme().red)
+                        .whitespace_normal()
+                        .child(warning),
+                )
+                .child(
+                    Button::new("remove-brew-borders")
+                        .small()
+                        .outline()
+                        .label("Stop and remove JankyBorders")
+                        .loading(self.removing_brew_borders)
+                        .disabled(self.removing_brew_borders)
+                        .on_click(cx.listener(|this, _, _, cx| this.remove_brew_borders(cx))),
+                )
+        });
+        let borders = section("Window borders", cx)
+            .children(brew_borders)
+            .child(setting_row(
+                "Draw borders around windows",
+                "Sends `--borders drawing=on|off`; the focused window gets the active color.",
+                Switch::new("borders-drawing")
+                    .checked(borders_info.is_some_and(|b| b.drawing))
+                    .disabled(!connected || borders_info.is_none())
+                    .on_change(cx.listener(|this, on: &bool, _, cx| this.set_borders(*on, cx))),
+                cx,
+            ))
+            .child(
+                div()
+                    .text_xs()
+                    .font_family("Menlo")
+                    .text_color(cx.theme().muted_foreground)
+                    .whitespace_normal()
+                    .child(borders_status),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .whitespace_normal()
+                    .child(
+                        "Colors, width and style come from `mbar --borders …`, \
+                         `mbar.borders{}` in init.lua or your JankyBorders bordersrc.",
+                    ),
+            );
+
         let perms = self.permissions.as_ref();
         let permissions = section("Permissions", cx)
             .child(permission_row(
@@ -525,6 +686,7 @@ impl Render for SystemView {
                     .gap_3()
                     .child(daemon)
                     .child(menubar)
+                    .child(borders)
                     .child(permissions)
                     .children(tail),
             )

@@ -11,6 +11,10 @@ for macOS. Goals, in priority order:
    mbar has its **own** IPC identity: mach bootstrap name `dev.rubeen.<bar_name>`
    (default bar name `mbar` → `dev.rubeen.mbar`); it does not register SketchyBar's
    `git.felix.*` name.
+   The same holds for [JankyBorders](https://github.com/FelixKratz/JankyBorders)
+   (`borders`): mbar draws the window borders itself, and `borders …` calls reach it
+   through a `borders -> mbar` link (`docs/spec/borders.md`). `git.felix.borders` is not
+   registered either.
 2. **Faster**: GPU (Metal) rendering, damage-driven redraw, frame-paced animations,
    cached text runs, coalesced updates, native data providers instead of
    fork/exec'ing shell scripts every few seconds.
@@ -20,7 +24,8 @@ for macOS. Goals, in priority order:
 4. **Highly customizable**: every SketchyBar property plus the extensions documented in
    `docs/EXTENSIONS.md`.
 
-The behavioural reference is `docs/spec/*.md` (extracted from the SketchyBar C source).
+The behavioural reference is `docs/spec/*.md` (extracted from the SketchyBar C source;
+`docs/spec/borders.md` from the JankyBorders C source).
 
 ## Crates
 
@@ -57,6 +62,7 @@ Pure logic. No Apple types, no threads, no I/O except what is injected.
 | `event` | built-in + custom events, subscriptions, `EventInfo` |
 | `script` | env var construction for scripts |
 | `provider` | native providers (clock, cpu, memory, battery, ...) formatting |
+| `borders` | window-border configuration (`--borders`, `--query borders`): JankyBorders' argument parser, settings, `apply-to` overrides, update masks |
 | `platform` | the traits/enums the core uses to talk to a platform |
 | `runtime` | `Runtime`: owns all state, consumes `Input`, emits `Effect`s |
 
@@ -84,6 +90,38 @@ Pure logic. No Apple types, no threads, no I/O except what is injected.
   `Runtime::next_deadline_paced(FRAME_INTERVAL)` (60 Hz) so it does not spin.
 * Everything is single-threaded on the main thread; background threads (IPC server,
   script reaper, providers) only post `Input`s through a `Waker`.
+
+#### Window borders
+
+The core owns only the borders **configuration**. The platform owns the tracked windows
+and their border windows:
+
+```
+ client (`mbar --borders …` / `borders …`) ──IPC──▶ Runtime (mbar-core)
+                                                    │ borders::BordersState in the model
+                                                    ▼
+                         Effect::Platform(PlatformRequest::SetBorders(Box<BordersUpdate>))
+                                                    │
+                    headless: log + ignore          ▼
+                    macOS: Services::execute ──▶ sys::borders::configure()
+                                                    │ main thread
+                    SkyLight notify procs ───▶ sys::notify (shared dispatcher)
+                                                    ├──▶ sys::spaces
+                                                    └──▶ sys::borders (create/destroy/move/
+                                                         resize/order/focus/space change)
+```
+
+* One `SetBorders` per message that changed something (none from `--reload`: the
+  configuration survives it). It carries the complete settings,
+  the `apply-to` overrides, `drawing` and an update mask (redraw focused / unfocused /
+  all, recreate all).
+* Window move, resize and order events (hundreds per second while dragging) are handled
+  by `sys::borders` in the notify proc on the main thread. They never reach the Runtime.
+* `sys::notify` registers **one** SkyLight notify proc per event id and fans out to
+  `spaces` and `borders`. It also keeps one shared `SLSRequestNotificationsForWindows`
+  set (the union of all owners), because that call replaces the set instead of adding
+  to it.
+* Display reconfiguration and wake recreate all borders; shutdown destroys them.
 
 ### mbar-ipc
 
@@ -116,6 +154,8 @@ Pure logic. No Apple types, no threads, no I/O except what is injected.
 | `image` | ImageIO/NSWorkspace image loading: files, `app.<bundle>`, app icons, media artwork |
 | `displays` | NSScreen/CGDisplay enumeration, notch detection, display change callbacks |
 | `spaces` | SkyLight private API: spaces per display, active space, windows per space |
+| `notify` | the shared SkyLight notify proc and window-notification set, dispatching to `spaces` and `borders` |
+| `borders` | JankyBorders-style window borders: SkyLight/CoreGraphics FFI (missing symbols disable borders with one warning), one border window per tracked window, drawing (solid, glow, gradient, background, styles), focus detection (SkyLight and AX paths) |
 | `events` | NSWorkspace/Distributed notifications, CoreAudio volume, IOKit power + brightness, CoreWLAN wifi, MediaRemote, sleep/wake |
 | `mouse` | tracking areas + global monitors → `Input::Mouse` |
 | `alias` | menu-extra discovery (CGWindowList) and capture |
@@ -128,6 +168,17 @@ Pure logic. No Apple types, no threads, no I/O except what is injected.
 * `mbar [--config <file>]` → daemon. `mbar --set ...` → client (sends argv, prints response).
 * When invoked as `sketchybar` (symlink) it behaves identically, so plugins calling
   `sketchybar --set` keep working.
+* When invoked as `borders` (symlink) it is a JankyBorders-compatible client: `-v` prints
+  `borders-v1.9.0`; the arguments are checked with the core parser, invalid ones print
+  JankyBorders' `[?]` lines, and the valid ones go to the bar `mbar` as `--borders …`.
+  It retries for up to 5 s while mbar is not reachable and never starts a daemon.
+* Together with its config, the default bar `mbar` runs `~/.config/borders/bordersrc`
+  (else `~/.bordersrc`), on start and on every `--reload`. It is started right after the
+  config is spawned: with a shell config both run concurrently; a Lua config runs
+  synchronously, so there `bordersrc` runs after it. On macOS it is skipped (with a log
+  line) while a foreign JankyBorders holds `git.felix.borders`.
+* The borders configuration in the model survives `--reload` and hotload, like the
+  separate JankyBorders process did; the re-run config and `bordersrc` apply on top.
 * Config lookup: `--config`, `$XDG_CONFIG_HOME/mbar/mbarrc`, `~/.config/mbar/mbarrc`,
   then SketchyBar locations `$XDG_CONFIG_HOME/sketchybar/sketchybarrc`, `~/.config/sketchybar/sketchybarrc`.
 * `SIGTERM`/`SIGINT`/`SIGHUP` end the daemon like `--exit` (self-pipe → `Event::Terminate`

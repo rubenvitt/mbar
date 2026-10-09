@@ -18,7 +18,8 @@ pub mod mach;
 use std::path::PathBuf;
 
 /// Default bar name. A binary invoked as `sketchybar` also maps to this name, so
-/// SketchyBar plugins reach mbar through a `sketchybar -> mbar` symlink.
+/// SketchyBar plugins reach mbar through a `sketchybar -> mbar` symlink; so does
+/// `borders` (JankyBorders' client, borders design §2), which never runs as a daemon.
 pub const DEFAULT_BAR_NAME: &str = "mbar";
 
 /// Prefix of the mach bootstrap service name.
@@ -38,11 +39,11 @@ pub fn program_name(argv0: &str) -> String {
 }
 
 /// Derives the bar name (IPC identity: socket, lock file, mach service, config
-/// directory) from `argv[0]` (basename). `sketchybar` maps to `mbar`; any other name
-/// (e.g. a `bottom_bar -> mbar` symlink) runs an independent instance.
+/// directory) from `argv[0]` (basename). `sketchybar` and `borders` map to `mbar`; any
+/// other name (e.g. a `bottom_bar -> mbar` symlink) runs an independent instance.
 pub fn bar_name_from_argv0(argv0: &str) -> String {
     match program_name(argv0).as_str() {
-        "sketchybar" | "mbar" => DEFAULT_BAR_NAME.to_string(),
+        "sketchybar" | "borders" | "mbar" => DEFAULT_BAR_NAME.to_string(),
         other => other.to_string(),
     }
 }
@@ -210,14 +211,78 @@ pub fn is_error_response(rsp: &str) -> bool {
 /// Sends a request to a running daemon using the best available transport and
 /// returns the response text.
 pub fn send(bar_name: &str, args: &[String]) -> std::io::Result<String> {
+    try_send(bar_name, args).map_err(SendError::into_io)
+}
+
+/// Why [`try_send`] got no response.
+#[derive(Debug)]
+pub enum SendError {
+    /// No daemon serves the bar (no mach service, the socket connect failed): nothing
+    /// was delivered, so the request may be sent again.
+    NotRunning(std::io::Error),
+    /// A daemon accepted the connection but the exchange failed afterwards; the request
+    /// may have been delivered.
+    Failed(std::io::Error),
+}
+
+impl SendError {
+    pub fn into_io(self) -> std::io::Error {
+        match self {
+            SendError::NotRunning(e) | SendError::Failed(e) => e,
+        }
+    }
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SendError::NotRunning(e) => write!(f, "daemon not running: {e}"),
+            SendError::Failed(e) => write!(f, "request failed: {e}"),
+        }
+    }
+}
+
+/// [`send`] that tells "no daemon" apart from a failed exchange, for clients that wait
+/// for the daemon to come up (the `borders` client, borders design §2).
+pub fn try_send(bar_name: &str, args: &[String]) -> Result<String, SendError> {
     let payload = encode_args(args);
     #[cfg(target_os = "macos")]
     {
+        // `None` only when nothing was sent (service not registered, send failed); a
+        // reply that does not arrive after the send is `Some("")`.
         if let Some(rsp) = mach::send(&mach_service_name(bar_name), &payload) {
             return Ok(rsp);
         }
     }
-    socket::send(&socket_path(bar_name), &payload)
+    let mut stream = socket::connect(&socket_path(bar_name)).map_err(SendError::NotRunning)?;
+    socket::exchange(&mut stream, &payload).map_err(SendError::Failed)
+}
+
+/// Whether the bootstrap service `name` is registered, i.e. some process serves it
+/// (e.g. JankyBorders' `git.felix.borders`). One `bootstrap_look_up`: cheap and never
+/// blocks. Always `false` off macOS (no bootstrap server).
+#[cfg(target_os = "macos")]
+pub fn service_registered(name: &str) -> bool {
+    mach::is_registered(name)
+}
+
+/// Off macOS there is no bootstrap server: nothing is registered.
+#[cfg(not(target_os = "macos"))]
+pub fn service_registered(_name: &str) -> bool {
+    false
+}
+
+/// Whether a daemon serves `bar_name`: its mach service is registered (macOS) or its
+/// socket accepts a connection from this user. Sends no request (the daemon logs the
+/// empty connection at debug level, like the probe in [`socket::Server::bind`]).
+pub fn is_running(bar_name: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        if mach::is_registered(&mach_service_name(bar_name)) {
+            return true;
+        }
+    }
+    socket::connect(&socket_path(bar_name)).is_ok()
 }
 
 #[cfg(test)]
@@ -243,6 +308,11 @@ mod tests {
     fn names() {
         assert_eq!(bar_name_from_argv0("/usr/local/bin/sketchybar"), "mbar");
         assert_eq!(bar_name_from_argv0("mbar"), "mbar");
+        // `borders -> mbar` (JankyBorders' client) talks to the default bar; `BAR_NAME`
+        // keeps `borders` (borders design §2).
+        assert_eq!(bar_name_from_argv0("/opt/bin/borders"), "mbar");
+        assert_eq!(bar_name_from_argv0("borders"), "mbar");
+        assert_eq!(program_name("/opt/bin/borders"), "borders");
         assert_eq!(bar_name_from_argv0("/x/bottom_bar"), "bottom_bar");
         assert_eq!(mach_service_name("mbar"), "dev.rubeen.mbar");
         // `BAR_NAME` keeps the invoked name (`cli.md` §1.1 step 3).
@@ -251,6 +321,14 @@ mod tests {
         assert_eq!(program_name("/x/bottom_bar"), "bottom_bar");
         assert_eq!(program_name(""), "mbar");
         assert_eq!(bar_name_from_argv0(""), "mbar");
+    }
+
+    /// Unregistered services report `false` (always, off macOS); a NUL in the name is no
+    /// valid service name rather than a panic.
+    #[test]
+    fn unregistered_services() {
+        assert!(!service_registered("dev.rubeen.mbar-test.not-registered"));
+        assert!(!service_registered("bad\0name"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! End-to-end tests of the `mbar` binary: a headless daemon in an isolated `HOME` /
-//! `TMPDIR`, driven by client invocations of the same binary (also through a
-//! `sketchybar` symlink).
+//! `TMPDIR`, driven by client invocations of the same binary (also through the
+//! `sketchybar` and `borders` symlinks).
 
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
@@ -15,8 +15,9 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-/// An isolated environment: `$ROOT/{home,tmp,bin}`; `bin` holds `mbar` and `sketchybar`
-/// symlinks to the binary under test and is first in `PATH` (for config scripts).
+/// An isolated environment: `$ROOT/{home,tmp,bin}`; `bin` holds `mbar`, `sketchybar` and
+/// `borders` symlinks to the binary under test and is first in `PATH` (for config
+/// scripts).
 struct Sandbox {
     root: PathBuf,
     home: PathBuf,
@@ -39,6 +40,7 @@ impl Sandbox {
         }
         std::os::unix::fs::symlink(EXE, bin.join("mbar")).unwrap();
         std::os::unix::fs::symlink(EXE, bin.join("sketchybar")).unwrap();
+        std::os::unix::fs::symlink(EXE, bin.join("borders")).unwrap();
         Sandbox {
             root,
             home,
@@ -120,6 +122,10 @@ impl Sandbox {
 
     fn sketchybar(&self, args: &[&str]) -> Output {
         self.run(&self.bin.join("sketchybar"), args)
+    }
+
+    fn borders(&self, args: &[&str]) -> Output {
+        self.run(&self.bin.join("borders"), args)
     }
 
     /// `--query <item>` parsed as JSON.
@@ -492,6 +498,179 @@ mbar.delay(0.1, function() mbar.set("lua", { icon = "delayed" }) end)
     let out = sb.mbar(&["--trigger", "ping", "MSG=pong"]);
     assert!(out.status.success(), "{}", stderr(&out));
     sb.wait_for("lua", "handler result", |v| label(v) == "got:pong");
+}
+
+// ---------------------------------------------------------------------------- borders
+
+/// Borders design §2: `borders <args>` reaches the running default bar and exits 0
+/// (whatever the daemon answers); without a valid argument it reports the running
+/// instance instead of starting one.
+#[test]
+fn borders_symlink_reaches_running_daemon() {
+    let sb = Sandbox::new();
+    let mut d = sb.daemon();
+    let out = sb.borders(&["width=5.0"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(out.stdout.is_empty(), "{}", stdout(&out));
+
+    let already = "A borders instance is already running and no valid arguments where \
+                   provided. To modify properties of the running instance provide them as \
+                   arguments.\n";
+    let out = sb.borders(&[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty(), "{}", stdout(&out));
+    assert_eq!(stderr(&out), already);
+    let out = sb.borders(&["bogus"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(stdout(&out), "[?] Borders: Invalid argument 'bogus'\n");
+    assert_eq!(stderr(&out), already);
+
+    // Still the one daemon, untouched by the probes.
+    let out = sb.mbar(&["--query", "bar"]);
+    assert!(out.status.success() && stdout(&out).starts_with('{'));
+    assert!(
+        d.child.try_wait().unwrap().is_none(),
+        "{}",
+        d.kill_and_output()
+    );
+}
+
+/// End to end: `borders` and `mbar --borders` change the configuration that
+/// `--query borders` reports; errors of the `--borders` domain follow mbar's `[!]` rule.
+#[test]
+fn borders_configuration_round_trip() {
+    let sb = Sandbox::new();
+    let _d = sb.daemon();
+    let v = sb.query("borders");
+    assert_eq!(v["drawing"], "off");
+    assert_eq!(v["width"], 4.0);
+
+    let out = sb.borders(&[
+        "active_color=gradient(top_left=0xff112233,bottom_right=0xff445566)",
+        "inactive_color=0xff494d64",
+        "width=6.5",
+        "style=square",
+        "blacklist=Safari,kitty",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let v = sb.query("borders");
+    assert_eq!(v["drawing"], "on");
+    assert_eq!(
+        v["active_color"],
+        "gradient(top_left=0xff112233,bottom_right=0xff445566)"
+    );
+    assert_eq!(v["inactive_color"], "0xff494d64");
+    assert_eq!(v["width"], 6.5);
+    assert_eq!(v["style"], "square");
+    assert_eq!(v["blacklist"], serde_json::json!(["Safari", "kitty"]));
+
+    let out = sb.mbar(&["--borders", "apply-to=42", "active_color=glow(0xff00ff00)"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let v = sb.query("borders");
+    assert_eq!(v["overrides"][0]["window"], 42);
+    assert_eq!(v["overrides"][0]["active_color"], "glow(0xff00ff00)");
+    assert_eq!(
+        v["active_color"],
+        "gradient(top_left=0xff112233,bottom_right=0xff445566)"
+    );
+
+    let out = sb.mbar(&["--borders", "drawing=off", "glow=1"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(stderr(&out), "[!] Borders: Invalid argument 'glow=1'\n");
+    assert_eq!(sb.query("borders")["drawing"], "off");
+
+    // `--reload` keeps the configuration (no config, no bordersrc in the sandbox): the
+    // bar items are gone, the borders settings and overrides are not.
+    let out = sb.mbar(&["--borders", "drawing=on"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let before = sb.query("borders");
+    let out = sb.mbar(&["--add", "item", "transient", "left", "--reload"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = sb.mbar(&["--query", "transient"]);
+    assert_eq!(out.status.code(), Some(1), "item survived the reload");
+    let v = sb.query("borders");
+    assert_eq!(v, before);
+    assert_eq!(v["drawing"], "on");
+    assert_eq!(v["width"], 6.5);
+    assert_eq!(v["style"], "square");
+    assert_eq!(v["overrides"][0]["window"], 42);
+}
+
+/// Borders design §3: the default bar runs `~/.config/borders/bordersrc` after its main
+/// config, with the sandbox `bin` (the `borders` link) on `PATH`, and again on every
+/// `--reload`. The executable bit is added by the daemon.
+#[test]
+fn bordersrc_runs_after_config_and_on_reload() {
+    let sb = Sandbox::new();
+    let marker = sb.root.join("marker");
+    let dir = sb.config_dir();
+    // Lua configs run synchronously, so the order of the marker lines is fixed.
+    std::fs::write(
+        dir.join("init.lua"),
+        format!(
+            "local f = assert(io.open('{}', 'a'))\nf:write('config\\n')\nf:close()\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    let brc = sb.home.join(".config/borders");
+    std::fs::create_dir_all(&brc).unwrap();
+    std::fs::write(
+        brc.join("bordersrc"),
+        format!(
+            "#!/bin/sh\n\
+             borders active_color=0xffe1e3e4 width=5.0\n\
+             rc=$?\n\
+             echo \"bordersrc:$BAR_NAME:$(command -v borders):$rc\" >> '{}'\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    // A `~/.bordersrc` loses against `~/.config/borders/bordersrc` (BR-CFG-02).
+    std::fs::write(
+        sb.home.join(".bordersrc"),
+        format!("#!/bin/sh\necho wrong >> '{}'\n", marker.display()),
+    )
+    .unwrap();
+    let _d = sb.daemon();
+    let expected_rc = format!("bordersrc:mbar:{}:0", sb.bin.join("borders").display());
+    let lines = wait_lines(&marker, 2);
+    assert_eq!(lines, ["config".to_string(), expected_rc.clone()]);
+    let v = sb.query("borders");
+    assert_eq!(v["drawing"], "on");
+    assert_eq!(v["width"], 5.0);
+
+    let out = sb.mbar(&["--reload"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let lines = wait_lines(&marker, 4);
+    assert_eq!(
+        lines,
+        [
+            "config".to_string(),
+            expected_rc.clone(),
+            "config".to_string(),
+            expected_rc
+        ]
+    );
+}
+
+/// Without a main config the default bar still runs `~/.bordersrc` (a JankyBorders user
+/// who never had a SketchyBar config).
+#[test]
+fn bordersrc_runs_without_main_config() {
+    let sb = Sandbox::new();
+    let marker = sb.root.join("marker");
+    // No shebang and no executable bit: run like a shebang-less shell config.
+    std::fs::write(
+        sb.home.join(".bordersrc"),
+        format!(
+            "borders width=5.0\necho \"home:$?\" >> '{}'\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    let _d = sb.daemon();
+    assert_eq!(wait_lines(&marker, 1), ["home:0"]);
 }
 
 // ---------------------------------------------------------------------------- --monitor

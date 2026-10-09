@@ -714,6 +714,13 @@ pub(crate) fn install(lua: &Lua, st: &Shared) -> Result<Table> {
         let tokens = props::flatten(&props, &mut resolver(lua, st, None))?;
         emit_pairs(st, vec!["--bar".into()], tokens)
     })?;
+    reg(lua, &m, "borders", st, |_, st, props: Table| {
+        emit_pairs(
+            st,
+            vec!["--borders".into()],
+            props::flatten_borders(&props)?,
+        )
+    })?;
     reg(lua, &m, "default", st, |lua, st, props: Table| {
         let tokens = props::flatten(&props, &mut resolver(lua, st, None))?;
         emit_pairs(st, vec!["--default".into()], tokens)

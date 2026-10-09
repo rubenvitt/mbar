@@ -100,10 +100,15 @@ pub fn connect(path: &Path) -> io::Result<UnixStream> {
 /// Client: sends one request and waits for its response.
 pub fn send(path: &Path, payload: &[u8]) -> io::Result<String> {
     let mut stream = connect(path)?;
+    exchange(&mut stream, payload)
+}
+
+/// Client: sends one request on a connected `stream` and waits for its response.
+pub fn exchange(stream: &mut UnixStream, payload: &[u8]) -> io::Result<String> {
     stream.set_read_timeout(Some(CLIENT_TIMEOUT))?;
     stream.set_write_timeout(Some(CLIENT_TIMEOUT))?;
-    write_frame(&mut stream, payload)?;
-    let rsp = read_frame(&mut stream)?;
+    write_frame(stream, payload)?;
+    let rsp = read_frame(stream)?;
     Ok(String::from_utf8_lossy(&rsp).into_owned())
 }
 

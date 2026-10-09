@@ -186,6 +186,7 @@ Names in the `name` parameter may also be item objects (anything with a `.name`)
 | `mbar.add("event", name, notification?)` | `--add event <name> [<notification>]` | Returns nil. |
 | `mbar.set(name, props)` | `--set <name> ...` | `name` may be `/regex/`. |
 | `mbar.bar(props)` | `--bar ...` | |
+| `mbar.borders(props)` | `--borders ...` | Window borders (JankyBorders options). See [Window borders](#window-borders). |
 | `mbar.default(props)` | `--default ...` | |
 | `mbar.remove(name)` | `--remove <name>` | |
 | `mbar.subscribe(name, events, fn)` | `--set <name> script=lua:<id>` `--subscribe <name> <events...>` | `events`: a string (space separated) or a list. `mbar.subscribe(name, fn)` registers a catch-all. |
@@ -382,6 +383,60 @@ end)
 A provider fires the item's script with `SENDER=provider` and the sample in
 `INFO` (so `env.info`) — see `docs/EXTENSIONS.md` for the providers and their keys.
 
+### Window borders
+
+mbar draws colored borders around windows, highlighting the focused one (it
+replaces [JankyBorders](https://github.com/FelixKratz/JankyBorders)).
+Borders are off until the config turns them on; the first `mbar.borders` call
+does that (unless it sets `drawing = false`).
+
+<!-- example: borders -->
+```lua
+mbar.borders({
+  active_color = 0xffe1e3e4,
+  inactive_color = 0xff494d64,
+  width = 5.0,
+  style = "round",
+  hidpi = false,
+  blacklist = { "Safari", "kitty" },
+})
+
+-- Glow and gradients:
+mbar.borders({ active_color = { glow = 0xd2e1e3e4 } })
+mbar.borders({
+  active_color = { gradient = { top_left = 0xffa6da95, bottom_right = 0xff8aadf4 } },
+})
+
+mbar.borders({ drawing = false })  -- hide all borders
+```
+
+One call sends one `--borders` message. The keys are the JankyBorders options
+with the same meaning (`active_color`, `inactive_color`, `background_color`,
+`width`, `style`, `order`, `hidpi`, `ax_focus`, `blacklist`, `whitelist`), plus
+mbar's `drawing`. The values are converted to the JankyBorders syntax:
+
+| Lua | Pair |
+|---|---|
+| `active_color = 0xffe1e3e4` | `active_color=0xffe1e3e4` |
+| `active_color = { glow = 0xffe1e3e4 }` | `active_color=glow(0xffe1e3e4)` |
+| `active_color = { gradient = { top_left = 0xffff0000, bottom_right = 0xff0000ff } }` | `active_color=gradient(top_left=0xffff0000,bottom_right=0xff0000ff)` |
+| `active_color = { gradient = { top_right = 0xffff0000, bottom_left = 0xff0000ff } }` | `active_color=gradient(top_right=0xffff0000,bottom_left=0xff0000ff)` |
+| `blacklist = { "Safari", "kitty" }` | `blacklist=Safari,kitty` |
+| `whitelist = {}` | `whitelist=` (no filter) |
+| `width = 5.0`, `width = 4.5` | `width=5`, `width=4.5` |
+| `hidpi = true`, `drawing = false` | `hidpi=on`, `drawing=off` |
+| `apply_to = 4242` | `apply-to=4242` (window 4242 gets the global settings plus the other keys, replacing its earlier override) |
+
+Strings are sent verbatim, so `active_color = "glow(0xffe1e3e4)"` works too.
+A table that has no JankyBorders form (`active_color = { shimmer = 1 }`,
+`style = { "round" }`) is a Lua error. Unknown keys and values the daemon
+rejects are not: its `[!] Borders: ...` answer is logged as a warning, like
+for every queued command, and the valid keys of the same call still apply. A `~/.config/borders/bordersrc` is still run
+after `init.lua`; once its settings are in `init.lua`, delete it. The current
+settings are in `mbar.query("borders")`. The borders settings survive
+`mbar --reload` and hotload, so deleting an `mbar.borders` call does not turn
+borders off on the next reload; `mbar.borders({ drawing = false })` does.
+
 ## Differences from SbarLua
 
 * `require("sketchybar")` works and returns `mbar`; `sbar.event_loop()` is a
@@ -409,7 +464,7 @@ A provider fires the item's script with `SENDER=provider` and the sample in
   subscribed event) run in bounded batches between IPC requests, timers and
   frames, so a handler that re-triggers its own event burns CPU like the
   equivalent shell script would, but the bar stays responsive.
-* New: `mbar.provider`, `mbar.menu`, `mbar.command`, `mbar.flush`,
+* New: `mbar.provider`, `mbar.borders`, `mbar.menu`, `mbar.command`, `mbar.flush`,
   `mbar.json`, `script = function` / `click_script = function` properties,
   list values (`space = { 1, 2 }`) and the positional value convention
   (`image = { "app.Safari", scale = 0.5 }`).

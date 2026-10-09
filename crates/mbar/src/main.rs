@@ -6,6 +6,9 @@
 //! * Invoked through a `sketchybar -> mbar` symlink it behaves identically (the bar name
 //!   `sketchybar` maps to `mbar`, see `mbar_ipc::bar_name_from_argv0`); only `BAR_NAME`
 //!   keeps the invoked name (`mbar_ipc::program_name`).
+//! * Invoked as `borders` (a `borders -> mbar` symlink) it is JankyBorders' client: the
+//!   arguments are validated locally and sent to the default bar as `--borders …`
+//!   (borders design §2, `docs/spec/borders.md` §2.1); it never starts a daemon.
 //!
 //! Argument dispatch follows `docs/spec/cli.md` §1.2. Daemon-only flags (extensions):
 //! `--headless` (no windows, deterministic metrics; the only platform on non-macOS).
@@ -56,6 +59,10 @@ fn main() {
     // `sketchybar -> mbar` symlink yields `BAR_NAME=sketchybar`). Set before any thread
     // exists.
     std::env::set_var("BAR_NAME", &program_name);
+
+    if program_name == "borders" {
+        std::process::exit(borders_main(&bar_name, args_after_argv0(&argv)));
+    }
 
     match dispatch(args_after_argv0(&argv)) {
         Mode::Version => {
@@ -119,6 +126,63 @@ fn dispatch(args: &[OsString]) -> Mode {
         "-m" | "--message" => Mode::Client(lossy_args(&args[1..])),
         "-c" | "--config" | "--headless" => parse_daemon_options(args),
         _ => Mode::Client(lossy_args(args)),
+    }
+}
+
+/// `borders -h` (BR-CLI-02) plus where the command comes from.
+const BORDERS_HELP: &str = "Refer to the man page for help: man borders\n\
+borders is provided by mbar: see docs/MIGRATING.md\n";
+
+/// What `borders <args>` does (borders design §2).
+#[derive(Debug, PartialEq, Eq)]
+enum BordersMode {
+    /// `-v`/`--version` as `argv[1]` (BR-CLI-01).
+    Version,
+    /// `-h`/`--help` as `argv[1]` (BR-CLI-02).
+    Help,
+    /// Everything else: the arguments the daemon accepts and JankyBorders' error lines
+    /// (`[?] Borders: …\n`) for the others (BR-CLI-03 step 3).
+    Send {
+        valid: Vec<String>,
+        errors: Vec<String>,
+    },
+}
+
+/// Only `argv[1]` is checked for `-v`/`-h`; anywhere else they are invalid arguments.
+fn borders_dispatch(args: &[OsString]) -> BordersMode {
+    match args.first().map(|a| a.to_string_lossy()).as_deref() {
+        Some("-v" | "--version") => BordersMode::Version,
+        Some("-h" | "--help") => BordersMode::Help,
+        _ => {
+            let (valid, errors) = mbar_core::borders::validate_args(&lossy_args(args));
+            BordersMode::Send { valid, errors }
+        }
+    }
+}
+
+/// `mbar` invoked as `borders`; returns the exit code.
+fn borders_main(bar_name: &str, args: &[OsString]) -> i32 {
+    match borders_dispatch(args) {
+        BordersMode::Version => {
+            println!("{}", mbar_core::borders::BORDERS_VERSION);
+            0
+        }
+        BordersMode::Help => {
+            print!("{BORDERS_HELP}");
+            0
+        }
+        BordersMode::Send { valid, errors } => {
+            // Like JankyBorders' client: on stdout, each line already ends in `\n`.
+            {
+                use std::io::Write;
+                let mut out = std::io::stdout().lock();
+                for line in &errors {
+                    let _ = out.write_all(line.as_bytes());
+                }
+                let _ = out.flush();
+            }
+            client::run_borders(bar_name, &valid)
+        }
     }
 }
 
@@ -289,6 +353,7 @@ Querying information, see https://felixkratz.github.io/SketchyBar/config/queryin
 \x20     --query default_menu_items\tQuery names of available items for aliases\n\
 \x20     --query stats             \tQuery runtime statistics (mbar)\n\
 \x20     --query menus             \tQuery the front application's menu titles (mbar)\n\
+\x20     --query borders           \tQuery the window borders configuration (mbar)\n\
 \x20     --monitor [events|stats|all]\tStream events / statistics as JSON lines (mbar)\n\
 \n\
 Animations, see https://felixkratz.github.io/SketchyBar/config/animations\n\
@@ -300,6 +365,10 @@ Animations, see https://felixkratz.github.io/SketchyBar/config/animations\n\
 Menus (mbar)\n\
 \x20     --menu <index|title>       \tOpen a menu of the front application\n\
 \x20     --menubar hide|show|toggle \tAuto-hide the native menu bar\n\
+\n\
+Window borders (mbar), JankyBorders keys, see docs/EXTENSIONS.md\n\
+\x20     --borders <key>=<value> ... <key>=<value>\n\
+\x20                                 \tConfigure window borders (also drawing=on|off)\n\
 \n\
 Reloading the config\n\
 \x20     --hotload <boolean>        \tEnable or disable the config hotloader\n\
@@ -354,6 +423,41 @@ mod tests {
         assert!(o.headless);
     }
 
+    /// Borders design §2: `-v`/`-h` only as `argv[1]`, everything else is validated.
+    #[test]
+    fn borders_dispatch_modes() {
+        assert_eq!(borders_dispatch(&os(&["-v"])), BordersMode::Version);
+        assert_eq!(
+            borders_dispatch(&os(&["--version", "x"])),
+            BordersMode::Version
+        );
+        assert_eq!(borders_dispatch(&os(&["-h"])), BordersMode::Help);
+        assert_eq!(borders_dispatch(&os(&["--help"])), BordersMode::Help);
+        assert_eq!(
+            borders_dispatch(&[]),
+            BordersMode::Send {
+                valid: vec![],
+                errors: vec![]
+            }
+        );
+        assert_eq!(
+            borders_dispatch(&os(&[
+                "width=5.0",
+                "-v",
+                "bogus",
+                "active_color=0xffe1e3e4"
+            ])),
+            BordersMode::Send {
+                valid: s(&["width=5.0", "active_color=0xffe1e3e4"]),
+                errors: s(&[
+                    "[?] Borders: Invalid argument '-v'\n",
+                    "[?] Borders: Invalid argument 'bogus'\n"
+                ]),
+            }
+        );
+        assert!(BORDERS_HELP.starts_with("Refer to the man page for help: man borders\n"));
+    }
+
     #[test]
     fn help_mentions_argv0() {
         let h = help_text("/x/mbar", "mbar");
@@ -361,6 +465,8 @@ mod tests {
         assert!(h.ends_with("config\n\n"));
         assert!(h.contains("--headless"));
         assert!(h.contains("~/.config/mbar/init.lua"));
+        assert!(h.contains("\n      --borders <key>=<value> ... <key>=<value>\n"));
+        assert!(h.contains("\n      --query borders           \tQuery the window borders"));
     }
 
     /// The fenced block of `cli.md` §1.3.

@@ -10,3 +10,8 @@ rust-version.workspace = true
 mlua = { version = "0.11", features = ["lua54", "vendored"] }
 serde_json = { workspace = true }
 log = { workspace = true }
+
+[dev-dependencies]
+# Tests only: checks that `mbar.borders` emits what the core's JankyBorders parser
+# accepts. The library itself stays independent of mbar-core.
+mbar-core = { workspace = true }

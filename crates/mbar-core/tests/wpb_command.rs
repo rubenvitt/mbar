@@ -610,6 +610,7 @@ fn query_targets() {
     assert_eq!(q(&["Bar"]), one(QueryTarget::Name("Bar".into())));
     assert_eq!(q(&["stats"]), one(QueryTarget::Stats));
     assert_eq!(q(&["menus"]), one(QueryTarget::Menus));
+    assert_eq!(q(&["borders"]), one(QueryTarget::Borders));
     // Several queries in one message.
     assert_eq!(
         p(&["--query", "bar", "--query", "item", "x"]),

@@ -42,6 +42,9 @@ scene.rs       Scene, Primitive
 animation.rs   Curve, Animation, Animator
 command.rs     parse(argv) -> Vec<Command>
 query.rs       JSON for --query
+borders/       window borders (JankyBorders take-over, extension): BorderSettings,
+               BordersState (`--borders`, `--query borders`, held in Model), parse.rs
+               (JankyBorders argument grammar), pure helpers the platform uses
 event.rs       EventKind, EventMask, CustomEvents, EventInfo
 script.rs      ScriptEnv building
 provider.rs    native providers: names, templates
@@ -122,6 +125,14 @@ pub enum Effect {
     LuaCallback { handler: u64, env: Vec<(String, String)> },
 }
 ```
+
+`PlatformRequest::SetBorders(Box<BordersUpdate>)` carries the complete borders
+configuration (drawing, global settings, `apply-to` overrides) plus an update mask. The
+runtime emits it once per `--borders` message that changed something. The borders
+configuration survives `--reload` and hotload (carried over into the new model, no
+`SetBorders`; the re-run config applies its keys on top). The core never sees windows:
+the platform tracks them and draws the border windows itself
+(`docs/superpowers/specs/2026-10-09-borders-design.md`).
 
 `FrameOutput { windows: Vec<WindowUpdate>, closed: Vec<WindowKey> }` where
 `WindowUpdate { key, frame: Rect (screen points), level: WindowLevel, scene: Scene,

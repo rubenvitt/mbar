@@ -30,6 +30,14 @@ class Mbar < Formula
       sketchybar formula):
         ln -sf #{opt_bin}/mbar #{HOMEBREW_PREFIX}/bin/sketchybar
 
+      mbar also draws JankyBorders-style window borders and reads
+      ~/.config/borders/bordersrc in place. Its `borders …` lines and the
+      ones in yabairc / aerospace.toml reach mbar through a `borders`
+      symlink. Create it yourself (not done by default, it would conflict
+      with felixkratz/formulae/borders; stop and uninstall that first:
+      brew services stop borders && brew uninstall borders):
+        ln -sf #{opt_bin}/mbar #{HOMEBREW_PREFIX}/bin/borders
+
       Config: ~/.config/mbar/init.lua or mbarrc (falls back to
       ~/.config/sketchybar/sketchybarrc).
 
@@ -55,5 +63,8 @@ class Mbar < Formula
     # Invoked as `sketchybar`, mbar reports SketchyBar's version for plugin checks.
     ln_s bin/"mbar", testpath/"sketchybar"
     assert_equal "sketchybar-v2.24.0\n", shell_output("#{testpath}/sketchybar -v")
+    # Invoked as `borders`, mbar reports JankyBorders' version.
+    ln_s bin/"mbar", testpath/"borders"
+    assert_equal "borders-v1.9.0\n", shell_output("#{testpath}/borders -v")
   end
 end

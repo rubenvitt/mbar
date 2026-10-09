@@ -78,10 +78,10 @@ impl Step {
     fn title(self) -> &'static str {
         match self {
             Step::Location => "Move to Applications",
-            Step::Cleanup => "Remove SketchyBar and old mbar installs",
-            Step::TakeOver => "Use your SketchyBar config",
+            Step::Cleanup => "Remove SketchyBar, JankyBorders and old mbar installs",
+            Step::TakeOver => "Use your SketchyBar and JankyBorders configs",
             Step::Starter => "Create a starter config",
-            Step::CommandLine => "Install the `mbar` and `sketchybar` commands",
+            Step::CommandLine => "Install the `mbar`, `sketchybar` and `borders` commands",
             Step::LoginItem => "Start mbar at login",
             Step::Permissions => "Grant permissions",
         }
@@ -103,6 +103,12 @@ struct SetupPlan {
     paths_d: ob::PathsD,
     sbarlua: Option<(PathBuf, String)>,
     felix: Vec<PathBuf>,
+    /// JankyBorders config, run in place by mbar.
+    bordersrc: Option<PathBuf>,
+    /// Files under `~/.config/borders` that use `git.felix.borders`.
+    borders_helpers: Vec<PathBuf>,
+    /// Window-manager config lines that start `borders`.
+    launch_lines: Vec<ob::LaunchLine>,
     starter_needed: bool,
     login: LoginItem,
 }
@@ -114,19 +120,7 @@ impl SetupPlan {
         let bundle = sys::current_bundle();
         let root = bundle.as_ref().map(|b| b.root.clone());
         let bin = bundle.as_ref().map(|b| b.bin_dir());
-        let brew = ob::find_brew()
-            .map(|b| {
-                let out = |args: &[&str]| {
-                    std::process::Command::new(&b)
-                        .args(args)
-                        .stderr(std::process::Stdio::null())
-                        .output()
-                        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                        .unwrap_or_default()
-                };
-                ob::parse_brew(&out(&["list", "--formula"]), &out(&["services", "list"]))
-            })
-            .unwrap_or_default();
+        let brew = ob::detect_brew(ob::find_brew().as_deref());
         let sb = home.join(".config/sketchybar");
         let sbarlua = (!sb.join("init.lua").exists())
             .then(|| std::fs::read_to_string(sb.join("sketchybarrc")).ok())
@@ -150,6 +144,9 @@ impl SetupPlan {
                 })
                 .unwrap_or(ob::PathsD::Missing),
             felix: ob::felix_helpers(&sb),
+            bordersrc: ob::bordersrc(&home),
+            borders_helpers: ob::borders_helpers(&home.join(".config/borders")),
+            launch_lines: ob::borders_launch_lines(&home),
             starter_needed: ob::needs_starter_config(&home, &xdg),
             bundle_root: root,
             bin_dir: bin,
@@ -160,7 +157,21 @@ impl SetupPlan {
     }
 
     fn brew_has_work(&self) -> bool {
-        self.brew.sketchybar_installed || self.brew.sketchybar_running || self.brew.mbar_installed
+        self.brew.sketchybar_installed
+            || self.brew.sketchybar_running
+            || self.brew.mbar_installed
+            || self.brew.borders_has_work()
+    }
+
+    /// What to do with one window-manager line that starts `borders`.
+    fn launch_line_advice(&self, l: &ob::LaunchLine) -> String {
+        ob::launch_line_advice(l.launch, self.bordersrc.as_deref(), self.bin_dir.as_deref())
+    }
+
+    /// JankyBorders leftovers the user may have to edit by hand. A `bordersrc` alone
+    /// needs nothing: mbar runs it in place (the details still say so).
+    fn borders_needs_review(&self) -> bool {
+        !self.borders_helpers.is_empty() || !self.launch_lines.is_empty()
     }
 
     /// Steps detection already finds done.
@@ -168,9 +179,16 @@ impl SetupPlan {
         match step {
             Step::Location => self.location == Some(ob::Location::Applications),
             Step::Cleanup => {
-                !self.brew_has_work() && self.old.iter().all(|o| o.kind == ob::OldKind::Foreign)
+                // A Homebrew link goes with its formula, which `brew_has_work` covers.
+                !self.brew_has_work()
+                    && self
+                        .old
+                        .iter()
+                        .all(|o| matches!(o.kind, ob::OldKind::Foreign | ob::OldKind::Homebrew))
             }
-            Step::TakeOver => self.sbarlua.is_none() && self.felix.is_empty(),
+            Step::TakeOver => {
+                self.sbarlua.is_none() && self.felix.is_empty() && !self.borders_needs_review()
+            }
             Step::Starter => !self.starter_needed,
             Step::CommandLine => self.paths_d == ob::PathsD::Current,
             Step::LoginItem => self.login == LoginItem::Enabled,
@@ -180,8 +198,8 @@ impl SetupPlan {
 }
 
 /// The admin part of "Install the commands": `/etc/paths.d/mbar` plus admin-owned old
-/// binaries, then a check that a new login shell finds `sketchybar` in the bundle.
-/// Shared with the System page's "Fix" button.
+/// binaries, then a check that a new login shell finds `sketchybar` and `borders` in
+/// the bundle. Shared with the System page's "Fix" button.
 pub fn install_command_line(
     bin: &std::path::Path,
     old: &[ob::OldInstall],
@@ -193,20 +211,21 @@ pub fn install_command_line(
         .collect();
     ob::run_admin(&ob::admin_shell(bin, &admin))?;
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    let out = std::process::Command::new(&shell)
-        .args(["-lc", "command -v sketchybar"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| e.to_string())?;
-    let found = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if found.starts_with(&*bin.to_string_lossy()) {
-        Ok(format!("sketchybar → {found}"))
-    } else {
-        Err(format!(
-            "A new {shell} login shell finds sketchybar at '{found}'. Something earlier on \
-             your PATH shadows mbar."
-        ))
+    let mut found = Vec::new();
+    for name in ob::CHECKED_COMMANDS {
+        let out = std::process::Command::new(&shell)
+            .args(["-lc", &format!("command -v {name}")])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|e| e.to_string())?;
+        found.push(ob::check_command(
+            bin,
+            &shell,
+            name,
+            &String::from_utf8_lossy(&out.stdout),
+        )?);
     }
+    Ok(found.join("\n"))
 }
 
 pub struct SetupView {
@@ -214,6 +233,8 @@ pub struct SetupView {
     states: Vec<(Step, StepState)>,
     plan: Option<SetupPlan>,
     remove_brew_sketchybar: bool,
+    /// Default on: a Homebrew `borders` earlier on the PATH shadows mbar's link.
+    remove_brew_borders: bool,
     permissions: Option<Permissions>,
     probing: bool,
     /// `OnboardingCompleted` was written (once per view).
@@ -232,6 +253,7 @@ impl SetupView {
             states: Step::ALL.iter().map(|s| (*s, StepState::Pending)).collect(),
             plan: None,
             remove_brew_sketchybar: true,
+            remove_brew_borders: true,
             permissions: None,
             probing: false,
             completed_written: false,
@@ -319,7 +341,10 @@ impl SetupView {
         let Some(plan) = self.plan.clone() else {
             return;
         };
-        let remove_brew = self.remove_brew_sketchybar;
+        let remove_brew = RemoveBrew {
+            sketchybar: self.remove_brew_sketchybar,
+            borders: self.remove_brew_borders,
+        };
         self.set(step, StepState::Running, cx);
         self.shared.spawn_blocking(
             cx,
@@ -451,7 +476,8 @@ impl SetupView {
                 }));
             }
             Step::Cleanup => {
-                if plan.brew_has_work() {
+                let b = &plan.brew;
+                if b.sketchybar_installed || b.sketchybar_running || b.mbar_installed {
                     col = col.child(line(format!(
                         "Homebrew: sketchybar {}{}, mbar formula {}",
                         if plan.brew.sketchybar_installed {
@@ -483,13 +509,46 @@ impl SetupView {
                         );
                     }
                 }
+                if b.borders_has_work() {
+                    col = col.child(line(format!(
+                        "Homebrew: borders (JankyBorders) {}{}; mbar draws the window borders now",
+                        if b.borders_installed {
+                            "installed"
+                        } else {
+                            "not installed"
+                        },
+                        if b.borders_running {
+                            " (service running; the cleanup stops it)"
+                        } else {
+                            ""
+                        },
+                    )));
+                    if b.borders_installed {
+                        col = col
+                            .child(
+                                Switch::new("remove-brew-borders")
+                                    .small()
+                                    .label("Also uninstall Homebrew borders")
+                                    .checked(self.remove_brew_borders)
+                                    .on_change(cx.listener(|this, on: &bool, _, cx| {
+                                        this.remove_brew_borders = *on;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(line(
+                                "Recommended: a Homebrew `borders` earlier on your PATH would \
+                                 shadow mbar's `borders` command."
+                                    .into(),
+                            ));
+                    }
+                }
                 for o in &plan.old {
-                    let what = match o.kind {
-                        ob::OldKind::Binary if o.admin => "removed with the commands step (admin)",
-                        ob::OldKind::Binary => "removed",
-                        ob::OldKind::LaunchAgent => "stopped and removed",
-                        ob::OldKind::Foreign => "not mbar, left in place",
-                    };
+                    let what = ob::old_install_fate(
+                        o,
+                        &plan.brew,
+                        self.remove_brew_sketchybar,
+                        self.remove_brew_borders,
+                    );
                     col = col.child(line(format!("{}: {what}", o.path.display())));
                 }
             }
@@ -505,6 +564,35 @@ impl SetupView {
                         "{} looks up SketchyBar's mach port (git.felix.*); change it to dev.rubeen.mbar.",
                         f.display()
                     )));
+                }
+                if let Some(rc) = &plan.bordersrc {
+                    col = col.child(line(format!(
+                        "{} is used in place: mbar runs it after its own config, nothing to copy.",
+                        rc.display()
+                    )));
+                }
+                for f in &plan.borders_helpers {
+                    col = col.child(line(format!(
+                        "{} talks to JankyBorders' mach port (git.felix.borders), which mbar does \
+                         not provide; run `borders …` or `mbar --borders …` instead.",
+                        f.display()
+                    )));
+                }
+                if !plan.launch_lines.is_empty() {
+                    col = col.child(line("Your window manager starts borders here:".into()));
+                    for l in &plan.launch_lines {
+                        col = col
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_family("Menlo")
+                                    .text_color(muted)
+                                    .whitespace_normal()
+                                    .child(format!("{}:{}: {}", l.file.display(), l.line, l.text)),
+                            )
+                            .child(line(plan.launch_line_advice(l)));
+                    }
+                    col = col.child(line(ob::LAUNCH_LINE_DOCS.into()));
                 }
             }
             Step::Starter => {
@@ -522,6 +610,11 @@ impl SetupView {
                         "/etc/paths.d/mbar points to {old}; updates it (asks for your password)."
                     ),
                 }));
+                col = col.child(line(
+                    "Then checks that a new login shell finds `sketchybar` and `borders` in this \
+                     app."
+                        .into(),
+                ));
             }
             Step::LoginItem => {
                 col = col.child(line(match plan.login {
@@ -602,8 +695,15 @@ fn daemon_running() -> bool {
         })
 }
 
+/// The cleanup's "Also uninstall Homebrew …" switches.
+#[derive(Clone, Copy, Debug)]
+struct RemoveBrew {
+    sketchybar: bool,
+    borders: bool,
+}
+
 /// Runs one step (background thread).
-fn run(step: Step, plan: &SetupPlan, remove_brew: bool) -> Result<String, String> {
+fn run(step: Step, plan: &SetupPlan, remove_brew: RemoveBrew) -> Result<String, String> {
     match step {
         Step::Location => {
             let src = plan
@@ -621,7 +721,8 @@ fn run(step: Step, plan: &SetupPlan, remove_brew: bool) -> Result<String, String
                 &plan.brew,
                 ob::find_brew().as_deref(),
                 uid,
-                remove_brew,
+                remove_brew.sketchybar,
+                remove_brew.borders,
             );
             let result = ob::run_commands(&cmds);
             // The legacy agent shares the launchd label; its bootout stopped ours too,
@@ -639,7 +740,9 @@ fn run(step: Step, plan: &SetupPlan, remove_brew: bool) -> Result<String, String
             let foreign: Vec<_> = plan
                 .old
                 .iter()
-                .filter(|o| o.kind == ob::OldKind::Foreign)
+                .filter(|o| {
+                    ob::left_in_place(o, &plan.brew, remove_brew.sketchybar, remove_brew.borders)
+                })
                 .map(|o| o.path.display().to_string())
                 .collect();
             if !foreign.is_empty() {
@@ -658,6 +761,28 @@ fn run(step: Step, plan: &SetupPlan, remove_brew: bool) -> Result<String, String
             }
             for f in &plan.felix {
                 log.push_str(&format!("Still to change by hand: {}\n", f.display()));
+            }
+            if let Some(rc) = &plan.bordersrc {
+                log.push_str(&format!("mbar runs {} in place\n", rc.display()));
+            }
+            for f in &plan.borders_helpers {
+                log.push_str(&format!(
+                    "Still to change by hand (git.felix.borders): {}\n",
+                    f.display()
+                ));
+            }
+            for l in &plan.launch_lines {
+                log.push_str(&format!(
+                    "Starts borders: {}:{}: {}\n  {}\n",
+                    l.file.display(),
+                    l.line,
+                    l.text,
+                    plan.launch_line_advice(l)
+                ));
+            }
+            if !plan.launch_lines.is_empty() {
+                log.push_str(ob::LAUNCH_LINE_DOCS);
+                log.push('\n');
             }
             Ok(log)
         }

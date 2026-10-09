@@ -1,7 +1,9 @@
 # mbar extensions
 
 Everything here is new in mbar. A plain SketchyBar config never triggers any of it, so
-existing configs behave exactly as documented in `docs/spec/`.
+existing configs behave exactly as documented in `docs/spec/`. Window borders take over
+JankyBorders; its own command line (`borders …`) is covered in
+[Window borders](#window-borders).
 
 ## Command line
 
@@ -11,6 +13,8 @@ existing configs behave exactly as documented in `docs/spec/`.
 | `--query menus` | JSON array of the front application's top-level menu titles. |
 | `--monitor [events\|stats\|all]` | Streaming: the connection stays open and the daemon writes one JSON object per line for every event dispatched (`{"type":"event","name":…,"sender":…,"info":…,"items":[…],"ts_ms":…}`) and/or a stats snapshot every second (`{"type":"stats",…}`). Unix-socket transport only. The first frame is the reply of the message (empty unless earlier commands in it printed something, e.g. `--query bar --monitor`); a `--monitor` the daemon does not execute (for example after an empty argument, which ends the message) gets a normal reply and the connection closes. Subscribers that stop reading never stall the daemon: they are dropped once 1024 lines behind or after 1 s without progress. |
 | `--menu <index\|title>` | Opens that top-level menu of the front app (index 0 = Apple menu). |
+| `--borders <key>=<value> ...` | Window borders (JankyBorders options plus `drawing=`). See [Window borders](#window-borders). |
+| `--query borders` | JSON of the borders configuration. See [Window borders](#window-borders). |
 | `--menubar hide\|show\|toggle` | Sets macOS "Automatically hide and show the menu bar" (`_HIHideMenuBar`) and notifies the system. |
 | `--reload` | Reloads the config (SketchyBar has this as `--hotload`-adjacent behaviour; mbar exposes it explicitly). |
 | `-h`, `--help` (as `mbar`) | Invoked under any name other than `sketchybar`, the help lists mbar's config locations, `--headless` and the extensions above (and `--clone` in the order the code reads it). Invoked as `sketchybar` (e.g. a `sketchybar -> mbar` symlink), it prints SketchyBar's `misc/help.h` verbatim (`cli.md` §1.3), just as `-v` prints `sketchybar-v2.24.0`. |
@@ -114,6 +118,135 @@ array of titles.
 | Property | Description |
 |---|---|
 | `hide_menubar=on\|off` | Same as `--menubar hide/show`, persisted while mbar runs and restored on exit. |
+
+## Window borders
+
+mbar draws colored borders around windows and highlights the focused one, like
+[JankyBorders](https://github.com/FelixKratz/JankyBorders) v1.9.0. The behavioural
+reference is [`docs/spec/borders.md`](spec/borders.md); the differences are the B rows in
+[`DEVIATIONS.md`](DEVIATIONS.md#jankyborders-borders). Borders are **off** until something
+configures them, so a config without borders sees no change. Only the default bar `mbar`
+runs `bordersrc` and receives `borders` commands.
+
+### `--borders`
+
+```sh
+mbar --borders active_color=0xffe1e3e4 inactive_color=0xff494d64 width=5.0
+mbar --borders style=square blacklist="Safari,kitty"
+mbar --borders drawing=off
+```
+
+A key/value list like `--bar`: it ends at the next `-` token or at a token without `=`.
+That token is reported as `[!] Borders: Expected <key>=<value> pair, but got: '<tok>'`.
+
+| Key | Values | Default |
+|---|---|---|
+| `active_color` | `0xAARRGGBB`, `glow(0xAARRGGBB)`, `gradient(top_left=0x…,bottom_right=0x…)`, `gradient(top_right=0x…,bottom_left=0x…)` | `0xffe1e3e4` |
+| `inactive_color` | same | `0x00000000` |
+| `background_color` | `0xAARRGGBB` (a gradient is accepted but not drawn, a glow draws as a solid fill) | `0x00000000` |
+| `width` | float (finite: `inf` and `nan` are rejected) | `4.0` |
+| `style` | `round`, `square`, `uniform` (first character counts; anything else is round) | `round` |
+| `order` | `above`, `below` (first character `a` is above, anything else below) | `below` |
+| `hidpi` | `on`, `off` | `off` |
+| `ax_focus` | `on`, `off`: find the focused window through Accessibility | on when mbar has Accessibility permission |
+| `blacklist` | comma-separated process names (exact, case-sensitive, not trimmed) | empty |
+| `whitelist` | same | empty |
+| `apply-to` | window id: the message's other keys apply to this window only (`0` = all). Each message rebuilds the window's override as the current global settings plus its own keys, replacing an earlier override, as in JankyBorders. At most 64 overrides are kept (the oldest is dropped); overrides of closed windows stay until a `hidpi`/`blacklist`/`whitelist` change or the cap drops them | `0` |
+| `drawing` | `on`, `off` (mbar boolean values) | off until configured |
+
+All keys except `drawing` use JankyBorders' grammar, including its leniency (`width=5px`
+is 5, `order=above` is above). `drawing=` is the extension. The first `--borders` message
+that does not contain `drawing=` turns borders on; later messages change `drawing` only
+when they contain it. `drawing=off` hides every border and keeps the settings.
+
+Errors use mbar's `[!]` convention (the client prints them on stderr and exits 1):
+`[!] Borders: Invalid argument '<tok>'` and `[!] Borders: Invalid color argument
+color<rest>`. Valid keys in the same message still apply.
+
+The borders configuration **survives** `--reload` and hotload: JankyBorders was a
+separate process that bar reloads never touched, so borders set by a window manager's
+launch line (`exec-and-forget borders …` in `aerospace.toml`) stay. The config and
+`bordersrc` run again and apply their keys on top; nothing is redrawn when they change
+nothing. Removing the borders lines from a config therefore does not turn borders off on
+the next reload: send `mbar --borders drawing=off` (or restart mbar).
+
+### `--query borders`
+
+```json
+{
+	"drawing": "on",
+	"active_color": "0xffe1e3e4",
+	"inactive_color": "0x00000000",
+	"background_color": "0x00000000",
+	"width": 4.000000,
+	"style": "round",
+	"order": "below",
+	"hidpi": "off",
+	"ax_focus": "auto",
+	"blacklist": [],
+	"whitelist": [],
+	"overrides": []
+}
+```
+
+Colors print in their input syntax: `0xAARRGGBB`, `glow(0x…)` or `gradient(…)`.
+`ax_focus` is `auto` until it is set. `overrides` lists the `apply-to` windows as
+`{ "window": <wid>, …same keys }`. An item named `borders` wins over this query, as with
+`--query stats`.
+
+### `bordersrc`
+
+Together with its main config, the default bar `mbar` runs `~/.config/borders/bordersrc`,
+else `~/.bordersrc` (`$XDG_CONFIG_HOME` is not consulted, as in JankyBorders). It runs like
+mbar's shell configs: made executable if needed, `sh -c` with the path quoted, killed
+after 60 s. In `mbar.app` its `PATH` starts with the bundle's `Resources/bin`, so the
+`borders …` lines in it reach mbar through the `borders` link. This happens on every start
+and every `--reload`.
+
+`bordersrc` is started right after the main config is started. A shell config (`mbarrc`,
+`sketchybarrc`) and `bordersrc` run **concurrently**, so when both set the same borders key
+either may win; a Lua config (`init.lua`) runs synchronously, so `bordersrc` runs after it.
+Keep each borders setting in one file.
+
+On macOS, when JankyBorders itself is still running (its mach service `git.felix.borders`
+is registered), mbar does **not** run `bordersrc`, so the two do not both draw borders. It
+logs `bordersrc not run: JankyBorders is running (git.felix.borders); stop it with brew
+services stop borders or finish the borders step in mbar.app setup`, and the `mbar.app`
+System page shows a warning with a button that stops it. The next start or `--reload`
+after JankyBorders is stopped runs `bordersrc`.
+
+### The `borders` command
+
+Invoked as `borders` (the `borders -> mbar` link in `mbar.app/Contents/Resources/bin`, or
+from `make install`), the binary is a JankyBorders-compatible client:
+
+| Invocation | Behaviour |
+|---|---|
+| `borders -v`, `borders --version` | prints `borders-v1.9.0`, exit 0 |
+| `borders -h`, `borders --help` | prints `Refer to the man page for help: man borders` and a line saying that mbar provides `borders`, exit 0 |
+| `borders <key>=<value> ...` | checks every argument with the same parser. Invalid ones print `[?] Borders: Invalid argument '<arg>'` (or the color error) on stdout, like JankyBorders. The valid ones go to the bar `mbar` as `--borders ...`. Exit 0 |
+| `borders` with no valid argument | stderr `A borders instance is already running and no valid arguments where provided. ...`, exit 1 |
+| mbar not running | retries for up to 5 s, then stderr `borders: mbar is not running. mbar draws the window borders; start mbar.app.`, exit 1 |
+
+`borders` never starts a daemon. `BAR_NAME` is not involved.
+
+### Lua
+
+```lua
+mbar.borders({
+  active_color = 0xffe1e3e4,
+  inactive_color = 0xff494d64,
+  width = 5.0,
+  style = "round",
+  blacklist = { "Safari", "kitty" },
+})
+```
+
+`mbar.borders(props)` sends one `--borders` command. Number colors become `0x%08x`,
+arrays are joined with `,`, booleans become `on`/`off`. `{ glow = 0xff… }` and
+`{ gradient = { top_left = 0x…, bottom_right = 0x… } }` (or `top_right`/`bottom_left`)
+become the JankyBorders color strings. Details in [`LUA.md`](LUA.md); the type is
+`mbar.BordersProps` in `lua/mbar.d.lua`.
 
 ## Lua
 

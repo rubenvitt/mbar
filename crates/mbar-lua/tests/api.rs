@@ -652,6 +652,101 @@ fn errors_still_flush_and_are_reported() {
 }
 
 #[test]
+fn borders_emits_jankyborders_syntax() {
+    let (_, host) = run(r#"
+        mbar.borders({
+            active_color = 0xffe1e3e4,
+            inactive_color = "0xff494d64",
+            background_color = 0x302c2e34,
+            width = 5.0,
+            style = "round",
+            hidpi = true,
+            ax_focus = false,
+            order = "above",
+            blacklist = { "Safari", "kitty" },
+        })
+        mbar.borders({
+            active_color = { glow = 0xd2e1e3e4 },
+            inactive_color = { gradient = { top_left = 0xffff0000, bottom_right = 0x0000ff00 } },
+            background_color = { gradient = { top_right = 0x11223344, bottom_left = "0x55667788" } },
+            width = 4.5,
+            whitelist = {},
+        })
+        mbar.borders({ drawing = false })
+        mbar.borders({ apply_to = 4242, active_color = 0xffff0000 })
+        mbar.borders({ ["apply-to"] = 7, width = 2 })
+        mbar.borders({})    -- no pairs: nothing is sent
+    "#);
+    assert_eq!(
+        host.messages,
+        vec![argv(&[
+            "--borders",
+            "active_color=0xffe1e3e4",
+            "ax_focus=off",
+            "background_color=0x302c2e34",
+            "blacklist=Safari,kitty",
+            "hidpi=on",
+            "inactive_color=0xff494d64",
+            "order=above",
+            "style=round",
+            "width=5",
+            "--borders",
+            "active_color=glow(0xd2e1e3e4)",
+            "background_color=gradient(top_right=0x11223344,bottom_left=0x55667788)",
+            "inactive_color=gradient(top_left=0xffff0000,bottom_right=0x0000ff00)",
+            "whitelist=",
+            "width=4.5",
+            "--borders",
+            "drawing=off",
+            "--borders",
+            "active_color=0xffff0000",
+            "apply-to=4242",
+            "--borders",
+            "apply-to=7",
+            "width=2",
+        ])]
+    );
+    // Every emitted pair is accepted by the core's JankyBorders parser.
+    let pairs: Vec<String> = host.messages[0]
+        .iter()
+        .filter(|a| *a != "--borders")
+        .cloned()
+        .collect();
+    let (valid, errors) = mbar_core::borders::validate_args(&pairs);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(valid, pairs);
+    let mut settings = mbar_core::borders::BorderSettings::default();
+    for p in &pairs[..9] {
+        mbar_core::borders::parse_arg(&mut settings, p).unwrap();
+    }
+    assert_eq!(settings.blacklist, vec!["Safari", "kitty"]);
+    assert_eq!(settings.width, 5.0);
+    assert!(settings.hidpi);
+    assert_eq!(settings.ax_focus, Some(false));
+}
+
+#[test]
+fn borders_rejects_malformed_tables() {
+    let mut engine = LuaEngine::new().unwrap();
+    let mut host = Mock::default();
+    for bad in [
+        r#"mbar.borders({ 1, 2 })"#,
+        r#"mbar.borders({ active_color = {} })"#,
+        r#"mbar.borders({ active_color = { glow = 1, gradient = {} } })"#,
+        r#"mbar.borders({ active_color = { glow = true } })"#,
+        r#"mbar.borders({ active_color = { shimmer = 0xff000000 } })"#,
+        r#"mbar.borders({ active_color = { gradient = { top_left = 1, bottom_left = 2 } } })"#,
+        r#"mbar.borders({ active_color = { gradient = { top_left = 1, bottom_right = 2, x = 3 } } })"#,
+        r#"mbar.borders({ blacklist = { app = "Safari" } })"#,
+        r#"mbar.borders({ style = { "round" } })"#,
+        r#"mbar.borders({ width = function() end })"#,
+    ] {
+        assert!(engine.load_string(bad, "=bad", &mut host).is_err(), "{bad}");
+    }
+    assert!(host.messages.is_empty(), "{:?}", host.messages);
+}
+
+#[test]
 fn require_and_config_dir() {
     let dir = std::env::temp_dir().join(format!("mbar-lua-test-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("items")).unwrap();

@@ -53,6 +53,19 @@ pub fn lookup(service: &str) -> Option<mach_port_t> {
     }
 }
 
+/// Whether `service` is registered with the bootstrap server (a daemon serves it).
+pub fn is_registered(service: &str) -> bool {
+    let Some(port) = lookup(service) else {
+        return false;
+    };
+    // SAFETY: `port` is the send right `bootstrap_look_up` just gave this task; it is
+    // released exactly once and not used afterwards.
+    unsafe {
+        mach_port_deallocate(mach_task_self(), port);
+    }
+    true
+}
+
 /// Sends `payload` and waits for the response. `None` if the service is not
 /// registered or messaging failed (the caller then falls back to the socket).
 pub fn send(service: &str, payload: &[u8]) -> Option<String> {

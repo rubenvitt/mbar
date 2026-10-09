@@ -12,8 +12,8 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::model::{
-    parse_monitor_line, set_args, trigger_args, BarInfo, ItemInfo, MonitorMessage, Snapshot, Stats,
-    Target,
+    borders_drawing_args, parse_monitor_line, set_args, trigger_args, BarInfo, BordersInfo,
+    ItemInfo, MonitorMessage, Snapshot, Stats, Target,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,6 +151,17 @@ impl Client {
     /// `--menubar hide|show|toggle`.
     pub fn menubar(&self, mode: &str) -> Result<String, IpcError> {
         self.send_strs(&["--menubar", mode])
+    }
+
+    /// `--query borders`: the window-border configuration.
+    pub fn query_borders(&self) -> Result<BordersInfo, IpcError> {
+        let rsp = self.send_strs(&["--query", "borders"])?;
+        BordersInfo::parse(&rsp).map_err(IpcError::Io)
+    }
+
+    /// `--borders drawing=on|off`.
+    pub fn set_borders_drawing(&self, on: bool) -> Result<String, IpcError> {
+        self.send(&borders_drawing_args(on))
     }
 }
 
