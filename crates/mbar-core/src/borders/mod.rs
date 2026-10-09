@@ -5,8 +5,10 @@
 //! platform owns the live set of tracked windows and draws the border windows. Every change
 //! reaches the platform as one [`crate::platform::PlatformRequest::SetBorders`].
 
+mod geometry;
 mod parse;
 
+pub use geometry::*;
 pub use parse::{apply_to_window, parse_arg, validate_args, ArgError};
 
 use crate::value::{fmt_f, format_bool, json_escape, parse_bool};
