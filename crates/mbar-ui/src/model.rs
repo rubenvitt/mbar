@@ -784,6 +784,110 @@ pub fn export_pairs(rows: &[PropRow]) -> Vec<(String, String)> {
 }
 
 // ---------------------------------------------------------------------------
+// Window borders
+// ---------------------------------------------------------------------------
+
+/// `--query borders` (mbar extension; design doc
+/// `docs/superpowers/specs/2026-10-09-borders-design.md` §1). Colors keep the daemon's
+/// text (`0xAARRGGBB`, `glow(…)`, `gradient(…)`); missing fields read as empty/zero.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BordersInfo {
+    pub drawing: bool,
+    pub active_color: String,
+    pub inactive_color: String,
+    pub background_color: String,
+    pub width: f64,
+    pub style: String,
+    pub order: String,
+    pub hidpi: bool,
+    /// `on`, `off` or `auto` (on when mbar has Accessibility permission).
+    pub ax_focus: String,
+    pub blacklist: Vec<String>,
+    pub whitelist: Vec<String>,
+    /// Window ids with an `apply-to` override.
+    pub overrides: Vec<u64>,
+}
+
+fn on_off(v: Option<&Value>) -> bool {
+    match v {
+        Some(Value::String(s)) => matches!(s.trim(), "on" | "true" | "yes" | "1"),
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Number(n)) => n.as_f64().is_some_and(|f| f != 0.0),
+        _ => false,
+    }
+}
+
+impl BordersInfo {
+    pub fn parse(text: &str) -> Result<BordersInfo, String> {
+        let v = parse_json_lenient(text)?;
+        BordersInfo::from_json(&v)
+    }
+
+    pub fn from_json(v: &Value) -> Result<BordersInfo, String> {
+        if !v.is_object() {
+            return Err("borders query did not return an object".into());
+        }
+        if v.get("active_color").is_none() {
+            // An item named `borders` wins over the borders query (like `stats`).
+            return Err(if v.get("name").is_some() || v.get("type").is_some() {
+                "an item named 'borders' answers `--query borders`".into()
+            } else {
+                "not a borders configuration".into()
+            });
+        }
+        let s = |key: &str| get_str(v, &[key]).unwrap_or_default().to_string();
+        Ok(BordersInfo {
+            drawing: on_off(v.get("drawing")),
+            active_color: s("active_color"),
+            inactive_color: s("inactive_color"),
+            background_color: s("background_color"),
+            width: get_f64(v, &["width"]),
+            style: s("style"),
+            order: s("order"),
+            hidpi: on_off(v.get("hidpi")),
+            ax_focus: s("ax_focus"),
+            blacklist: string_list(v.get("blacklist")),
+            whitelist: string_list(v.get("whitelist")),
+            overrides: match v.get("overrides") {
+                Some(Value::Array(a)) => a
+                    .iter()
+                    .filter_map(|o| o.get("window").and_then(Value::as_u64))
+                    .collect(),
+                _ => Vec::new(),
+            },
+        })
+    }
+
+    /// One status line for the System page.
+    pub fn summary(&self) -> String {
+        let mut out = format!(
+            "{} · active {} · inactive {} · width {} · {}",
+            if self.drawing { "On" } else { "Off" },
+            self.active_color,
+            self.inactive_color,
+            format_float(self.width),
+            self.style,
+        );
+        if !self.overrides.is_empty() {
+            out.push_str(&format!(
+                " · {} window override{}",
+                self.overrides.len(),
+                if self.overrides.len() == 1 { "" } else { "s" }
+            ));
+        }
+        out
+    }
+}
+
+/// `--borders drawing=on|off`.
+pub fn borders_drawing_args(on: bool) -> Vec<String> {
+    vec![
+        "--borders".to_string(),
+        format!("drawing={}", if on { "on" } else { "off" }),
+    ]
+}
+
+// ---------------------------------------------------------------------------
 // Stats
 // ---------------------------------------------------------------------------
 
@@ -1619,6 +1723,73 @@ mod tests {
         assert_eq!(a.bar_name, "top");
         assert!(parse_cli_args(["--bar-name".into(), "--update".into()]).is_err());
         assert!(parse_cli_args(["--updates".into()]).is_err());
+    }
+
+    /// The `--query borders` layout from the design doc (tabs, `%f` floats).
+    const BORDERS_QUERY: &str = "{\n\t\"drawing\": \"on\",\n\t\"active_color\": \"0xffe1e3e4\",\n\t\"inactive_color\": \"0x00000000\",\n\t\"background_color\": \"0x00000000\",\n\t\"width\": 4.000000,\n\t\"style\": \"round\",\n\t\"order\": \"below\",\n\t\"hidpi\": \"off\",\n\t\"ax_focus\": \"auto\",\n\t\"blacklist\": [],\n\t\"whitelist\": [],\n\t\"overrides\": []\n}\n";
+
+    #[test]
+    fn borders_query_parsed() {
+        let b = BordersInfo::parse(BORDERS_QUERY).unwrap();
+        assert_eq!(
+            b,
+            BordersInfo {
+                drawing: true,
+                active_color: "0xffe1e3e4".into(),
+                inactive_color: "0x00000000".into(),
+                background_color: "0x00000000".into(),
+                width: 4.0,
+                style: "round".into(),
+                order: "below".into(),
+                hidpi: false,
+                ax_focus: "auto".into(),
+                blacklist: vec![],
+                whitelist: vec![],
+                overrides: vec![],
+            }
+        );
+        assert_eq!(
+            b.summary(),
+            "On · active 0xffe1e3e4 · inactive 0x00000000 · width 4 · round"
+        );
+    }
+
+    #[test]
+    fn borders_query_with_lists_gradients_and_overrides() {
+        let text = "{\n\t\"drawing\": \"off\",\n\t\"active_color\": \"gradient(top_left=0xffff0000,bottom_right=0xff0000ff)\",\n\t\"inactive_color\": \"glow(0x80ffffff)\",\n\t\"background_color\": \"0x00000000\",\n\t\"width\": 5.500000,\n\t\"style\": \"square\",\n\t\"order\": \"above\",\n\t\"hidpi\": \"on\",\n\t\"ax_focus\": \"off\",\n\t\"blacklist\": [ \"Safari\", \"kitty\" ],\n\t\"whitelist\": [],\n\t\"overrides\": [\n\t\t{\n\t\t\t\"window\": 1234,\n\t\t\t\"active_color\": \"0xff00ff00\",\n\t\t\t\"width\": 8.000000\n\t\t}\n\t]\n}\n";
+        let b = BordersInfo::parse(text).unwrap();
+        assert!(!b.drawing);
+        assert_eq!(
+            b.active_color,
+            "gradient(top_left=0xffff0000,bottom_right=0xff0000ff)"
+        );
+        assert_eq!(b.inactive_color, "glow(0x80ffffff)");
+        assert_eq!(b.width, 5.5);
+        assert_eq!(b.style, "square");
+        assert_eq!(b.order, "above");
+        assert!(b.hidpi);
+        assert_eq!(b.ax_focus, "off");
+        assert_eq!(b.blacklist, vec!["Safari".to_string(), "kitty".to_string()]);
+        assert_eq!(b.overrides, vec![1234]);
+        assert_eq!(
+            b.summary(),
+            "Off · active gradient(top_left=0xffff0000,bottom_right=0xff0000ff) · inactive glow(0x80ffffff) · width 5.5 · square · 1 window override"
+        );
+    }
+
+    #[test]
+    fn borders_query_errors() {
+        // An item named `borders` answers the query instead.
+        let err = BordersInfo::parse(ITEM_FOO).unwrap_err();
+        assert!(err.contains("item named 'borders'"), "{err}");
+        assert!(BordersInfo::parse("[]").is_err());
+        assert!(BordersInfo::parse("{ \"x\": 1 }").is_err());
+        assert!(BordersInfo::parse("").is_err());
+        assert_eq!(
+            borders_drawing_args(true),
+            vec!["--borders".to_string(), "drawing=on".to_string()]
+        );
+        assert_eq!(borders_drawing_args(false)[1], "drawing=off");
     }
 
     #[test]
