@@ -1,10 +1,10 @@
 # Installing mbar
 
 mbar runs on macOS. The usual way to install it is the app, `mbar.app`,
-from a DMG. It contains the bar daemon, the management UI and the `mbar` and
-`sketchybar` commands, and it updates itself. You can also build mbar from
-source (below). On Linux mbar only builds a headless daemon, which the tests
-use.
+from a DMG. It contains the bar daemon, the management UI and the `mbar`,
+`sketchybar` and `borders` commands, and it updates itself. You can also build
+mbar from source (below). On Linux mbar only builds a headless daemon, which
+the tests use.
 
 ## Install the app
 
@@ -13,16 +13,17 @@ use.
 3. Open mbar. The setup page walks through:
    - moving the app to Applications, if you opened it from the DMG or
      Downloads,
-   - removing Homebrew SketchyBar and older mbar installs (it lists everything first),
-   - using your existing `~/.config/sketchybar` config (a SbarLua `sketchybarrc` gets an `init.lua`),
-   - installing the `mbar` and `sketchybar` commands (`/etc/paths.d/mbar`, one admin prompt),
+   - removing Homebrew SketchyBar, Homebrew JankyBorders (`borders`) and older mbar installs (it lists everything first),
+   - using your existing `~/.config/sketchybar` config (a SbarLua `sketchybarrc` gets an `init.lua`)
+     and your `bordersrc` in place,
+   - installing the `mbar`, `sketchybar` and `borders` commands (`/etc/paths.d/mbar`, one admin prompt),
    - starting mbar at login (System Settings → General → Login Items shows "mbar"),
    - Accessibility and Screen Recording.
 
 Updates: mbar checks for new versions once a day and opens the update dialog by itself.
 Turn this off on the System page. Open terminals after setup see the new commands;
 tools started without a login shell (AeroSpace, skhd, …) need the full path
-`/Applications/mbar.app/Contents/Resources/bin/sketchybar`.
+`/Applications/mbar.app/Contents/Resources/bin/sketchybar` (or `…/bin/borders`).
 
 The app needs macOS 13 or later. More about it:
 
@@ -30,8 +31,11 @@ The app needs macOS 13 or later. More about it:
   command's output), and can be skipped and retried. Setup never deletes or
   edits your configs. It only creates an `init.lua`, either next to a SbarLua
   `sketchybarrc` or, when no config exists at all, a starter config in
-  `~/.config/mbar/`. A `sketchybar` that is not an mbar symlink (for example a
-  script of your own in `~/.local/bin`) is reported, never removed. Helpers
+  `~/.config/mbar/`. A `sketchybar` or `borders` that is not an mbar symlink
+  (for example a script of your own in `~/.local/bin`) is reported, never
+  removed. Window-manager lines that start `borders` (in `aerospace.toml` or
+  `yabairc`) are listed, not changed (see
+  [`MIGRATING.md`](MIGRATING.md#migrating-from-jankyborders)). Helpers
   that talk to SketchyBar's mach port (`git.felix.*`) are reported with a hint
   (see [`MIGRATING.md`](MIGRATING.md)).
 - The System page reopens the setup at any time. If you move or rename the
@@ -39,7 +43,8 @@ The app needs macOS 13 or later. More about it:
   shows the entry as stale and fixes it with the same admin prompt.
 - The daemon runs as the login item `dev.rubeen.mbar`, from
   `mbar.app/Contents/MacOS/mbar`. It logs to `~/Library/Logs/mbar.log`. Its
-  scripts find `mbar` and `sketchybar` first on their `PATH`, followed by
+  scripts (and `bordersrc`) find `mbar`, `sketchybar` and `borders` first on
+  their `PATH`, followed by
   `/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`.
 - Update checks start two minutes after the daemon starts and repeat every
   24 hours. A new version is offered at most once a day; "Skip This Version"
@@ -133,11 +138,12 @@ notarization credentials unless `NOTARIZE=0`) builds the DMG, the update zip and
 ### Install
 
 `make install` copies the binary from `make release` and creates the
-`sketchybar` symlink. It does not build anything, so it can run under `sudo`:
+`sketchybar` and `borders` symlinks. It does not build anything, so it can run
+under `sudo`:
 
 ```sh
 make release
-make install PREFIX=$HOME/.local     # -> ~/.local/bin/mbar, ~/.local/bin/sketchybar
+make install PREFIX=$HOME/.local     # -> ~/.local/bin/mbar, ~/.local/bin/sketchybar, ~/.local/bin/borders
 sudo make install                    # PREFIX defaults to /usr/local
 make ui && make install-ui PREFIX=$HOME/.local   # optional: mbar-ui
 ```
@@ -149,6 +155,7 @@ To install by hand:
 install -d ~/.local/bin
 install -m 755 target/release/mbar ~/.local/bin/mbar   # or your configured target directory
 ln -sf mbar ~/.local/bin/sketchybar
+ln -sf mbar ~/.local/bin/borders                       # optional, for JankyBorders users
 ```
 
 Make sure the directory is on your `PATH`.
@@ -168,6 +175,28 @@ and `--version` text. A daemon started through the symlink also runs as bar
 - If SketchyBar is also installed (for example via Homebrew), whichever
   `sketchybar` comes first on the `PATH` wins. Uninstall SketchyBar, or make sure
   the symlink comes first. Skip the symlink with `make install SKETCHYBAR_LINK=0`.
+
+#### The `borders` symlink
+
+mbar also draws JankyBorders' window borders. With a `borders -> mbar` symlink
+on the `PATH`, `borders active_color=… width=5.0` calls (in `bordersrc`, a
+`yabairc` or `aerospace.toml`) reach mbar unchanged. Invoked as `borders`, the
+binary checks the arguments like JankyBorders, sends the valid ones to the
+default bar `mbar` as `--borders …` and prints `borders-v1.9.0` for `-v`. It
+never starts a daemon: if mbar is not running, it waits up to 5 s and then exits
+with an error.
+
+- Like the `sketchybar` symlink, it must be on the `PATH` of whatever calls
+  `borders`: the daemon (for `bordersrc`) and your window manager (for its
+  launch lines).
+- A Homebrew `borders` (JankyBorders) that comes first on the `PATH` wins.
+  Stop and uninstall it (`brew services stop borders && brew uninstall
+  borders`), or make sure the symlink comes first. Skip the symlink with
+  `make install BORDERS_LINK=0`. An existing `borders` that is not a symlink is
+  left alone.
+
+See [`MIGRATING.md`](MIGRATING.md#migrating-from-jankyborders) for moving from
+JankyBorders.
 
 Any other name for the binary (for example a `bottom -> mbar` symlink) starts an
 independent bar instance with its own config directory (`~/.config/bottom/`),
@@ -254,8 +283,9 @@ brew install --HEAD "$USER/local/mbar"
 brew services start mbar
 ```
 
-The formula does not create the `sketchybar` symlink, because that would
-conflict with the `sketchybar` formula. Its caveats show the command for it.
+The formula does not create the `sketchybar` and `borders` symlinks, because
+they would conflict with the `sketchybar` formula and with
+`felixkratz/formulae/borders`. Its caveats show the commands for them.
 
 `brew services` uses its own launchd label (`homebrew.mxcl.mbar`). Use either
 `brew services` or `make install-agent`, not both. The app's setup stops the
@@ -296,7 +326,7 @@ links to these panes.
 
 | Permission | Needed for | Without it |
 |---|---|---|
-| **Accessibility** | `app_menu` items, `--menu`, `--query menus`, the `menus_change` event | `app_menu` draws nothing and `--query menus` answers with an error. mbar does not show a prompt, so add it by hand. mbar picks up the grant at the next front-app switch. |
+| **Accessibility** | `app_menu` items, `--menu`, `--query menus`, the `menus_change` event, finding the focused window for borders (`ax_focus`) | `app_menu` draws nothing and `--query menus` answers with an error. Borders find the focused window through SkyLight instead (`ax_focus=on` logs a warning). mbar does not show a prompt, so add it by hand. mbar picks up the grant at the next front-app switch. |
 | **Screen Recording** | `alias` items (capturing menu extras) and `--query default_menu_items` | Aliases stay empty, and the query prints SketchyBar's "Screen Recording Permissions not given" error. mbar asks once per process when the first alias is added. Restart mbar after you grant it. |
 | **Location Services** | The Wi-Fi SSID (`wifi_change` `INFO`, the `wifi` provider's `{ssid}`) on macOS 14 and later | See below. |
 
@@ -360,12 +390,13 @@ reserves the gap around the notch for `q`/`e` items, as in SketchyBar.
 
 Then remove mbar from System Settings → Privacy & Security → Accessibility and
 Screen Recording. Your config in `~/.config/mbar/` (or `~/.config/sketchybar/`)
-is left in place.
+and your `bordersrc` are left in place. To go back to JankyBorders, run
+`brew install felixkratz/formulae/borders && brew services start borders`.
 
 ### Source builds
 
 ```sh
-make uninstall PREFIX=$HOME/.local   # stops and removes the LaunchAgent and the installed files
+make uninstall PREFIX=$HOME/.local   # stops and removes the LaunchAgent, the installed files and the mbar symlinks
 ```
 
 For a system-wide install, remove the agent as your own user first, then the
@@ -381,7 +412,7 @@ or by hand:
 ```sh
 launchctl bootout gui/$(id -u)/dev.rubeen.mbar 2>/dev/null
 rm -f ~/Library/LaunchAgents/dev.rubeen.mbar.plist
-rm -f ~/.local/bin/mbar ~/.local/bin/sketchybar ~/.local/bin/mbar-ui   # only if sketchybar is the mbar symlink
+rm -f ~/.local/bin/mbar ~/.local/bin/sketchybar ~/.local/bin/borders ~/.local/bin/mbar-ui   # only if sketchybar and borders are mbar symlinks
 rm -rf ~/.local/share/mbar
 rm -f ~/Library/Logs/mbar.log
 ```

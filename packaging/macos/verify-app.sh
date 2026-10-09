@@ -8,7 +8,7 @@ for k in CFBundleIdentifier CFBundleExecutable CFBundleShortVersionString CFBund
   check "Info.plist $k" "/usr/libexec/PlistBuddy -c 'Print :$k' '$C/Info.plist' >/dev/null 2>&1"
 done
 check "bundle id" "[ \"\$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' '$C/Info.plist')\" = dev.rubeen.mbar ]"
-for n in mbar sketchybar; do
+for n in mbar sketchybar borders; do
   check "bin/$n relative symlink" "[ \"\$(readlink '$C/Resources/bin/$n')\" = ../../MacOS/mbar ]"
 done
 check "daemon universal or native" "lipo -info '$C/MacOS/mbar' | grep -Eq 'arm64|x86_64'"
