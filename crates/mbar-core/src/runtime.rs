@@ -23,7 +23,6 @@
 
 use crate::animation::{self, AnimStep, Animator};
 use crate::bar::{BarState, DISPLAY_MAIN};
-use crate::borders::{BordersState, UpdateMask};
 use crate::command::{
     self, AddCommand, Command, MenuBarAction, MonitorMode, Placement, QueryTarget, Selector,
     SetToken,
@@ -1772,9 +1771,10 @@ impl Runtime {
     }
 
     /// `--reload` / hotload (`cli.md` §11): mach helpers get `"k"`, animations dropped, model
-    /// re-initialised (events back to built-ins, listeners kept; borders configuration reset,
-    /// with `SetBorders { drawing: false, mask: RECREATE_ALL }` when they were drawing), bars
-    /// recreated, `Effect::RunConfig`.
+    /// re-initialised (events back to built-ins, listeners kept; the borders configuration is
+    /// carried over, as JankyBorders was a separate process unaffected by bar reloads, so the
+    /// borders a window manager's launch line set survive; the re-run config applies its
+    /// `--borders` keys on top), bars recreated, `Effect::RunConfig`.
     fn reload(&mut self, path: Option<String>, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
         self.send_mach_destroy(effects);
         for it in &self.model.items {
@@ -1790,13 +1790,9 @@ impl Runtime {
             }
         }
         self.animator.clear();
-        if self.model.borders.drawing {
-            // The config runs again from a reset borders configuration; remove the border
-            // windows until a `--borders` message turns them on again.
-            let off = BordersState::default().update(UpdateMask(UpdateMask::RECREATE_ALL));
-            effects.push(Effect::Platform(PlatformRequest::SetBorders(Box::new(off))));
-        }
+        let borders = std::mem::take(&mut self.model.borders);
         self.model = Model::new();
+        self.model.borders = borders;
         self.anim = None;
         self.sleeps = false;
         self.force_refresh = false;

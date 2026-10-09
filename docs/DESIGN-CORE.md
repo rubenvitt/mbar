@@ -128,8 +128,9 @@ pub enum Effect {
 
 `PlatformRequest::SetBorders(Box<BordersUpdate>)` carries the complete borders
 configuration (drawing, global settings, `apply-to` overrides) plus an update mask. The
-runtime emits it once per `--borders` message that changed something and, with
-`drawing: false`, on `--reload` when borders were drawing. The core never sees windows:
+runtime emits it once per `--borders` message that changed something. The borders
+configuration survives `--reload` and hotload (carried over into the new model, no
+`SetBorders`; the re-run config applies its keys on top). The core never sees windows:
 the platform tracks them and draws the border windows itself
 (`docs/superpowers/specs/2026-10-09-borders-design.md`).
 

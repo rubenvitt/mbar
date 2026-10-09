@@ -62,6 +62,11 @@ pub fn parse_arg(settings: &mut BorderSettings, arg: &str) -> Result<UpdateMask,
         return Ok(UpdateMask(UpdateMask::RECREATE_ALL));
     }
     if let Some(width) = arg.strip_prefix("width=").and_then(scan_float) {
+        // Deviation: `%f` also reads `inf`/`nan` (and overflows to `inf`); a non-finite
+        // width cannot be drawn and would print invalid JSON in `--query borders`.
+        if !width.is_finite() {
+            return Err(ArgError::InvalidArgument);
+        }
         settings.width = width;
         return Ok(UpdateMask(UpdateMask::ALL));
     }
@@ -441,8 +446,14 @@ mod tests {
         assert_eq!(parse("width=5px").0.width, 5.0);
         assert_eq!(parse("width= -3").0.width, -3.0);
         assert_eq!(parse("width=2.5e1").0.width, 25.0);
-        assert!(parse("width=inf").0.width.is_infinite());
         assert_eq!(parse("width=0x1p2").0.width, 4.0);
+        // Non-finite widths are rejected (deviation; `%f` accepts them) and leave the
+        // width alone.
+        for arg in ["width=inf", "width=-Infinity", "width=nan", "width=1e39"] {
+            let (s, r) = parse(arg);
+            assert_eq!(r, Err(ArgError::InvalidArgument), "{arg}");
+            assert_eq!(s.width, 4.0, "{arg}");
+        }
         assert_eq!(parse("width=").1, Err(ArgError::InvalidArgument));
         assert_eq!(parse("width=abc").1, Err(ArgError::InvalidArgument));
         assert_eq!(parse("order=above").0.order, BorderOrder::Above);

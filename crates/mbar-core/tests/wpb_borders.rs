@@ -318,6 +318,16 @@ fn apply_to_and_overrides() {
     );
     assert_eq!(q["overrides"][0]["blacklist"][0], "Safari");
 
+    // BR-IPC-07: another apply-to message for the window rebuilds its override from the
+    // current globals plus that message; the earlier gradient and blacklist are gone.
+    let (_, ups) = send(&mut h, &["--borders", "apply-to=4711", "width=3"]);
+    assert_eq!(ups[0].overrides.len(), 1);
+    let o = &ups[0].overrides[0].1;
+    assert_eq!(o.width, 3.0);
+    assert_eq!(o.active, BorderColor::Solid(0xff111111));
+    assert_eq!(o.style, BorderStyle::Uniform);
+    assert!(o.blacklist.is_empty());
+
     // RECREATE_ALL (global whitelist) drops every override.
     let (_, ups) = send(&mut h, &["--borders", "whitelist=kitty,Code"]);
     assert!(ups[0].overrides.is_empty());
@@ -392,50 +402,50 @@ fn item_named_borders_wins() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn reload_resets_and_turns_borders_off() {
+fn reload_keeps_the_borders_configuration() {
     let mut h = H::new();
     send(&mut h, &["--borders", "width=9", "apply-to=3"]);
     send(&mut h, &["--borders", "style=square"]);
+    let before = h.rt.model.borders.clone();
     let (_, fx) = h.msg_fx(&["--reload"]);
-    let ups = borders_updates(&fx);
-    assert_eq!(ups.len(), 1);
-    assert!(!ups[0].drawing);
-    assert_eq!(ups[0].mask, UpdateMask(UpdateMask::RECREATE_ALL));
-    assert!(ups[0].overrides.is_empty());
-    // Sent before the config runs again.
-    let off = fx
-        .iter()
-        .position(|e| matches!(e, Effect::Platform(PlatformRequest::SetBorders(_))))
-        .unwrap();
-    let run = fx
-        .iter()
-        .position(|e| matches!(e, Effect::RunConfig { .. }))
-        .unwrap();
-    assert!(off < run);
-    // The configuration is back to the defaults, not configured.
+    // No request: the border windows stay as they are while the config runs again.
+    assert!(borders_updates(&fx).is_empty());
+    assert!(fx.contains(&Effect::RunConfig { path: None }));
+    // The configuration (drawing, settings, overrides) is carried over.
+    assert_eq!(h.rt.model.borders, before);
     let b = &h.rt.model.borders;
-    assert!(!b.drawing && !b.configured);
-    assert!(b.overrides.is_empty());
-    assert_eq!(b.settings.style, BorderStyle::Round);
-    // The config's first --borders message turns them on again.
+    assert!(b.drawing && b.configured);
+    assert_eq!(b.settings.style, BorderStyle::Square);
+    assert_eq!(b.overrides.len(), 1);
+    assert_eq!(b.overrides[0].0, 3);
+    assert_eq!(h.query(&["borders"])["style"], "square");
+    // The re-run config applies its keys on top: an unchanged key sends nothing ...
+    let (_, ups) = send(&mut h, &["--borders", "style=square"]);
+    assert!(ups.is_empty());
+    // ... a changed one sends the full configuration, still drawing.
     let (_, ups) = send(&mut h, &["--borders", "width=2"]);
+    assert_eq!(ups.len(), 1);
     assert!(ups[0].drawing);
+    assert_eq!(ups[0].settings.style, BorderStyle::Square);
 
-    // Not drawing before the reload: no request.
+    // Turned off explicitly: stays off across a reload (the re-run config's messages
+    // without drawing= do not turn it on again).
     send(&mut h, &["--borders", "drawing=off"]);
     let (_, fx) = h.msg_fx(&["--reload"]);
     assert!(borders_updates(&fx).is_empty());
-    assert!(fx.contains(&Effect::RunConfig { path: None }));
+    assert!(!h.rt.model.borders.drawing);
+    let (_, ups) = send(&mut h, &["--borders", "width=3"]);
+    assert!(!ups[0].drawing);
 }
 
 #[test]
-fn hotload_reload_turns_borders_off_too() {
+fn hotload_reload_keeps_the_borders_configuration_too() {
     let mut h = H::new();
     h.msg(&["--hotload", "on"]);
     send(&mut h, &["--borders", "width=9"]);
     let fx = h.input(Input::Event(OsEvent::ConfigChanged));
-    let ups = borders_updates(&fx);
-    assert_eq!(ups.len(), 1);
-    assert!(!ups[0].drawing);
-    assert!(!h.rt.model.borders.configured);
+    assert!(borders_updates(&fx).is_empty());
+    let b = &h.rt.model.borders;
+    assert!(b.drawing && b.configured);
+    assert_eq!(b.settings.width, 9.0);
 }

@@ -262,14 +262,14 @@
 ---@field active_color? mbar.BorderColor Focused window (default 0xffe1e3e4)
 ---@field inactive_color? mbar.BorderColor Other windows (default 0x00000000)
 ---@field background_color? mbar.BorderColor Fill behind windows (default 0x00000000: off)
----@field width? number Border width in points (default 4.0)
+---@field width? number Border width in points (default 4.0; must be finite)
 ---@field style? "round"|"square"|"uniform"
 ---@field order? "above"|"below"
 ---@field hidpi? boolean
 ---@field ax_focus? boolean Track focus through Accessibility (default: on when trusted)
 ---@field blacklist? string[]|string Process names that get no border
 ---@field whitelist? string[]|string Only these process names get a border
----@field apply_to? integer Window id: the other keys apply to this window only (sent as `apply-to`)
+---@field apply_to? integer Window id: the other keys apply to this window only, on top of the global settings, replacing its earlier override (sent as `apply-to`)
 
 ------------------------------------------------------------------------------
 -- Item objects

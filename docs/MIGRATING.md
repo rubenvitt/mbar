@@ -340,9 +340,19 @@ them, so nothing changes if you never used JankyBorders.
    Leave the switch on: a Homebrew `borders` that comes earlier on the `PATH`
    hides mbar's `borders` link. If you start `borders` some other way (your
    own LaunchAgent, a login script), stop that yourself.
+   - While JankyBorders still runs (its mach service `git.felix.borders` is
+     registered), mbar does **not** run `bordersrc`, so the two do not both
+     draw borders. The log says `bordersrc not run: JankyBorders is running
+     (git.felix.borders); stop it with brew services stop borders or finish
+     the borders step in mbar.app setup`, and the System page of `mbar.app`
+     shows a warning with a button that stops it. After that, the next start
+     or `mbar --reload` runs `bordersrc`.
 2. Leave `~/.config/borders/bordersrc` (or `~/.bordersrc`) where it is. mbar
-   runs it after its own config, on every start and every `--reload`. The
-   `borders …` lines in it reach mbar through the `borders` link.
+   runs it together with its own config, on every start and every `--reload`.
+   The `borders …` lines in it reach mbar through the `borders` link. A shell
+   config (`mbarrc`, `sketchybarrc`) and `bordersrc` run at the same time, so
+   if both set the same key either may win; a Lua config runs first. Keep each
+   borders setting in one file.
 3. Check the launch lines in your window manager's config, for example
    `borders active_color=0xffe1e3e4 width=5.0 &` in `yabairc` or
    `exec-and-forget borders …` in `aerospace.toml`. The setup lists them.
@@ -411,13 +421,13 @@ result on screen:
 |---|---|
 | `active_color`, `inactive_color` | `0xAARRGGBB`, `glow(0x…)`, `gradient(top_left=0x…,bottom_right=0x…)`, `gradient(top_right=0x…,bottom_left=0x…)` |
 | `background_color` | `0xAARRGGBB`. As in JankyBorders, a gradient is accepted but not drawn and a glow draws as a solid fill |
-| `width` | float, default `4.0` |
+| `width` | float, default `4.0` (`inf` and `nan` are rejected, see below) |
 | `style` | `round`, `square`, `uniform` |
 | `order` | `above`, `below` (undocumented in JankyBorders) |
 | `hidpi` | `on`, `off` |
 | `ax_focus` | `on`, `off`; default on when mbar has Accessibility permission |
 | `blacklist`, `whitelist` | comma-separated process names, exact and case-sensitive |
-| `apply-to` | window id: the other keys of that call apply to this window only (undocumented in JankyBorders) |
+| `apply-to` | window id: the other keys of that call apply to this window only (undocumented in JankyBorders). Each call sets that window's override to the current global settings plus its own keys, replacing an earlier one, as in JankyBorders |
 
 Also unchanged:
 
@@ -461,6 +471,18 @@ The ones you are most likely to notice:
 - **`apply-to` is not sticky.** In JankyBorders, a daemon started with
   `apply-to=N` sent every later call to window N. In mbar `apply-to=` only
   affects the call it is in.
+- **`apply-to` overrides are capped.** mbar keeps at most 64 of them and drops
+  the oldest. The override of a closed window stays until a `hidpi=`,
+  `blacklist=` or `whitelist=` change or the cap drops it; JankyBorders lost it
+  with the window.
+- **Borders survive `--reload`.** Like the separate JankyBorders process, the
+  borders configuration is not reset when mbar reloads its config (or
+  hotloads it), so borders set by a window manager's launch line stay. The
+  config and `bordersrc` run again and apply their keys on top. Deleting the
+  borders lines does not turn borders off on the next reload: run
+  `mbar --borders drawing=off` (or restart mbar).
+- **`width=inf` / `width=nan`** are rejected as invalid arguments.
+  JankyBorders accepted them.
 - **`ax_focus=on` without Accessibility** logs a warning and falls back to the
   SkyLight focus path. JankyBorders exited.
 - **Focus at startup.** mbar highlights the focused window right after borders

@@ -425,7 +425,7 @@ mbar's `drawing`. The values are converted to the JankyBorders syntax:
 | `whitelist = {}` | `whitelist=` (no filter) |
 | `width = 5.0`, `width = 4.5` | `width=5`, `width=4.5` |
 | `hidpi = true`, `drawing = false` | `hidpi=on`, `drawing=off` |
-| `apply_to = 4242` | `apply-to=4242` (only window 4242 gets the other keys) |
+| `apply_to = 4242` | `apply-to=4242` (window 4242 gets the global settings plus the other keys, replacing its earlier override) |
 
 Strings are sent verbatim, so `active_color = "glow(0xffe1e3e4)"` works too.
 A table that has no JankyBorders form (`active_color = { shimmer = 1 }`,
@@ -433,7 +433,9 @@ A table that has no JankyBorders form (`active_color = { shimmer = 1 }`,
 rejects are not: its `[!] Borders: ...` answer is logged as a warning, like
 for every queued command, and the valid keys of the same call still apply. A `~/.config/borders/bordersrc` is still run
 after `init.lua`; once its settings are in `init.lua`, delete it. The current
-settings are in `mbar.query("borders")`.
+settings are in `mbar.query("borders")`. The borders settings survive
+`mbar --reload` and hotload, so deleting an `mbar.borders` call does not turn
+borders off on the next reload; `mbar.borders({ drawing = false })` does.
 
 ## Differences from SbarLua
 

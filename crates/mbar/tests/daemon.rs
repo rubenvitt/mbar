@@ -579,12 +579,21 @@ fn borders_configuration_round_trip() {
     assert_eq!(stderr(&out), "[!] Borders: Invalid argument 'glow=1'\n");
     assert_eq!(sb.query("borders")["drawing"], "off");
 
-    // `--reload` resets the configuration (no config, no bordersrc in the sandbox).
-    let out = sb.mbar(&["--reload"]);
+    // `--reload` keeps the configuration (no config, no bordersrc in the sandbox): the
+    // bar items are gone, the borders settings and overrides are not.
+    let out = sb.mbar(&["--borders", "drawing=on"]);
     assert!(out.status.success(), "{}", stderr(&out));
-    sb.wait_for("borders", "reset", |v| {
-        v["drawing"] == "off" && v["width"] == 4.0 && v["overrides"] == serde_json::json!([])
-    });
+    let before = sb.query("borders");
+    let out = sb.mbar(&["--add", "item", "transient", "left", "--reload"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = sb.mbar(&["--query", "transient"]);
+    assert_eq!(out.status.code(), Some(1), "item survived the reload");
+    let v = sb.query("borders");
+    assert_eq!(v, before);
+    assert_eq!(v["drawing"], "on");
+    assert_eq!(v["width"], 6.5);
+    assert_eq!(v["style"], "square");
+    assert_eq!(v["overrides"][0]["window"], 42);
 }
 
 /// Borders design §3: the default bar runs `~/.config/borders/bordersrc` after its main

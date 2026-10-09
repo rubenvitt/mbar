@@ -144,14 +144,14 @@ That token is reported as `[!] Borders: Expected <key>=<value> pair, but got: '<
 | `active_color` | `0xAARRGGBB`, `glow(0xAARRGGBB)`, `gradient(top_left=0x…,bottom_right=0x…)`, `gradient(top_right=0x…,bottom_left=0x…)` | `0xffe1e3e4` |
 | `inactive_color` | same | `0x00000000` |
 | `background_color` | `0xAARRGGBB` (a gradient is accepted but not drawn, a glow draws as a solid fill) | `0x00000000` |
-| `width` | float | `4.0` |
+| `width` | float (finite: `inf` and `nan` are rejected) | `4.0` |
 | `style` | `round`, `square`, `uniform` (first character counts; anything else is round) | `round` |
 | `order` | `above`, `below` (first character `a` is above, anything else below) | `below` |
 | `hidpi` | `on`, `off` | `off` |
 | `ax_focus` | `on`, `off`: find the focused window through Accessibility | on when mbar has Accessibility permission |
 | `blacklist` | comma-separated process names (exact, case-sensitive, not trimmed) | empty |
 | `whitelist` | same | empty |
-| `apply-to` | window id: the message's other keys apply to this window only (`0` = all) | `0` |
+| `apply-to` | window id: the message's other keys apply to this window only (`0` = all). Each message rebuilds the window's override as the current global settings plus its own keys, replacing an earlier override, as in JankyBorders. At most 64 overrides are kept (the oldest is dropped); overrides of closed windows stay until a `hidpi`/`blacklist`/`whitelist` change or the cap drops them | `0` |
 | `drawing` | `on`, `off` (mbar boolean values) | off until configured |
 
 All keys except `drawing` use JankyBorders' grammar, including its leniency (`width=5px`
@@ -163,8 +163,12 @@ Errors use mbar's `[!]` convention (the client prints them on stderr and exits 1
 `[!] Borders: Invalid argument '<tok>'` and `[!] Borders: Invalid color argument
 color<rest>`. Valid keys in the same message still apply.
 
-`--reload` resets the borders configuration with the rest of the model and runs the
-config and `bordersrc` again.
+The borders configuration **survives** `--reload` and hotload: JankyBorders was a
+separate process that bar reloads never touched, so borders set by a window manager's
+launch line (`exec-and-forget borders …` in `aerospace.toml`) stay. The config and
+`bordersrc` run again and apply their keys on top; nothing is redrawn when they change
+nothing. Removing the borders lines from a config therefore does not turn borders off on
+the next reload: send `mbar --borders drawing=off` (or restart mbar).
 
 ### `--query borders`
 
@@ -192,12 +196,24 @@ Colors print in their input syntax: `0xAARRGGBB`, `glow(0x…)` or `gradient(…
 
 ### `bordersrc`
 
-After its main config, the default bar `mbar` runs `~/.config/borders/bordersrc`, else
-`~/.bordersrc` (`$XDG_CONFIG_HOME` is not consulted, as in JankyBorders). It runs like
+Together with its main config, the default bar `mbar` runs `~/.config/borders/bordersrc`,
+else `~/.bordersrc` (`$XDG_CONFIG_HOME` is not consulted, as in JankyBorders). It runs like
 mbar's shell configs: made executable if needed, `sh -c` with the path quoted, killed
 after 60 s. In `mbar.app` its `PATH` starts with the bundle's `Resources/bin`, so the
 `borders …` lines in it reach mbar through the `borders` link. This happens on every start
 and every `--reload`.
+
+`bordersrc` is started right after the main config is started. A shell config (`mbarrc`,
+`sketchybarrc`) and `bordersrc` run **concurrently**, so when both set the same borders key
+either may win; a Lua config (`init.lua`) runs synchronously, so `bordersrc` runs after it.
+Keep each borders setting in one file.
+
+On macOS, when JankyBorders itself is still running (its mach service `git.felix.borders`
+is registered), mbar does **not** run `bordersrc`, so the two do not both draw borders. It
+logs `bordersrc not run: JankyBorders is running (git.felix.borders); stop it with brew
+services stop borders or finish the borders step in mbar.app setup`, and the `mbar.app`
+System page shows a warning with a button that stops it. The next start or `--reload`
+after JankyBorders is stopped runs `bordersrc`.
 
 ### The `borders` command
 
