@@ -1,9 +1,12 @@
-# Migrating from SketchyBar
+# Migrating from SketchyBar and JankyBorders
 
 mbar implements SketchyBar's command language, properties, events, script
 environment and `--query` output (reference: SketchyBar v2.24.0, see
 [`docs/spec/`](spec/)). A shell config usually runs unchanged. A SbarLua config
 needs a few small edits.
+
+mbar also draws JankyBorders' window borders. If you use JankyBorders
+(`borders`), see [Migrating from JankyBorders](#migrating-from-jankyborders).
 
 ## Quick checklist
 
@@ -319,3 +322,186 @@ sketchybar --add item net  right --set net  provider=network provider.format="�
 
 `mbar --query stats` shows `scripts.spawned` and per-item script times, so you
 can measure what the switch saves.
+
+## Migrating from JankyBorders
+
+mbar draws colored borders around windows and highlights the focused one, like
+[JankyBorders](https://github.com/FelixKratz/JankyBorders) (reference:
+JankyBorders v1.9.0, see [`docs/spec/borders.md`](spec/borders.md)). The
+separate `borders` process is no longer needed. Your `bordersrc` and your
+`borders …` lines keep working. Borders stay off until something configures
+them, so nothing changes if you never used JankyBorders.
+
+### Checklist
+
+1. Install `mbar.app` ([`INSTALL.md`](INSTALL.md)). Its setup finds Homebrew
+   `borders`, runs `brew services stop borders` and, with the switch "Also
+   uninstall Homebrew borders" (on by default), `brew uninstall borders`.
+   Leave the switch on: a Homebrew `borders` that comes earlier on the `PATH`
+   hides mbar's `borders` link. If you start `borders` some other way (your
+   own LaunchAgent, a login script), stop that yourself.
+2. Leave `~/.config/borders/bordersrc` (or `~/.bordersrc`) where it is. mbar
+   runs it after its own config, on every start and every `--reload`. The
+   `borders …` lines in it reach mbar through the `borders` link.
+3. Check the launch lines in your window manager's config, for example
+   `borders active_color=0xffe1e3e4 width=5.0 &` in `yabairc` or
+   `exec-and-forget borders …` in `aerospace.toml`. The setup lists them.
+   - They keep working through the `borders` link when the window manager's
+     `PATH` contains it. The app adds it through `/etc/paths.d/mbar`, which
+     login shells read. A window manager started as a login item usually does
+     not, so use the full path
+     `/Applications/mbar.app/Contents/Resources/bin/borders` there.
+   - Or remove them. mbar runs `bordersrc` itself, so a line that only starts
+     `borders` is not needed. Without arguments it now prints JankyBorders'
+     "already running" error and exits 1.
+   - JankyBorders skipped `bordersrc` when its launch line had valid arguments.
+     mbar runs both, so keep each setting in one place.
+4. Or move the settings into mbar's config and delete `bordersrc`:
+   `mbar.borders({ … })` in `init.lua`, or `mbar --borders …` in a shell
+   config.
+5. With `ax_focus` unset or `on`, mbar finds the focused window through
+   Accessibility. Grant Accessibility to mbar (the setup asks for it anyway).
+   The grant JankyBorders had does not carry over.
+
+From source: `make install` also creates the `borders -> mbar` link
+(`BORDERS_LINK=1`, see [`INSTALL.md`](INSTALL.md#the-borders-symlink)). Stop
+JankyBorders with `brew services stop borders && brew uninstall borders`.
+
+Before (`~/.config/borders/bordersrc`, the example from JankyBorders' README):
+
+```sh
+#!/bin/bash
+
+options=(
+	style=round
+	width=6.0
+	hidpi=off
+	active_color=0xffe2e2e3
+	inactive_color=0xff414550
+)
+
+borders "${options[@]}"
+```
+
+This keeps working as it is. After moving it into `~/.config/mbar/init.lua`:
+
+```lua
+mbar.borders({
+  style = "round",
+  width = 6.0,
+  hidpi = false,
+  active_color = 0xffe2e2e3,
+  inactive_color = 0xff414550,
+})
+```
+
+or in a shell config:
+
+```sh
+mbar --borders style=round width=6.0 hidpi=off \
+               active_color=0xffe2e2e3 inactive_color=0xff414550
+```
+
+### What works unchanged
+
+Every documented option, with the same syntax, the same defaults and the same
+result on screen:
+
+| Option | Notes |
+|---|---|
+| `active_color`, `inactive_color` | `0xAARRGGBB`, `glow(0x…)`, `gradient(top_left=0x…,bottom_right=0x…)`, `gradient(top_right=0x…,bottom_left=0x…)` |
+| `background_color` | `0xAARRGGBB`. As in JankyBorders, a gradient is accepted but not drawn and a glow draws as a solid fill |
+| `width` | float, default `4.0` |
+| `style` | `round`, `square`, `uniform` |
+| `order` | `above`, `below` (undocumented in JankyBorders) |
+| `hidpi` | `on`, `off` |
+| `ax_focus` | `on`, `off`; default on when mbar has Accessibility permission |
+| `blacklist`, `whitelist` | comma-separated process names, exact and case-sensitive |
+| `apply-to` | window id: the other keys of that call apply to this window only (undocumented in JankyBorders) |
+
+Also unchanged:
+
+- the parser's leniency: `width=5px` is 5, `style=` and `order=` look at the
+  first character only, a longer key that starts with a color key
+  (`active_colorX=…`) is a color error.
+- the error lines the `borders` command prints on stdout:
+  `[?] Borders: Invalid argument '<arg>'` and
+  `[?] Borders: Invalid color argument color<rest>`.
+- `borders -v` prints `borders-v1.9.0`, so version checks keep passing.
+- `bordersrc` lookup (`~/.config/borders/bordersrc`, then `~/.bordersrc`,
+  `$XDG_CONFIG_HOME` is not consulted) and the 60 s limit for it.
+- `hidpi=`, `blacklist=` and `whitelist=` recreate all borders, and that drops
+  the `apply-to` overrides, as in JankyBorders.
+
+### Differences
+
+The full list is in [`DEVIATIONS.md`](DEVIATIONS.md#jankyborders-borders) (B1…).
+The ones you are most likely to notice:
+
+- **IPC name.** mbar does not register JankyBorders' mach service
+  `git.felix.borders`. The original `borders` binary and tools that send to
+  that service cannot reach mbar. Use the `borders -> mbar` link.
+- **Errors.** The `borders` command prints invalid arguments on stdout as
+  before, but the bar does not print them a second time in its log.
+  `mbar --borders` reports them as `[!] Borders: …` on stderr and exits 1
+  (mbar's error convention). Valid keys in the same call still apply.
+- **No daemon from `borders`.** `borders` never starts a daemon. If mbar is not
+  running, it waits up to 5 s (a window manager can run its startup lines
+  before mbar is up), then prints
+  `borders: mbar is not running. mbar draws the window borders; start mbar.app.`
+  and exits 1.
+- **`drawing=on|off`.** A new key. `mbar --borders drawing=off` hides all
+  borders and keeps the settings. The System page of `mbar.app` has a switch
+  for it. The first `--borders` call without `drawing=` turns borders on.
+- **`mbar --query borders`** prints the current configuration as JSON
+  ([`EXTENSIONS.md`](EXTENSIONS.md#window-borders)).
+- **`bordersrc` always runs**, also when a launch line passed arguments (see
+  the checklist), and again on `--reload`. Its path is quoted, so a home
+  directory with spaces works.
+- **`apply-to` is not sticky.** In JankyBorders, a daemon started with
+  `apply-to=N` sent every later call to window N. In mbar `apply-to=` only
+  affects the call it is in.
+- **`ax_focus=on` without Accessibility** logs a warning and falls back to the
+  SkyLight focus path. JankyBorders exited.
+- **Focus at startup.** mbar highlights the focused window right after borders
+  are configured. JankyBorders waited for the first focus change.
+- **No yabai proxy windows.** JankyBorders draws borders on yabai's animation
+  proxies (`git.felix.jbevent`). mbar does not, so with yabai's window
+  animations the border catches up when the animation ends.
+- **Only the default bar.** `bordersrc` and the `borders` command go to the
+  bar `mbar`. Other bar names (`bottom -> mbar`) do not run `bordersrc`.
+- **No man page.** `borders -h` still says "Refer to the man page", but mbar
+  does not install `man borders`. The options are in
+  [`EXTENSIONS.md`](EXTENSIONS.md#window-borders).
+
+### Known unknowns
+
+mbar's borders are built from the JankyBorders source and its spec, but have
+not run on a real Mac yet. These questions from the spec
+([`docs/spec/borders.md`](spec/borders.md) §14) need real hardware. If you see
+one of them, please report it.
+
+1. **SkyLight events.** What exactly triggers events 723, 808, 1322, 1401,
+   1508 and 815/816 on macOS 14 to 26. If they differ from JankyBorders'
+   reading, a border can lag behind a focus change, a move or a resize.
+2. **Minimize and hide.** Which events fire when a window is minimized or its
+   app hidden. If none reaches mbar, a border could stay visible until the next
+   update.
+3. **Moving a window to another space** (Mission Control drag, yabai
+   `--space`). mbar sends the border window to the new space when the target's
+   space changes (B13). It is not known whether WindowServer would have moved
+   it anyway, or whether a stale border showed on the old space.
+4. **`SLSCopyWindowsWithOptionsAndTags`** may write back into its tag
+   arguments. mbar passes fresh values on every call, as JankyBorders does.
+5. **Corner radius on macOS 26.** mbar picks the macOS 26 value at runtime
+   (B16). Whether it matches the system's window corners on every macOS 26.x
+   needs a look.
+6. **Sharing SkyLight notifications with spaces.** mbar uses one notification
+   handler for the space tracking and the borders. Event 1322 means "focus" to
+   the borders and "capture gating" to the space tracking; both run. mbar's own
+   border windows must not show up in `space_windows_change`.
+7. **macOS 13.** JankyBorders supports macOS 14 and later. `mbar.app` runs on
+   macOS 13, where borders are untested.
+
+Questions 6 and 7 of the spec (the raw MIG sub-level reply and the symtab scan
+for `CGSGetConnectionPortById`) do not apply: mbar does not use either (B15).

@@ -4,7 +4,9 @@ mbar is a status bar and menu-bar replacement for macOS, written in Rust. It
 reimplements [SketchyBar](https://github.com/FelixKratz/SketchyBar)'s command
 language and behaviour, so existing `sketchybarrc` files and plugin scripts keep
 working, and adds a Metal renderer, an in-process Lua 5.4 config, native data
-providers and a native application menu.
+providers, a native application menu and
+[JankyBorders](https://github.com/FelixKratz/JankyBorders)-compatible window
+borders.
 
 > **Status: early development (0.1.0).** The platform-independent core is unit
 > and integration tested on Linux (headless mode). The macOS layer builds and its
@@ -36,6 +38,13 @@ providers and a native application menu.
 - **Menu-bar replacement.** `mbar --menubar hide|show|toggle` (or the bar property
   `hide_menubar=on`) turns on macOS's "automatically hide the menu bar" setting.
   `--menu <index|title>` opens a menu of the front app. The bar is notch-aware.
+- **Window borders (JankyBorders-compatible).** Colored borders around windows,
+  with the focused window highlighted. Same options as JankyBorders
+  (`active_color`, `inactive_color`, `width`, `style`, `blacklist`, ...),
+  including `glow(…)` and `gradient(…)` colors. Your `bordersrc` and `borders …`
+  lines keep working through a `borders -> mbar` symlink, so no separate
+  `borders` process runs. Configure them with `mbar --borders …` or `mbar.borders{…}`
+  in Lua. Off until configured.
 - **GPU (Metal) renderer.** One `CAMetalLayer` per bar and popup window.
   Instanced shape and text quads. Animations are paced to the display's refresh
   rate.
@@ -64,8 +73,9 @@ Install the app (macOS 13 or later):
    [latest release](https://github.com/rubenvitt/mbar/releases/latest).
 2. Open it and drag **mbar** to **Applications**.
 3. Open mbar and follow the setup page. It takes over an existing SketchyBar
-   setup and config, puts `mbar` and `sketchybar` on the `PATH`, starts the bar
-   at login and asks for the permissions it needs. mbar updates itself.
+   setup and config and a JankyBorders (`borders`) setup, puts `mbar`,
+   `sketchybar` and `borders` on the `PATH`, starts the bar at login and asks
+   for the permissions it needs. mbar updates itself.
 
 Or build from source (Xcode Command Line Tools and a stable Rust toolchain):
 
@@ -73,7 +83,7 @@ Or build from source (Xcode Command Line Tools and a stable Rust toolchain):
 git clone https://github.com/rubenvitt/mbar.git
 cd mbar
 make release                      # cargo build --release -p mbar
-make install PREFIX=$HOME/.local  # installs mbar plus a `sketchybar` symlink
+make install PREFIX=$HOME/.local  # installs mbar plus `sketchybar` and `borders` symlinks
 ```
 
 Then write a config (or keep your `sketchybarrc`):
@@ -89,6 +99,8 @@ mbar.add("app_menu", "menus", "left")
 mbar.add("item", "clock", { position = "right", provider = { "clock", args = "%a %d %b %H:%M" } })
 mbar.add("item", "cpu", { position = "right", provider = "cpu" })
 mbar.add("item", "battery", { position = "right", provider = "battery" })
+
+mbar.borders({ active_color = 0xffe1e3e4, inactive_color = 0xff494d64, width = 5.0 })
 ```
 
 ```sh
@@ -111,6 +123,11 @@ SketchyBar's mach port will not reach it. See
 [`docs/MIGRATING.md`](docs/MIGRATING.md) for the differences, the SbarLua-to-mbar
 mapping, and before/after examples of replacing polling scripts with native
 providers.
+
+Coming from JankyBorders: your `bordersrc` keeps working, and so do `borders …`
+lines in `yabairc` or `aerospace.toml` when the `borders` symlink is on the
+window manager's `PATH`. See
+[Migrating from JankyBorders](docs/MIGRATING.md#migrating-from-jankyborders).
 
 ## Performance design
 
@@ -139,12 +156,13 @@ hardware.
 | Document | Contents |
 |---|---|
 | [`docs/INSTALL.md`](docs/INSTALL.md) | The app and its setup, updates, building from source, LaunchAgent, permissions, uninstalling |
-| [`docs/MIGRATING.md`](docs/MIGRATING.md) | Switching from SketchyBar / SbarLua |
+| [`docs/MIGRATING.md`](docs/MIGRATING.md) | Switching from SketchyBar / SbarLua / JankyBorders |
 | [`docs/LUA.md`](docs/LUA.md) | Lua configuration API |
-| [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) | Commands, properties, providers and the `app_menu` item that are new in mbar |
-| [`docs/DEVIATIONS.md`](docs/DEVIATIONS.md) | Deliberate differences from SketchyBar |
+| [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) | Commands, properties, providers, the `app_menu` item and window borders (`--borders`) that are new in mbar |
+| [`docs/DEVIATIONS.md`](docs/DEVIATIONS.md) | Deliberate differences from SketchyBar and JankyBorders |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Crates, data flow, IPC, renderer |
 | [`docs/spec/`](docs/spec/) | Behavioural specification of SketchyBar that mbar implements |
+| [`docs/spec/borders.md`](docs/spec/borders.md) | Behavioural specification of JankyBorders (window borders) that mbar implements |
 
 ## Building and testing
 
@@ -163,5 +181,5 @@ use it.
 ## License
 
 mbar is licensed under **GPL-3.0-only** (see [`LICENSE`](LICENSE)). It is an independent reimplementation, but its
-behaviour is derived from SketchyBar, which is GPL-3.0 licensed, by Felix Kratz.
-mbar is not affiliated with the SketchyBar project.
+behaviour is derived from SketchyBar and JankyBorders, which are GPL-3.0 licensed, by
+Felix Kratz. mbar is not affiliated with the SketchyBar or JankyBorders projects.

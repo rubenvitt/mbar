@@ -1,17 +1,18 @@
 # mbar: build, test and install helpers.
 #
 #   make release                       optimized build of the bar ($(TARGET_DIR)/release/mbar)
-#   make install PREFIX=$HOME/.local   install mbar + `sketchybar` symlink (after `make release`)
+#   make install PREFIX=$HOME/.local   install mbar + `sketchybar` and `borders` symlinks (after `make release`)
 #   make install-agent                 start mbar at login (LaunchAgent dev.rubeen.mbar)
 #   make ui                            build the management app (crates/mbar-ui)
 #
-# Variables: PREFIX (default /usr/local), DESTDIR, CARGO, SKETCHYBAR_LINK (1/0).
+# Variables: PREFIX (default /usr/local), DESTDIR, CARGO, SKETCHYBAR_LINK (1/0), BORDERS_LINK (1/0).
 
 CARGO           ?= cargo
 PREFIX          ?= /usr/local
 BINDIR          ?= $(PREFIX)/bin
 DATADIR         ?= $(PREFIX)/share/mbar
 SKETCHYBAR_LINK ?= 1
+BORDERS_LINK    ?= 1
 
 LABEL       := dev.rubeen.mbar
 AGENT_DIR   := $(HOME)/Library/LaunchAgents
@@ -42,6 +43,7 @@ help:
 	@echo "  ui               release build of mbar-ui (separate workspace)"
 	@echo "  ui-test          mbar-ui model tests (no GUI)"
 	@echo "  install          install mbar to \$$(BINDIR) (PREFIX=$(PREFIX))"
+	@echo "                   with sketchybar/borders links (SKETCHYBAR_LINK=$(SKETCHYBAR_LINK), BORDERS_LINK=$(BORDERS_LINK))"
 	@echo "  install-ui       install mbar-ui to \$$(BINDIR)"
 	@echo "  install-agent    install and load the LaunchAgent $(LABEL)"
 	@echo "  uninstall-agent  unload and remove the LaunchAgent"
@@ -86,6 +88,14 @@ ifeq ($(SKETCHYBAR_LINK),1)
 		echo "linked $(DESTDIR)$(BINDIR)/sketchybar -> mbar"; \
 	fi
 endif
+ifeq ($(BORDERS_LINK),1)
+	@if [ -e "$(DESTDIR)$(BINDIR)/borders" ] && [ ! -L "$(DESTDIR)$(BINDIR)/borders" ]; then \
+		echo "warning: $(DESTDIR)$(BINDIR)/borders exists and is not a symlink, leaving it alone"; \
+	else \
+		ln -sfn mbar "$(DESTDIR)$(BINDIR)/borders"; \
+		echo "linked $(DESTDIR)$(BINDIR)/borders -> mbar"; \
+	fi
+endif
 
 install-ui:
 	@test -x "$(UI_TARGET_DIR)/release/mbar-ui" || { echo "run 'make ui' first"; exit 1; }
@@ -113,6 +123,9 @@ uninstall: uninstall-agent
 	rm -f "$(DESTDIR)$(BINDIR)/mbar" "$(DESTDIR)$(BINDIR)/mbar-ui"
 	@if [ -L "$(DESTDIR)$(BINDIR)/sketchybar" ] && [ "$$(readlink "$(DESTDIR)$(BINDIR)/sketchybar")" = mbar ]; then \
 		rm -f "$(DESTDIR)$(BINDIR)/sketchybar"; echo "removed $(DESTDIR)$(BINDIR)/sketchybar"; \
+	fi
+	@if [ -L "$(DESTDIR)$(BINDIR)/borders" ] && [ "$$(readlink "$(DESTDIR)$(BINDIR)/borders")" = mbar ]; then \
+		rm -f "$(DESTDIR)$(BINDIR)/borders"; echo "removed $(DESTDIR)$(BINDIR)/borders"; \
 	fi
 	rm -f "$(DESTDIR)$(DATADIR)/mbar.d.lua"
 	-rmdir "$(DESTDIR)$(DATADIR)" 2>/dev/null
