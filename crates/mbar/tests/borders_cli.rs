@@ -21,8 +21,10 @@ struct Sandbox {
 
 impl Sandbox {
     fn new() -> Sandbox {
-        let root = std::env::temp_dir().join(format!(
-            "mbar-borders-cli-{}-{}",
+        // `/tmp`, not `temp_dir()`: macOS' `/var/folders/…` would push the daemon's
+        // socket path past the ~104-byte `sun_path` limit (as in `daemon.rs`).
+        let root = PathBuf::from("/tmp").join(format!(
+            "mbcli-{}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::SeqCst)
         ));
