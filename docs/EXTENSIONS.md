@@ -70,6 +70,7 @@ sample in `INFO` as JSON, so scripts can post-process cheaply.
 | `disk` | `percent`, `free_gb`, `total_gb` |
 | `front_app` | `name`, `bundle_id` |
 | `media` | `title`, `artist`, `album`, `app`, `state` |
+| `aerospace` | `value` (selected by `provider.args`), `workspace`, `prev_workspace`, `mode`, `monitor` |
 
 ### Provider defaults
 
@@ -85,6 +86,7 @@ sample in `INFO` as JSON, so scripts can post-process cheaply.
 | `wifi` | `{ssid}` | event-driven | |
 | `front_app` | `{name}` | event-driven | |
 | `media` | `{title}` | event-driven | |
+| `aerospace` | `{value}` | event-driven | `workspace` (`mode`, `monitor`) |
 
 Template rules: unknown keys expand to an empty string; `{{` and `}}` are literal braces;
 malformed braces are copied verbatim. An empty `provider.format=""` leaves the label
@@ -263,15 +265,18 @@ moving an existing setup over is in [`MIGRATING.md`](MIGRATING.md#using-aerospac
 
 | mbar event | AeroSpace event | Variables (besides `NAME`, `SENDER`, `INFO`) |
 |---|---|---|
-| `aerospace_workspace_change` | `focused-workspace-changed` | `FOCUSED_WORKSPACE`, `PREV_WORKSPACE` |
-| `aerospace_focus_change` | `focus-changed` | `FOCUSED_WORKSPACE`, `WINDOW_ID` (empty on an empty workspace) |
-| `aerospace_monitor_change` | `focused-monitor-changed` | `FOCUSED_WORKSPACE`, `MONITOR_ID` (1-based) |
+| `aerospace_workspace_change` | `focused-workspace-changed` | `FOCUSED_WORKSPACE`, `PREV_WORKSPACE` (+ aliases `AEROSPACE_FOCUSED_WORKSPACE`, `AEROSPACE_PREV_WORKSPACE`) |
+| `aerospace_focus_change` | `focus-changed` | `FOCUSED_WORKSPACE` (+ `AEROSPACE_FOCUSED_WORKSPACE`), `WINDOW_ID` (empty on an empty workspace) |
+| `aerospace_monitor_change` | `focused-monitor-changed` | `FOCUSED_WORKSPACE` (+ `AEROSPACE_FOCUSED_WORKSPACE`), `MONITOR_ID` (1-based) |
 | `aerospace_mode_change` | `mode-changed` | `MODE` |
 | `aerospace_window_detected` | `window-detected` | `WINDOW_ID`, `WORKSPACE`, `APP_BUNDLE_ID`, `APP_NAME` |
 | `aerospace_binding_triggered` | `binding-triggered` | `MODE`, `BINDING` |
 
 `INFO` holds the same data as a JSON object with lower-case keys, for example
-`{"focused_workspace":"2","prev_workspace":"1"}`.
+`{"focused_workspace":"2","prev_workspace":"1"}` (without the `AEROSPACE_*` aliases).
+The aliases exist because AeroSpace recipes often pass AeroSpace's own variable names
+through (`--trigger … AEROSPACE_FOCUSED_WORKSPACE=$AEROSPACE_FOCUSED_WORKSPACE`), so
+plugin scripts that read them keep working.
 
 ```sh
 mbar --add item workspace left \
@@ -281,12 +286,31 @@ mbar --add item workspace left \
 
 - The events are built in: `--subscribe` works without `--add event`. A config that
   still runs `--add event aerospace_workspace_change` (the SketchyBar recipe) is
-  accepted and changes nothing.
+  accepted: it registers the name like any custom event (the same entry `--subscribe`
+  would create), which is harmless. A notification name given with it is ignored.
 - A manual `--trigger aerospace_workspace_change FOCUSED_WORKSPACE=…` keeps working.
-  If AeroSpace's `exec-on-workspace-change` still sends it, items get the event twice
-  (harmless). Remove that line from `aerospace.toml`.
+  Remove AeroSpace's `exec-on-workspace-change` line that sends it from
+  `aerospace.toml`: the forked trigger arrives 10–50 ms after mbar's own event and can
+  overwrite a newer one, so after quick switches the wrong workspace stays highlighted.
+  The same goes for the other five names: a config that already triggers custom events
+  called `aerospace_mode_change`, `aerospace_focus_change`, … (for example from
+  `on-mode-changed` or `on-focus-changed` in `aerospace.toml`) now gets each of them
+  twice, from AeroSpace through mbar and from its own trigger. Remove those triggers
+  too.
+- While mbar is not connected to AeroSpace (old AeroSpace versions without
+  `subscribe`, see [Connection](#connection)), a manual
+  `--trigger aerospace_workspace_change FOCUSED_WORKSPACE=…` (or
+  `AEROSPACE_FOCUSED_WORKSPACE=…`, optionally with `PREV_WORKSPACE` /
+  `AEROSPACE_PREV_WORKSPACE`) also updates the stored focused workspace, so
+  `provider=aerospace` and `--query aerospace` work in that setup. While connected,
+  only AeroSpace's own events change it.
 - On connect, AeroSpace sends the current workspace, focus, monitor and mode right
-  away, so items are correct at startup without a separate query.
+  away, so items are correct at startup without a separate query. It does so only
+  once per connection, so an item that subscribes later (a shell loop that runs
+  `--subscribe space.$sid aerospace_workspace_change` item by item, or every
+  subscriber after `--reload`) gets the state mbar already knows as one event of
+  that name, delivered to that item only. The same holds for `mbar.aerospace.on`
+  handlers.
 
 ### Provider `provider=aerospace`
 
@@ -297,6 +321,10 @@ Sets the item's label from AeroSpace's events, without a script:
 | (none) or `workspace` | focused workspace |
 | `mode` | current binding mode (`main`, …) |
 | `monitor` | focused monitor id |
+
+The label (and the item's `script`, with `SENDER=provider`) is only updated when one
+of the item's sample values (`value`, `workspace`, `prev_workspace`, `mode`, `monitor`)
+changed: focus changes within the same workspace do nothing.
 
 ```sh
 mbar --add item aerospace.mode right --set aerospace.mode provider=aerospace provider.args=mode
@@ -310,6 +338,7 @@ Highlighting the focused workspace item is a handler on `aerospace_workspace_cha
 ```json
 {
 	"connected": "on",
+	"active": "on",
 	"transport": "socket",
 	"server_version": "0.20.0-Beta 33fa0643",
 	"error": "",
@@ -320,6 +349,8 @@ Highlighting the focused workspace item is a handler on `aerospace_workspace_cha
 }
 ```
 
+`active` says whether the connection was started at all (see [Connection](#connection));
+the query itself never starts it, so mbar.app can show it without connecting.
 `transport` is `socket`, `cli` or `none`. `error` says why the last connection attempt
 failed while `connected` is `off`. An item named `aerospace` wins over this query, as
 with `--query borders`. The System page of `mbar.app` shows the same status.
@@ -339,9 +370,11 @@ mbar.aerospace.on("workspace_change", function(env) end)         -- = aerospace_
 Commands run one after another on a worker thread. Callbacks run on the daemon's Lua
 thread, like `mbar.exec` callbacks. A hanging AeroSpace never blocks the bar. A command
 that cannot run (AeroSpace not running) reaches `run` callbacks as `exit_code = -1` with
-the reason in `stderr`. `on` takes the event name with or without the `aerospace_`
-prefix and registers an in-process handler that needs no item of yours (mbar adds one
-hidden carrier item, `__mbar_aerospace`, with `drawing=off`). Details in
+the reason in `stderr`. At most 64 commands wait for the worker; while AeroSpace hangs,
+further commands fail at once with `exit_code = -1` and `stderr` "mbar: too many pending
+AeroSpace commands". `on` takes the event name with or without the `aerospace_` prefix
+and registers an item-less, in-process handler: no item is involved, so item settings
+(`updates`, `drawing`, the default item) do not affect it. Details in
 [`LUA.md`](LUA.md#aerospace).
 
 ### Connection
@@ -350,8 +383,9 @@ The connection starts lazily, on the first of:
 
 - a `--subscribe` to any `aerospace_*` event,
 - an item with `provider=aerospace`,
-- `--query aerospace`,
 - a Lua `mbar.aerospace` call.
+
+`--query aerospace` does not start it.
 
 Without any of these mbar never connects, so nothing changes for users without
 AeroSpace. The connection and the stored state (focused and previous workspace, mode,
@@ -365,13 +399,17 @@ from one connection running `subscribe --all`.
 **CLI fallback.** For AeroSpace versions whose server predates the socket protocol (the
 handshake gets another version, the socket closes, or there is no answer within 1 s),
 mbar runs one long-lived `aerospace subscribe --all` child for the events and
-`aerospace <args>` for commands. The `aerospace` binary is looked up on `PATH`, then in
+`aerospace <args>` for commands. mbar remembers such a server per socket file, so later
+commands do not wait for the handshake again; a restarted AeroSpace (new socket file)
+is tried again. The `aerospace` binary is looked up on `PATH`, then in
 `/opt/homebrew/bin`, `/usr/local/bin` and
 `/Applications/AeroSpace.app/Contents/Resources/bin`. If the CLI has no `subscribe`
 either, `--query aerospace` says so in `error`, and only manual `--trigger`s work.
 
 **Reconnect.** When AeroSpace quits or restarts, mbar retries with a backoff (1 s,
-doubling, at most 30 s) for as long as it runs. Every change shows in
+doubling, at most 30 s) for as long as it runs. A connection counts (and resets the
+backoff) only once the first event arrived, so a server that accepts the connection and
+closes it again does not cause a reconnect every second. Every change shows in
 `--query aerospace`.
 
 **Overrides.** `MBAR_AEROSPACE_SOCKET` replaces the socket path and

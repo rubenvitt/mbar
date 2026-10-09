@@ -356,10 +356,12 @@ fn each_trigger_starts_the_connection() {
         "core provider: no platform provider"
     );
 
-    // --query aerospace
+    // --query aerospace only reports (mbar.app polls it): no connection, `active` off.
     let mut h = H::new();
-    let (_, fx) = h.msg_fx(&["--query", "aerospace"]);
-    assert_eq!(starts(&fx), 1);
+    let (text, fx) = h.msg_fx(&["--query", "aerospace"]);
+    assert_eq!(starts(&fx), 0);
+    assert!(text.unwrap().contains("\"active\": \"off\""));
+    assert!(!h.rt.aerospace_started());
 
     // An item named `aerospace` wins and does not connect.
     let mut h = H::new();
@@ -388,7 +390,21 @@ fn each_trigger_starts_the_connection() {
         Some(Effect::Platform(PlatformRequest::StartAerospace))
     );
     assert_eq!(h.rt.request_aerospace(), None);
-    let (_, fx) = h.msg_fx(&["--query", "aerospace"]);
+    assert_eq!(h.query(&["aerospace"])["active"], "on");
+
+    // An item-less Lua handler (`mbar.aerospace.on`).
+    let mut h = H::new();
+    let fx = h.input(Input::Lua(LuaRequest::On {
+        events: vec!["aerospace_mode_change".into()],
+        handler: 3,
+    }));
+    assert_eq!(starts(&fx), 1);
+    // A global handler for another event does not connect.
+    let mut h = H::new();
+    let fx = h.input(Input::Lua(LuaRequest::On {
+        events: vec!["front_app_switched".into()],
+        handler: 3,
+    }));
     assert_eq!(starts(&fx), 0);
 }
 
@@ -552,7 +568,7 @@ fn query_json_exact() {
     let mut h = H::new();
     assert_eq!(
         h.msg(&["--query", "aerospace"]),
-        "{\n\t\"connected\": \"off\",\n\t\"transport\": \"none\",\n\t\"server_version\": \"\",\n\t\"error\": \"\",\n\t\"focused_workspace\": \"\",\n\t\"prev_workspace\": \"\",\n\t\"mode\": \"\",\n\t\"monitor\": 0\n}\n"
+        "{\n\t\"connected\": \"off\",\n\t\"active\": \"off\",\n\t\"transport\": \"none\",\n\t\"server_version\": \"\",\n\t\"error\": \"\",\n\t\"focused_workspace\": \"\",\n\t\"prev_workspace\": \"\",\n\t\"mode\": \"\",\n\t\"monitor\": 0\n}\n"
     );
     feed(
         &mut h,
@@ -566,9 +582,10 @@ fn query_json_exact() {
     feed(&mut h, ws("2", "1"));
     feed(&mut h, mode("main"));
     feed(&mut h, monitor("2", 1));
+    assert!(h.rt.request_aerospace().is_some());
     assert_eq!(
         h.msg(&["--query", "aerospace"]),
-        "{\n\t\"connected\": \"on\",\n\t\"transport\": \"socket\",\n\t\"server_version\": \"0.20.0-Beta 33fa0643\",\n\t\"error\": \"\",\n\t\"focused_workspace\": \"2\",\n\t\"prev_workspace\": \"1\",\n\t\"mode\": \"main\",\n\t\"monitor\": 1\n}\n"
+        "{\n\t\"connected\": \"on\",\n\t\"active\": \"on\",\n\t\"transport\": \"socket\",\n\t\"server_version\": \"0.20.0-Beta 33fa0643\",\n\t\"error\": \"\",\n\t\"focused_workspace\": \"2\",\n\t\"prev_workspace\": \"1\",\n\t\"mode\": \"main\",\n\t\"monitor\": 1\n}\n"
     );
 }
 
@@ -593,7 +610,7 @@ fn status_is_stored() {
 #[test]
 fn reload_keeps_state_and_status() {
     let mut h = H::new();
-    h.msg(&["--query", "aerospace"]);
+    assert!(h.rt.request_aerospace().is_some());
     feed(
         &mut h,
         Input::AerospaceStatus(AerospaceStatus {
@@ -629,5 +646,346 @@ fn reload_keeps_state_and_status() {
     assert_eq!(
         h.query(&["events"])["aerospace_workspace_change"]["bit"],
         1u64 << 18
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Item-less handlers (`LuaRequest::On`, Lua `mbar.aerospace.on`)
+// ---------------------------------------------------------------------------
+
+fn on(h: &mut H, event: &str, handler: u64) -> Vec<Effect> {
+    h.input(Input::Lua(LuaRequest::On {
+        events: vec![event.into()],
+        handler,
+    }))
+}
+
+/// Global handlers fire for every trigger of their event with the event's variables and
+/// `SENDER` (no `NAME`), whatever the default item says (`updates=when_shown` / `off`,
+/// `update_freq`, `click_script`), and they never appear as an item.
+#[test]
+fn global_handlers_are_item_less() {
+    for updates in ["when_shown", "off"] {
+        let mut h = H::new();
+        h.msg(&[
+            "--default",
+            &format!("updates={updates}"),
+            "update_freq=5",
+            "click_script=echo hi",
+            "drawing=off",
+        ]);
+        on(&mut h, "aerospace_workspace_change", 7);
+        on(&mut h, "aerospace_workspace_change", 8);
+        on(&mut h, "aerospace_mode_change", 9);
+        // Registering twice changes nothing.
+        on(&mut h, "aerospace_mode_change", 9);
+        let fx = feed(&mut h, ws("2", "1"));
+        let r = runs(&fx);
+        assert_eq!(
+            r.iter().map(|r| r.script.as_str()).collect::<Vec<_>>(),
+            ["lua:7", "lua:8"],
+            "{updates}"
+        );
+        assert_eq!(r[0].sender(), Some("aerospace_workspace_change"));
+        assert_eq!(r[0].get("NAME"), None);
+        assert_eq!(r[0].get("FOCUSED_WORKSPACE"), Some("2"));
+        assert_eq!(r[0].get("AEROSPACE_PREV_WORKSPACE"), Some("1"));
+        assert_eq!(
+            r[0].get("INFO"),
+            Some(r#"{"focused_workspace":"2","prev_workspace":"1"}"#)
+        );
+        let fx = feed(&mut h, mode("service"));
+        let r = runs(&fx);
+        assert_eq!(r.len(), 1, "{updates}");
+        assert_eq!(r[0].script, "lua:9");
+        assert_eq!(r[0].get("MODE"), Some("service"));
+
+        // No carrier item: nothing in --query bar, regex selectors do not touch them.
+        assert_eq!(h.query(&["bar"])["items"], serde_json::json!([]));
+        h.msg(&["--remove", "/.*/"]);
+        let fx = feed(&mut h, ws("3", "2"));
+        assert_eq!(runs(&fx).len(), 2, "{updates}");
+    }
+}
+
+/// Global handlers also see manual `--trigger`s of their event (the same trigger path as
+/// item scripts) and are dropped by `--reload` (the config registers them again).
+#[test]
+fn global_handlers_follow_triggers_and_reload() {
+    let mut h = H::new();
+    on(&mut h, "aerospace_workspace_change", 4);
+    let (_, fx) = h.msg_fx(&[
+        "--trigger",
+        "aerospace_workspace_change",
+        "FOCUSED_WORKSPACE=6",
+    ]);
+    let r = runs(&fx);
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].script, "lua:4");
+    assert_eq!(r[0].get("FOCUSED_WORKSPACE"), Some("6"));
+    assert_eq!(r[0].sender(), Some("aerospace_workspace_change"));
+
+    h.msg(&["--reload"]);
+    let fx = feed(&mut h, ws("2", "1"));
+    assert!(runs(&fx).is_empty(), "cleared by --reload");
+    on(&mut h, "aerospace_workspace_change", 5);
+    let fx = feed(&mut h, ws("3", "2"));
+    assert_eq!(runs(&fx)[0].script, "lua:5");
+}
+
+// ---------------------------------------------------------------------------
+// Initial state for late subscribers
+// ---------------------------------------------------------------------------
+
+/// The SketchyBar shell loop (`for sid …; --subscribe space.$sid
+/// aerospace_workspace_change`) runs after AeroSpace sent its initial state: each new
+/// subscriber gets the stored state once, nobody else does.
+#[test]
+fn late_item_subscribers_get_the_stored_state() {
+    let mut h = H::new();
+    h.msg(&["--default", "updates=when_shown"]);
+    // Nothing known yet: a subscription delivers nothing.
+    let (_, fx) = h.msg_fx(&[
+        "--add",
+        "item",
+        "space.0",
+        "left",
+        "--set",
+        "space.0",
+        "script=ws.sh 0",
+        "--subscribe",
+        "space.0",
+        "aerospace_workspace_change",
+    ]);
+    assert!(runs(&fx).is_empty());
+    feed(&mut h, ws("2", "1"));
+    feed(&mut h, mode("main"));
+
+    for sid in ["1", "2"] {
+        let name = format!("space.{sid}");
+        let (_, fx) = h.msg_fx(&[
+            "--add",
+            "item",
+            &name,
+            "left",
+            "--subscribe",
+            &name,
+            "aerospace_workspace_change",
+            "aerospace_mode_change",
+            "aerospace_focus_change",
+            "--set",
+            &name,
+            &format!("script=ws.sh {sid}"),
+        ]);
+        let r = runs(&fx);
+        assert_eq!(r.len(), 2, "{sid}: {r:?}");
+        assert!(r.iter().all(|r| r.item.as_deref() == Some(name.as_str())));
+        assert_eq!(r[0].sender(), Some("aerospace_workspace_change"));
+        assert_eq!(r[0].get("FOCUSED_WORKSPACE"), Some("2"));
+        assert_eq!(r[0].get("PREV_WORKSPACE"), Some("1"));
+        assert_eq!(r[0].get("NAME"), Some(name.as_str()));
+        assert_eq!(r[1].sender(), Some("aerospace_mode_change"));
+        assert_eq!(r[1].get("MODE"), Some("main"));
+    }
+    // Subscribing again to the same event delivers nothing new.
+    let (_, fx) = h.msg_fx(&["--subscribe", "space.1", "aerospace_workspace_change"]);
+    assert!(runs(&fx).is_empty());
+    // An `updates=off` item is gated like for a real event.
+    let (_, fx) = h.msg_fx(&[
+        "--add",
+        "item",
+        "off",
+        "left",
+        "--set",
+        "off",
+        "updates=off",
+        "script=off.sh",
+        "--subscribe",
+        "off",
+        "aerospace_workspace_change",
+    ]);
+    assert!(runs(&fx).is_empty());
+    // Focus and monitor state arrive later and are delivered to later subscribers.
+    feed(
+        &mut h,
+        Input::Aerospace(AerospaceEvent::FocusChanged {
+            window_id: Some(9),
+            workspace: "2".into(),
+        }),
+    );
+    feed(&mut h, monitor("2", 1));
+    let (_, fx) = h.msg_fx(&[
+        "--add",
+        "item",
+        "w",
+        "left",
+        "--set",
+        "w",
+        "script=w.sh",
+        "--subscribe",
+        "w",
+        "aerospace_focus_change",
+        "aerospace_monitor_change",
+        "aerospace_window_detected",
+    ]);
+    let r = runs(&fx);
+    assert_eq!(r.len(), 2, "{r:?}");
+    assert_eq!(r[0].get("WINDOW_ID"), Some("9"));
+    assert_eq!(r[1].get("MONITOR_ID"), Some("1"));
+}
+
+/// After `--reload` the re-run config's subscribers and item-less handlers get the state
+/// (AeroSpace does not resend it: the connection survives the reload).
+#[test]
+fn reload_delivers_the_stored_state_again() {
+    let mut h = H::new();
+    on(&mut h, "aerospace_workspace_change", 1);
+    feed(&mut h, ws("4", "3"));
+    h.msg(&["--reload"]);
+
+    let fx = on(&mut h, "front_app_switched", 2);
+    assert!(runs(&fx).is_empty());
+    let fx = on(&mut h, "aerospace_workspace_change", 3);
+    let r = runs(&fx);
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].script, "lua:3");
+    assert_eq!(r[0].get("FOCUSED_WORKSPACE"), Some("4"));
+    assert_eq!(r[0].get("PREV_WORKSPACE"), Some("3"));
+    assert_eq!(r[0].get("NAME"), None);
+
+    let (_, fx) = h.msg_fx(&[
+        "--add",
+        "item",
+        "space.4",
+        "left",
+        "--set",
+        "space.4",
+        "script=ws.sh",
+        "--subscribe",
+        "space.4",
+        "aerospace_workspace_change",
+    ]);
+    let r = runs_of(&fx, "space.4");
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].get("FOCUSED_WORKSPACE"), Some("4"));
+}
+
+// ---------------------------------------------------------------------------
+// provider=aerospace only applies changes; manual triggers; env aliases
+// ---------------------------------------------------------------------------
+
+#[test]
+fn provider_ignores_events_that_change_nothing() {
+    let mut h = H::new();
+    h.msg(&[
+        "--add",
+        "item",
+        "ws",
+        "left",
+        "--set",
+        "ws",
+        "provider=aerospace",
+        "script=ws.sh",
+    ]);
+    let fx = feed(&mut h, ws("2", "1"));
+    assert_eq!(runs_of(&fx, "ws").len(), 1);
+    // Focus changes on the same workspace: the sample is the same.
+    for wid in [1, 2, 3] {
+        let fx = feed(
+            &mut h,
+            Input::Aerospace(AerospaceEvent::FocusChanged {
+                window_id: Some(wid),
+                workspace: "2".into(),
+            }),
+        );
+        assert!(runs(&fx).is_empty(), "window {wid}");
+    }
+    // A real change applies again.
+    let fx = feed(&mut h, ws("3", "2"));
+    assert_eq!(runs_of(&fx, "ws").len(), 1);
+    assert_eq!(label(&mut h, "ws"), "3");
+    // Reconfiguring the provider applies even with an unchanged sample.
+    let (_, fx) = h.msg_fx(&["--set", "ws", "provider.format=[{value}]"]);
+    assert_eq!(runs_of(&fx, "ws").len(), 1);
+    assert_eq!(label(&mut h, "ws"), "[3]");
+}
+
+/// Old AeroSpace without `subscribe`: `exec-on-workspace-change` triggers update the
+/// state while not connected (provider and `--query aerospace` keep working), never while
+/// connected (a late forked trigger must not overwrite a newer native event).
+#[test]
+fn manual_trigger_updates_the_state_only_while_disconnected() {
+    let mut h = H::new();
+    h.msg(&[
+        "--add",
+        "item",
+        "ws",
+        "left",
+        "--set",
+        "ws",
+        "provider=aerospace",
+    ]);
+    h.msg(&[
+        "--trigger",
+        "aerospace_workspace_change",
+        "FOCUSED_WORKSPACE=2",
+    ]);
+    assert_eq!(label(&mut h, "ws"), "2");
+    h.msg(&[
+        "--trigger",
+        "aerospace_workspace_change",
+        "AEROSPACE_FOCUSED_WORKSPACE=5",
+        "AEROSPACE_PREV_WORKSPACE=4",
+    ]);
+    assert_eq!(label(&mut h, "ws"), "5");
+    let q = h.query(&["aerospace"]);
+    assert_eq!(q["focused_workspace"], "5");
+    assert_eq!(q["prev_workspace"], "4");
+
+    feed(
+        &mut h,
+        Input::AerospaceStatus(AerospaceStatus {
+            connected: true,
+            transport: AerospaceTransport::Socket,
+            server_version: None,
+            error: None,
+        }),
+    );
+    feed(&mut h, ws("6", "5"));
+    h.msg(&[
+        "--trigger",
+        "aerospace_workspace_change",
+        "FOCUSED_WORKSPACE=5",
+    ]);
+    assert_eq!(label(&mut h, "ws"), "6");
+    assert_eq!(h.query(&["aerospace"])["focused_workspace"], "6");
+}
+
+#[test]
+fn scripts_get_the_aerospace_aliases() {
+    let mut h = H::new();
+    h.msg(&[
+        "--add",
+        "item",
+        "s",
+        "left",
+        "--set",
+        "s",
+        "script=s.sh",
+        "--subscribe",
+        "s",
+        "aerospace_workspace_change",
+        "aerospace_monitor_change",
+    ]);
+    let fx = feed(&mut h, ws("2", "1"));
+    let r = runs_of(&fx, "s");
+    assert_eq!(r[0].get("AEROSPACE_FOCUSED_WORKSPACE"), Some("2"));
+    assert_eq!(r[0].get("AEROSPACE_PREV_WORKSPACE"), Some("1"));
+    let fx = feed(&mut h, monitor("3", 1));
+    let r = runs_of(&fx, "s");
+    assert_eq!(r[0].get("AEROSPACE_FOCUSED_WORKSPACE"), Some("3"));
+    assert_eq!(
+        r[0].get("INFO"),
+        Some(r#"{"focused_workspace":"3","monitor_id":"1"}"#)
     );
 }

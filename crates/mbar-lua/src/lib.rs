@@ -17,8 +17,8 @@
 //! # Host access (soundness)
 //!
 //! The `&mut dyn Host` of an engine call is only borrowed for that call. Each
-//! entry point runs inside [`mlua::Lua::scope`]: four *scoped* Lua functions
-//! (command / spawn / schedule / aerospace) capture a `RefCell<&mut dyn Host>` and are stored
+//! entry point runs inside [`mlua::Lua::scope`]: five *scoped* Lua functions
+//! (command / spawn / schedule / aerospace / on) capture a `RefCell<&mut dyn Host>` and are stored
 //! in the Lua registry for the duration of the call. When the scope ends, mlua
 //! invalidates them (any later call raises a Lua error instead of touching a
 //! dangling reference) and the registry slots are cleared. No `unsafe` code is
@@ -38,7 +38,7 @@ mod json;
 mod props;
 mod shell;
 
-pub use aerospace::{AerospaceResult, AEROSPACE_CARRIER, AEROSPACE_EVENTS};
+pub use aerospace::{AerospaceResult, AEROSPACE_EVENTS};
 pub use shell::SYNC_SHELL_ENV;
 
 use std::cell::RefCell;
@@ -79,6 +79,17 @@ pub trait Host {
     fn aerospace(&mut self, args: Vec<String>, callback: Option<u64>) {
         let _ = callback;
         log::warn!("lua: mbar.aerospace is not supported here (args {args:?})");
+    }
+    /// Registers the item-less handler `handler` for `events` (`mbar.aerospace.on`):
+    /// whenever one of the events is triggered, the daemon calls
+    /// [`LuaEngine::run_handler`] with `handler` and the event's variables (`SENDER` is the
+    /// event, there is no `NAME`). No item is involved, so item properties (`updates`,
+    /// `drawing`, the default item) do not matter. The daemon forgets the handlers on
+    /// `--reload` (a fresh engine registers them again).
+    ///
+    /// The default implementation (hosts without global handlers) only logs.
+    fn on_events(&mut self, events: Vec<String>, handler: u64) {
+        log::warn!("lua: item-less handlers are not supported here ({events:?}, {handler})");
     }
 }
 
@@ -376,6 +387,11 @@ impl LuaEngine {
                     Ok(())
                 })?;
             lua.set_named_registry_value(api::KEY_HOST_AEROSPACE, aerospace)?;
+            let on = scope.create_function(move |_, (events, id): (Vec<String>, u64)| {
+                host.borrow_mut().on_events(events, id);
+                Ok(())
+            })?;
+            lua.set_named_registry_value(api::KEY_HOST_ON, on)?;
 
             let result = f(lua, st);
             // Commands issued before an error still go out, like the earlier
@@ -388,6 +404,7 @@ impl LuaEngine {
                 api::KEY_HOST_SPAWN,
                 api::KEY_HOST_SCHEDULE,
                 api::KEY_HOST_AEROSPACE,
+                api::KEY_HOST_ON,
             ] {
                 lua.unset_named_registry_value(key)?;
             }

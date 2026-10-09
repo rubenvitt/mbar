@@ -134,7 +134,7 @@ The core owns the events, the stored state and the lazy start. The connection li
 `crates/mbar-aerospace`, driven by the binary on both platforms:
 
 ```
- first aerospace_* subscription / provider=aerospace / --query aerospace / mbar.aerospace
+ first aerospace_* subscription / provider=aerospace / mbar.aerospace (not --query)
                                    │
                                    ▼
         Runtime ──► Effect::Platform(PlatformRequest::StartAerospace)   (once)
@@ -148,8 +148,9 @@ The core owns the events, the stored state and the lazy start. The connection li
                                    │
                                    ▼
         Runtime: trigger ev.event_name() with ev.env() and INFO for subscribers
-                 (scripts and Lua handlers), update the stored state and the
-                 provider=aerospace items; keep the status for --query aerospace
+                 (scripts, Lua item handlers and item-less `on` handlers), update
+                 the stored state and the provider=aerospace items whose sample
+                 changed; keep the status for --query aerospace
 ```
 
 * `crates/mbar-aerospace` is platform-independent (std + serde_json + mbar-core types)
@@ -160,8 +161,15 @@ The core owns the events, the stored state and the lazy start. The connection li
 * Fallback for servers without the socket protocol: a long-running
   `aerospace subscribe --all` child (one JSON object per line) and `aerospace <args>`
   per command.
-* Lua `mbar.aerospace.run/query` run on a worker thread (`mbar_aerospace::run` blocks);
-  results come back as Lua callbacks on the daemon's thread.
+* Lua `mbar.aerospace.run/query` run on a worker thread (`mbar_aerospace::run` blocks,
+  bounded queue of 64; a full queue fails the command at once); results come back as
+  Lua callbacks on the daemon's thread.
+* Lua `mbar.aerospace.on` registers item-less handlers in the runtime
+  (`LuaRequest::On`): `trigger_event` calls them for every trigger of their event,
+  independent of item gating. `--reload` drops them (the config registers them again).
+* AeroSpace sends its state once per connection. Items that subscribe to an
+  `aerospace_*` event later, and `on` handlers registered later, get the stored state
+  as a synthetic event, delivered to that subscriber only.
 * The connection and the stored state survive `--reload`.
 
 ### mbar-ipc

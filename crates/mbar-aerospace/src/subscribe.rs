@@ -8,6 +8,13 @@
 //! request, then `ServerEvent` frames until EOF. AeroSpace sends the current workspace,
 //! focus, monitor and mode right after `subscribe` (`subscriptions.swift`), so the
 //! consumer is up to date without a separate query.
+//!
+//! An attempt counts as connected (status reported, backoff reset) only once the first
+//! event frame (socket) or output line (CLI) arrived: a server that completes the
+//! handshake and then closes keeps backing off instead of flapping every second.
+//!
+//! A blocked read is woken by [`Subscription`]'s drop, which shuts the socket down (or
+//! kills the CLI child); there is no periodic wakeup.
 
 use std::io::{self, BufRead, BufReader, Read};
 use std::net::Shutdown;
@@ -23,9 +30,10 @@ use mbar_core::aerospace::{AerospaceEvent, AerospaceStatus, AerospaceTransport};
 use crate::protocol::{self, MAX_FRAME_LEN};
 use crate::{cli, Config, Failure};
 
-/// How often a blocked reader wakes up to check the stop flag (the socket is also shut
-/// down on drop, which wakes it immediately).
-const POLL: Duration = Duration::from_millis(200);
+/// Read timeout of the event stream: only a safety net. A stop shuts the socket down,
+/// which wakes the blocked read at once; a timeout just re-checks the stop flag and keeps
+/// waiting (AeroSpace may stay silent for hours).
+const SAFETY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The arguments of the subscribe request.
 const SUBSCRIBE_ARGS: [&str; 2] = ["subscribe", "--all"];
@@ -177,7 +185,7 @@ impl Shared {
 
 /// How one connection attempt ended.
 struct Outcome {
-    /// The attempt reached the streaming state (resets the backoff).
+    /// The attempt delivered at least one event frame / line (resets the backoff).
     connected: bool,
     /// Why it ended (shown in the disconnected status).
     error: String,
@@ -296,7 +304,7 @@ impl Worker {
     ) -> Outcome {
         let setup = stream
             .set_write_timeout(Some(crate::nonzero(self.config.answer_timeout)))
-            .and_then(|()| stream.set_read_timeout(Some(POLL)));
+            .and_then(|()| stream.set_read_timeout(Some(SAFETY_TIMEOUT)));
         if let Err(e) = setup {
             return Outcome::failed(e.to_string());
         }
@@ -305,7 +313,8 @@ impl Worker {
         if let Err(e) = protocol::write_frame(&mut stream, request.as_bytes()) {
             return Outcome::failed(format!("sending the subscribe request failed: {e}"));
         }
-        self.report(AerospaceStatus {
+        let mut connected = false;
+        let mut status = Some(AerospaceStatus {
             connected: true,
             transport: AerospaceTransport::Socket,
             server_version,
@@ -318,13 +327,17 @@ impl Worker {
                 Ok(frame) => frame,
                 Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
                     return Outcome {
-                        connected: true,
-                        error: "AeroSpace closed the connection".into(),
+                        connected,
+                        error: if connected {
+                            "AeroSpace closed the connection".into()
+                        } else {
+                            "AeroSpace closed the event stream before the first event".into()
+                        },
                     }
                 }
                 Err(e) => {
                     return Outcome {
-                        connected: true,
+                        connected,
                         error: format!("reading AeroSpace events failed: {e}"),
                     }
                 }
@@ -343,6 +356,12 @@ impl Worker {
                     })
                     .unwrap_or_default();
                 return Outcome::failed(format!("AeroSpace rejected `subscribe --all` ({detail})"));
+            }
+            // Connected once the stream really delivers (AeroSpace sends its state at
+            // once); a server that handshakes and closes is no successful connection.
+            if let Some(status) = status.take() {
+                connected = true;
+                self.report(status);
             }
             self.deliver(&frame);
         }

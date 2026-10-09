@@ -60,6 +60,8 @@ pub struct Spec {
     pub reject_subscribe: Option<String>,
     /// Never answer one-shot requests.
     pub hang_requests: bool,
+    /// Close the connection right after `subscribe` (after `initial_events`).
+    pub close_after_subscribe: bool,
 }
 
 impl Default for Spec {
@@ -72,6 +74,7 @@ impl Default for Spec {
             initial_events: Vec::new(),
             reject_subscribe: None,
             hang_requests: false,
+            close_after_subscribe: false,
         }
     }
 }
@@ -133,6 +136,21 @@ impl FakeServer {
             subscribed,
             accept: Some(accept),
         }
+    }
+
+    /// Connections accepted so far.
+    pub fn connections(&self) -> usize {
+        self.conns.lock().unwrap().len()
+    }
+
+    /// `subscribe` requests received so far.
+    pub fn subscribe_requests(&self) -> usize {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.contains("\"subscribe\""))
+            .count()
     }
 
     /// A channel that receives `()` whenever a client subscribes.
@@ -218,6 +236,10 @@ impl Conn {
                     if write_frame(&mut s, ev.as_bytes()).is_err() {
                         return;
                     }
+                }
+                if self.spec.close_after_subscribe {
+                    let _ = s.shutdown(Shutdown::Both);
+                    return;
                 }
                 self.subscribers
                     .lock()

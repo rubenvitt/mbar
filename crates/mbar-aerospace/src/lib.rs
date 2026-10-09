@@ -27,9 +27,10 @@ mod subscribe;
 use std::ffi::CStr;
 use std::fmt;
 use std::io;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 pub use subscribe::{subscribe, subscribe_with, Subscription};
@@ -227,12 +228,27 @@ pub fn run(args: &[String]) -> Result<Answer, Error> {
 /// The socket is tried first. When the server does not speak the protocol (handshake
 /// failure) or cannot be reached at all, the CLI runs the command instead. Once the
 /// request went out over the socket there is no fallback (the command may have run).
+///
+/// A handshake failure is remembered for that socket file (path, device, inode and
+/// modification time): later commands go straight to the CLI instead of waiting up to
+/// [`Config::handshake_timeout`] each time. A restarted AeroSpace creates a new socket
+/// file, which is tried again.
 pub fn run_with(config: &Config, args: &[String]) -> Result<Answer, Error> {
-    let fallback_error = match socket_run(config, args) {
-        Ok(answer) => return Ok(answer),
-        Err(Failure::Fatal(e)) => return Err(e),
-        Err(Failure::Unreachable(e)) => e,
-        Err(Failure::Handshake(msg)) => Error::Protocol(msg),
+    let key = SocketKey::of(&config.socket);
+    let cached = key.as_ref().and_then(no_protocol_cache_get);
+    let fallback_error = match cached {
+        Some(msg) => Error::Protocol(msg),
+        None => match socket_run(config, args) {
+            Ok(answer) => return Ok(answer),
+            Err(Failure::Fatal(e)) => return Err(e),
+            Err(Failure::Unreachable(e)) => e,
+            Err(Failure::Handshake(msg)) => {
+                if let Some(k) = key {
+                    no_protocol_cache_put(k, msg.clone());
+                }
+                Error::Protocol(msg)
+            }
+        },
     };
     let Some(cli) = &config.cli else {
         return Err(with_note(fallback_error, "no aerospace CLI found"));
@@ -252,6 +268,45 @@ pub fn run_with(config: &Config, args: &[String]) -> Result<Answer, Error> {
             config.answer_timeout
         ))),
     }
+}
+
+/// Identity of a socket file: a restarted server creates a new one (new inode / mtime).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SocketKey {
+    path: PathBuf,
+    dev: u64,
+    ino: u64,
+    mtime: (i64, i64),
+}
+
+impl SocketKey {
+    fn of(path: &Path) -> Option<SocketKey> {
+        let m = std::fs::metadata(path).ok()?;
+        Some(SocketKey {
+            path: path.to_path_buf(),
+            dev: m.dev(),
+            ino: m.ino(),
+            mtime: (m.mtime(), m.mtime_nsec()),
+        })
+    }
+}
+
+/// Socket files whose server failed the handshake (does not speak the socket protocol),
+/// with the handshake error. Small: one entry per socket path.
+static NO_PROTOCOL: Mutex<Vec<(SocketKey, String)>> = Mutex::new(Vec::new());
+
+fn no_protocol_cache_get(key: &SocketKey) -> Option<String> {
+    let cache = NO_PROTOCOL.lock().unwrap_or_else(|e| e.into_inner());
+    cache
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, msg)| format!("{msg} (remembered for this socket)"))
+}
+
+fn no_protocol_cache_put(key: SocketKey, msg: String) {
+    let mut cache = NO_PROTOCOL.lock().unwrap_or_else(|e| e.into_inner());
+    cache.retain(|(k, _)| k.path != key.path);
+    cache.push((key, msg));
 }
 
 fn with_note(e: Error, note: &str) -> Error {

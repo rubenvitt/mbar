@@ -38,8 +38,12 @@ With mbar:
 - `aerospace_workspace_change` (and five more events) are **built-in**. They fire
   as soon as AeroSpace reports the change, with the same `FOCUSED_WORKSPACE`
   variable, so the sketchybarrc above keeps working unchanged. The
-  `exec-on-workspace-change` line can (and should) be removed; if it stays, items
-  get the event twice (harmless).
+  `exec-on-workspace-change` line should be removed: if it stays, items get the
+  event twice, and the forked trigger arrives 10–50 ms after the native event, so
+  after quick switches it can overwrite a newer one (the wrong workspace stays
+  highlighted). Configs that already trigger custom events with one of the other
+  five names (e.g. from `on-mode-changed` / `on-focus-changed`) must drop those
+  triggers for the same reason.
 - Lua handlers run in-process: no process is started per switch.
 - `mbar.aerospace.run({"workspace", "3"})` replaces `click_script="aerospace workspace 3"`
   without a fork.
@@ -48,26 +52,37 @@ With mbar:
 
 | mbar event | AeroSpace event | Variables (besides `NAME`, `SENDER`, `INFO`) |
 |---|---|---|
-| `aerospace_workspace_change` | `focused-workspace-changed` | `FOCUSED_WORKSPACE`, `PREV_WORKSPACE` |
-| `aerospace_focus_change` | `focus-changed` | `FOCUSED_WORKSPACE`, `WINDOW_ID` (empty on an empty workspace) |
-| `aerospace_monitor_change` | `focused-monitor-changed` | `FOCUSED_WORKSPACE`, `MONITOR_ID` (1-based) |
+| `aerospace_workspace_change` | `focused-workspace-changed` | `FOCUSED_WORKSPACE`, `PREV_WORKSPACE` (+ aliases `AEROSPACE_FOCUSED_WORKSPACE`, `AEROSPACE_PREV_WORKSPACE`) |
+| `aerospace_focus_change` | `focus-changed` | `FOCUSED_WORKSPACE` (+ `AEROSPACE_FOCUSED_WORKSPACE`), `WINDOW_ID` (empty on an empty workspace) |
+| `aerospace_monitor_change` | `focused-monitor-changed` | `FOCUSED_WORKSPACE` (+ `AEROSPACE_FOCUSED_WORKSPACE`), `MONITOR_ID` (1-based) |
 | `aerospace_mode_change` | `mode-changed` | `MODE` |
 | `aerospace_window_detected` | `window-detected` | `WINDOW_ID`, `WORKSPACE`, `APP_BUNDLE_ID`, `APP_NAME` |
 | `aerospace_binding_triggered` | `binding-triggered` | `MODE`, `BINDING` |
 
 `INFO` is the same data as a JSON object with lower-case keys
-(`{"focused_workspace":"2","prev_workspace":"1"}`).
+(`{"focused_workspace":"2","prev_workspace":"1"}`, without the `AEROSPACE_*` aliases,
+which exist for recipes that pass AeroSpace's own variable names through).
 
 - The events are built-in: `--subscribe item aerospace_workspace_change` works
   without `--add event`. A config that still runs `--add event aerospace_workspace_change`
-  (the SketchyBar recipe) is accepted silently and changes nothing; a manual
-  `--trigger aerospace_workspace_change FOCUSED_WORKSPACE=…` keeps working as before.
+  (the SketchyBar recipe) is accepted silently: it registers the name like a custom
+  event (harmless; a notification name is ignored). A manual
+  `--trigger aerospace_workspace_change FOCUSED_WORKSPACE=…` keeps working as before;
+  while not connected (old AeroSpace without `subscribe`) it also updates the stored
+  workspace (`FOCUSED_WORKSPACE` / `PREV_WORKSPACE` or their aliases), so
+  `provider=aerospace` and `--query aerospace` work in that setup. While connected,
+  only native events change the state.
 - The connection starts lazily on first use: a subscription to any `aerospace_*`
-  event, `provider=aerospace`, `--query aerospace`, or Lua `mbar.aerospace`.
-  Users without AeroSpace never connect.
+  event, `provider=aerospace`, or Lua `mbar.aerospace` (`run`, `query`, `on`).
+  `--query aerospace` never starts it (mbar.app polls it). Users without AeroSpace
+  never connect.
 - On connect mbar asks for the initial state (AeroSpace sends the current
   workspace, focus, monitor and mode right away), so items are correct at startup
-  without a separate query.
+  without a separate query. AeroSpace sends it once per connection (its initial
+  workspace event has `prevWorkspace == workspace`; a known previous workspace is
+  kept then). Subscribers that arrive later (shell loops subscribing item by item,
+  everything after `--reload`) get the stored state as a synthetic event of that name,
+  delivered to that subscriber only (items with their usual gating, `on` handlers).
 
 ## Provider `provider=aerospace`
 
@@ -79,6 +94,11 @@ Sets the item's label (extension, like the other native providers):
 | `mode` | current binding mode (`main` …) |
 | `monitor` | focused monitor id |
 
+Keys of the sample (`INFO` of the item's provider run): `value`, `workspace`,
+`prev_workspace`, `mode`, `monitor`; default format `{value}`. An item is only updated
+(label and script with `SENDER=provider`) when its sample changed since the last one
+applied to it, or when its provider was (re)configured.
+
 Highlighting the focused workspace item is a Lua or script handler on
 `aerospace_workspace_change` (example in `docs/LUA.md`).
 
@@ -87,6 +107,7 @@ Highlighting the focused workspace item is a Lua or script handler on
 ```json
 {
 	"connected": "on",
+	"active": "on",
 	"transport": "socket",
 	"server_version": "0.20.0-Beta 33fa0643",
 	"error": "",
@@ -97,7 +118,8 @@ Highlighting the focused workspace item is a Lua or script handler on
 }
 ```
 
-An item named `aerospace` wins, as with `--query borders`. `transport` is
+An item named `aerospace` wins, as with `--query borders`. `active` says whether
+the connection was started (`StartAerospace` emitted); `transport` is
 `socket`, `cli` or `none`.
 
 ## Lua
@@ -112,10 +134,13 @@ end)
 mbar.aerospace.on("workspace_change", function(env) end)        -- = aerospace_workspace_change
 ```
 
-Commands run on a worker thread; callbacks run on the daemon's Lua thread like
-`mbar.exec` callbacks. Nothing blocks the bar when AeroSpace hangs (AX calls in
-AeroSpace can block for seconds). `on` takes the event name with or without the
-`aerospace_` prefix and registers an in-process handler (no item needed).
+Commands run on a worker thread (bounded queue of 64; when full, a command fails at
+once with `exit_code = -1`, stderr "mbar: too many pending AeroSpace commands");
+callbacks run on the daemon's Lua thread like `mbar.exec` callbacks. Nothing blocks the
+bar when AeroSpace hangs (AX calls in AeroSpace can block for seconds). `on` takes the
+event name with or without the `aerospace_` prefix and registers an item-less,
+in-process handler (`LuaRequest::On`, see §Core): no item is involved, so item gating
+(`updates`, `drawing`, the default item) never applies.
 
 ## Transport (`crates/mbar-aerospace`)
 
@@ -134,11 +159,18 @@ Linux against a fake server.
   events from one long-running `aerospace subscribe --all` child (one JSON
   object per stdout line), commands as `aerospace <args>`. If the CLI has no
   `subscribe` either, the status says so and only manual `--trigger`s work.
+  `run` remembers a server without the protocol per socket file (path, device,
+  inode, mtime), so later commands go straight to the CLI instead of waiting
+  for the handshake timeout again.
   The `aerospace` binary is looked up on `PATH`, then `/opt/homebrew/bin`,
   `/usr/local/bin` and `/Applications/AeroSpace.app/Contents/Resources/bin`.
 - **Reconnect**: when AeroSpace quits or restarts, retry with backoff (1 s,
   doubling, max 30 s) forever; every change is reported as an
-  `AerospaceStatus`. `MBAR_AEROSPACE_SOCKET` and `MBAR_AEROSPACE_CLI` override
+  `AerospaceStatus`. An attempt counts as connected (status reported, backoff
+  reset) only after the first event frame / CLI line, so a server that handshakes
+  and closes does not cause a 1 s reconnect loop with a flapping status. A blocked
+  read is woken by the subscription's drop (`shutdown(Both)` / killing the child);
+  the read timeout (60 s) is only a safety net. `MBAR_AEROSPACE_SOCKET` and `MBAR_AEROSPACE_CLI` override
   the paths (tests).
 
 Contract:
@@ -170,10 +202,22 @@ pub fn subscribe(
     (scripts and Lua handlers); updates the stored state (focused workspace,
     previous workspace, mode, monitor) and `provider=aerospace` items.
   - `Input::AerospaceStatus(s)` → stored for `--query aerospace`.
-  - First subscription to an `aerospace_*` event, first `provider=aerospace`,
-    first `--query aerospace`, or a Lua request → one
-    `Effect::Platform(PlatformRequest::StartAerospace)` (exists).
-  - `--add event aerospace_*` is a silent no-op for the built-in names.
+  - `LuaRequest::On { events, handler }` → item-less handler: every trigger of one
+    of `events` (the same `trigger_event` path that runs item scripts and Lua item
+    handlers) also emits `Effect::LuaCallback { handler, env }` with the event's
+    variables and `SENDER` (no `NAME`). Cleared on `--reload` / hotload (the Lua
+    config re-runs and registers again).
+  - A new `aerospace_*` subscriber (item `--subscribe`, newly set bit, or `On`
+    handler) with known state for the event gets a synthetic event built from
+    `Model::aerospace` (workspace with `FOCUSED_WORKSPACE` / `PREV_WORKSPACE`, mode,
+    monitor, focus with the last window id), to that subscriber only, at the end of
+    the input after layout (so `updates=when_shown` sees the item's visibility).
+  - First subscription to an `aerospace_*` event, first `provider=aerospace`, an
+    `On` handler for an `aerospace_*` event, or a Lua request → one
+    `Effect::Platform(PlatformRequest::StartAerospace)` (exists). `--query aerospace`
+    never starts it.
+  - `--add event aerospace_*` registers the name (like `--subscribe` would); a
+    notification name is ignored.
   - State survives `--reload` (the connection does too).
 
 ## Binary (`crates/mbar`)
@@ -182,12 +226,13 @@ pub fn subscribe(
   like `SetHotload`): it starts one `mbar_aerospace::subscribe` and feeds its
   callbacks into the event queue as `Input::Aerospace` / `Input::AerospaceStatus`.
 - Lua `mbar.aerospace.{run,query,on}` (crates/mbar-lua + driver): commands on a
-  worker thread, results back as Lua callbacks.
+  worker thread (bounded queue), results back as Lua callbacks; `on` goes through
+  `Host::on_events` to `LuaRequest::On`.
 
 ## mbar.app
 
 - System page "AeroSpace" section: status from `--query aerospace` (connected,
-  transport, version, focused workspace, mode).
+  active, transport, version, focused workspace, mode). Polling it never connects.
 - Setup take-over step: detects `exec-on-workspace-change` lines in
   `aerospace.toml` that run `sketchybar --trigger aerospace_workspace_change` and
   advises removing them (mbar delivers the event itself).

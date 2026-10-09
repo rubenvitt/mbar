@@ -179,7 +179,13 @@ fn not_running_reports_once_and_drop_is_prompt_during_backoff() {
 #[test]
 fn drop_is_prompt_while_streaming() {
     let path = temp_path(".sock");
-    let _server = FakeServer::start(&path, Spec::default());
+    let _server = FakeServer::start(
+        &path,
+        Spec {
+            initial_events: vec![MODE_MAIN.into()],
+            ..Spec::default()
+        },
+    );
     let mut c = config(&path, None);
     c.initial_backoff = Duration::from_secs(10);
     let mut h = start(c);
@@ -285,7 +291,7 @@ fn rejected_subscribe_reports_the_server_error() {
         },
     );
     let mut h = start(config(&path, None));
-    assert_eq!(h.status(), connected_socket());
+    // Never reported as connected: no event arrived.
     let s = h.status();
     assert!(!s.connected);
     assert!(
@@ -320,4 +326,59 @@ fn dropping_from_a_callback_does_not_deadlock() {
     subscribed.recv_timeout(WAIT).unwrap();
     server.push(MODE_MAIN);
     rx.recv_timeout(WAIT).unwrap();
+}
+
+/// A server that completes the handshake and closes the stream before any event is not
+/// a successful connection: no "connected" status (no flapping), and the backoff keeps
+/// growing instead of restarting at its initial value after every attempt.
+#[test]
+fn a_stream_closed_before_the_first_event_is_no_connection() {
+    let path = temp_path(".sock");
+    let server = FakeServer::start(
+        &path,
+        Spec {
+            close_after_subscribe: true,
+            ..Spec::default()
+        },
+    );
+    let mut c = config(&path, None);
+    c.initial_backoff = Duration::from_millis(50);
+    c.max_backoff = Duration::from_millis(400);
+    let mut h = start(c);
+    let s = h.status();
+    assert!(!s.connected);
+    assert!(
+        s.error
+            .as_deref()
+            .unwrap()
+            .contains("before the first event"),
+        "{s:?}"
+    );
+    std::thread::sleep(Duration::from_millis(700));
+    let later: Vec<_> = h.status.try_iter().collect();
+    assert!(later.iter().all(|s| !s.connected), "flapping: {later:?}");
+    // Attempts at ~0, 50, 150, 350 ms (+ 750): a reset backoff would give ~12.
+    let attempts = server.subscribe_requests();
+    assert!((2..=6).contains(&attempts), "{attempts} attempts");
+    assert!(h.stop() < Duration::from_secs(1));
+}
+
+/// The CLI fallback counts as connected only once `aerospace subscribe --all` printed
+/// its first line.
+#[test]
+fn cli_without_output_is_no_connection() {
+    let path = temp_path(".sock");
+    let _server = FakeServer::start(
+        &path,
+        Spec {
+            handshake: Handshake::Close,
+            ..Spec::default()
+        },
+    );
+    let cli = fake_cli("exit 0");
+    let mut h = start(config(&path, Some(cli.path())));
+    let s = h.status();
+    assert!(!s.connected, "{s:?}");
+    assert!(s.error.unwrap().contains("failed"));
+    h.stop();
 }

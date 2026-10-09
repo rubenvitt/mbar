@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use mbar_lua::{parse_script, AerospaceResult, Host, LuaEngine, AEROSPACE_CARRIER};
+use mbar_lua::{parse_script, AerospaceResult, Host, LuaEngine};
 
 const LUA_MD: &str = include_str!("../../../docs/LUA.md");
 const MIGRATING_MD: &str = include_str!("../../../docs/MIGRATING.md");
@@ -16,6 +16,7 @@ struct Mock {
     messages: Vec<Vec<String>>,
     spawned: Vec<(String, Option<u64>)>,
     aerospace: Vec<(Vec<String>, Option<u64>)>,
+    on: Vec<(Vec<String>, u64)>,
 }
 
 impl Host for Mock {
@@ -29,6 +30,9 @@ impl Host for Mock {
     fn schedule(&mut self, _delay: Duration, _callback: u64) {}
     fn aerospace(&mut self, args: Vec<String>, callback: Option<u64>) {
         self.aerospace.push((args, callback));
+    }
+    fn on_events(&mut self, events: Vec<String>, handler: u64) {
+        self.on.push((events, handler));
     }
 }
 
@@ -331,20 +335,11 @@ fn aerospace_workspace_examples() {
         assert_eq!(host.aerospace.len(), 1, "{doc}");
         let (args, id) = host.aerospace[0].clone();
         assert_eq!(args, ["list-workspaces", "--all"], "{doc}");
-        let cfg = host.messages.concat();
-        assert!(
-            has_seq(
-                &cfg,
-                &[
-                    "--subscribe",
-                    AEROSPACE_CARRIER,
-                    "aerospace_workspace_change"
-                ]
-            ),
-            "{doc}: {cfg:?}"
-        );
-        let carrier = script_id(&cfg, AEROSPACE_CARRIER);
-        host.messages.clear();
+        // An item-less handler: no item, no subscription message.
+        assert!(host.messages.is_empty(), "{doc}: {:?}", host.messages);
+        assert_eq!(host.on.len(), 1, "{doc}");
+        let (events, handler) = host.on[0].clone();
+        assert_eq!(events, ["aerospace_workspace_change"], "{doc}");
 
         engine
             .aerospace_finished(id.expect("callback"), aero(0, "1\n2\n"), &mut host)
@@ -366,9 +361,8 @@ fn aerospace_workspace_examples() {
 
         engine
             .run_handler(
-                carrier,
+                handler,
                 &env(&[
-                    ("NAME", AEROSPACE_CARRIER),
                     ("SENDER", "aerospace_workspace_change"),
                     ("FOCUSED_WORKSPACE", "2"),
                     ("PREV_WORKSPACE", "1"),

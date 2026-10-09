@@ -3,11 +3,11 @@
 //! * `run(args, fn?)` / `query(args, fn)` hand the command to [`crate::Host::aerospace`]
 //!   (the daemon runs it on a worker thread and connects to AeroSpace's event stream);
 //!   the result comes back through [`crate::LuaEngine::aerospace_finished`].
-//! * `on(event, fn)` registers in-process handlers for the built-in `aerospace_*` events.
-//!   The daemon only delivers events to items, so the first `on` adds one carrier item,
-//!   [`AEROSPACE_CARRIER`] (`drawing=off`), and subscribes it with a dispatcher that calls
-//!   every function registered for the event's `SENDER`, in registration order. The
-//!   subscription also makes the daemon connect to AeroSpace.
+//! * `on(event, fn)` registers an item-less in-process handler for one of the built-in
+//!   `aerospace_*` events ([`crate::Host::on_events`]): every `on` call gets its own
+//!   handler id, the daemon calls each of them (in registration order) whenever the event
+//!   is triggered, independent of any item. Registering also makes the daemon connect to
+//!   AeroSpace and deliver the current state when it is already known.
 
 use std::collections::HashSet;
 
@@ -28,15 +28,7 @@ pub const AEROSPACE_EVENTS: [&str; 6] = [
     "aerospace_binding_triggered",
 ];
 
-/// The hidden (`drawing=off`) item that carries the `mbar.aerospace.on` handlers. It is
-/// listed by `--query bar` like any other item.
-pub const AEROSPACE_CARRIER: &str = "__mbar_aerospace";
-
 const PREFIX: &str = "aerospace_";
-/// Registry table `{ [event] = { fn, ... } }` of the `on` handlers.
-const KEY_ON_HANDLERS: &str = "mbar.aerospace.handlers";
-/// Registry slot of the dispatcher function (the carrier's handler for every event).
-const KEY_DISPATCH: &str = "mbar.aerospace.dispatch";
 
 /// The outcome of one AeroSpace command, as `mbar.aerospace.run` callbacks see it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -54,8 +46,6 @@ pub struct AerospaceResult {
 pub(crate) struct LuaState {
     /// Callback ids of pending `query` calls (the others are `run` callbacks).
     queries: HashSet<u64>,
-    /// The carrier item was added by this engine (i.e. since the last config load).
-    carrier: bool,
 }
 
 /// Removes `id` from the pending queries; whether it was one.
@@ -185,69 +175,16 @@ fn on(lua: &Lua, st: &Shared, event: Value, f: Value) -> Result<()> {
             f.type_name()
         ));
     };
-    let handlers: Table = lua.named_registry_value(KEY_ON_HANDLERS)?;
-    let list = match handlers.raw_get::<Option<Table>>(name.as_str())? {
-        Some(l) => l,
-        None => {
-            let l = lua.create_table()?;
-            handlers.raw_set(name.as_str(), &l)?;
-            l
-        }
-    };
-    let first = list.raw_len() == 0;
-    list.raw_set(list.raw_len() + 1, f)?;
-    if !first {
-        return Ok(());
-    }
-    let add_carrier = !std::mem::replace(&mut st.borrow_mut().aerospace.carrier, true);
-    if add_carrier {
-        api::emit(
-            st,
-            vec![
-                "--add".into(),
-                "item".into(),
-                AEROSPACE_CARRIER.into(),
-                "left".into(),
-                "--set".into(),
-                AEROSPACE_CARRIER.into(),
-                "drawing=off".into(),
-            ],
-        )?;
-    }
-    let dispatch: Function = lua.named_registry_value(KEY_DISPATCH)?;
-    let carrier = Value::String(lua.create_string(AEROSPACE_CARRIER)?);
-    let events = Value::String(lua.create_string(&name)?);
-    api::subscribe(lua, st, &carrier, events, Some(dispatch))
-}
-
-/// The carrier's handler: calls every `on` function of the event in `env.SENDER` with
-/// `env`. All of them run even when one fails; the first error is reported.
-fn dispatch(lua: &Lua, env: Table) -> Result<()> {
-    let Some(sender) = env.raw_get::<Option<String>>("SENDER")? else {
-        return Ok(());
-    };
-    let handlers: Table = lua.named_registry_value(KEY_ON_HANDLERS)?;
-    let Some(list) = handlers.raw_get::<Option<Table>>(sender)? else {
-        return Ok(());
-    };
-    // A copy: a handler may register more handlers for the same event.
-    let fns: Vec<Function> = list.sequence_values::<Function>().collect::<Result<_>>()?;
-    let mut first_err = None;
-    for f in fns {
-        if let Err(e) = f.call::<()>(&env) {
-            first_err.get_or_insert(e);
-        }
-    }
-    first_err.map_or(Ok(()), Err)
+    // One handler per call: `run_handler` dispatches on `SENDER` (the event name).
+    let id = api::new_id(st);
+    let entry = api::handler_entry(lua, id)?;
+    let by_event: Table = entry.raw_get("events")?;
+    by_event.raw_set(name.as_str(), f)?;
+    api::host_fn(lua, api::KEY_HOST_ON)?.call::<()>((vec![name], id))
 }
 
 /// Installs `mbar.aerospace` into the module table `m`.
 pub(crate) fn install(lua: &Lua, st: &Shared, m: &Table) -> Result<()> {
-    lua.set_named_registry_value(KEY_ON_HANDLERS, lua.create_table()?)?;
-    lua.set_named_registry_value(
-        KEY_DISPATCH,
-        lua.create_function(|lua, env: Table| dispatch(lua, env))?,
-    )?;
     let t = lua.create_table()?;
     let s = st.clone();
     t.raw_set(

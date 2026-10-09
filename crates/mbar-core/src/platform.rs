@@ -286,6 +286,14 @@ pub enum LuaRequest {
         events: Vec<String>,
         handler: u64,
     },
+    /// Item-less ("global") in-process handler (Lua `mbar.aerospace.on`): whenever one of
+    /// `events` is triggered, the runtime also emits `Effect::LuaCallback { handler, env }`
+    /// with the event's variables and `SENDER=<event>` (no `NAME`), independent of any
+    /// item's `updates` / `drawing` state. Cleared by `--reload` (the Lua config re-runs
+    /// and registers again). Registering for an `aerospace_*` event starts the AeroSpace
+    /// connection and, when the state for that event is known, delivers it to `handler`
+    /// right away.
+    On { events: Vec<String>, handler: u64 },
 }
 
 /// Everything that happens to the core.
@@ -392,8 +400,8 @@ pub enum PlatformRequest {
     /// The window-borders configuration changed (`--borders`, `--reload`;
     /// `docs/spec/borders.md`).
     SetBorders(Box<crate::borders::BordersUpdate>),
-    /// First use of AeroSpace (an `aerospace_*` subscription, `provider=aerospace`,
-    /// `--query aerospace`, Lua `mbar.aerospace`): connect and keep the event stream open.
+    /// First use of AeroSpace (an `aerospace_*` subscription, `provider=aerospace`, Lua
+    /// `mbar.aerospace`; never `--query aerospace`): connect and keep the event stream open.
     /// Handled by the binary, not the macOS layer.
     StartAerospace,
 }

@@ -12,9 +12,9 @@
 //!
 //! Sampling is the platform's job (`PlatformRequest::StartProvider` →
 //! `Input::ProviderSample`), except for core providers ([`ProviderKind::is_core`]):
-//! `aerospace` is fed by the runtime from its AeroSpace state ([`aerospace_sample`], on
-//! every `Input::Aerospace` and when the provider is configured) and never reaches the
-//! platform. The core formats the templates into `label`/`icon` and also runs the item's
+//! `aerospace` is fed by the runtime from its AeroSpace state ([`aerospace_sample`], when
+//! the provider is configured and after a state change that changes the item's sample)
+//! and never reaches the platform. The core formats the templates into `label`/`icon` and also runs the item's
 //! `script` with `SENDER=provider` and the sample as JSON in `INFO`.
 //!
 //! Keys per provider:

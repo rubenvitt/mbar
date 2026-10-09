@@ -199,6 +199,8 @@
 ---@field PERCENTAGE? string Slider items
 ---@field FOCUSED_WORKSPACE? string AeroSpace workspace, focus and monitor events
 ---@field PREV_WORKSPACE? string aerospace_workspace_change
+---@field AEROSPACE_FOCUSED_WORKSPACE? string Alias of FOCUSED_WORKSPACE (AeroSpace's own name)
+---@field AEROSPACE_PREV_WORKSPACE? string Alias of PREV_WORKSPACE
 ---@field WINDOW_ID? string aerospace_focus_change (empty on an empty workspace), aerospace_window_detected
 ---@field MONITOR_ID? string aerospace_monitor_change (1-based)
 ---@field MODE? string aerospace_mode_change, aerospace_binding_triggered
@@ -509,9 +511,11 @@ function mbar.aerospace.run(args, fn) end
 ---@param fn fun(value: any, err: string?)
 function mbar.aerospace.query(args, fn) end
 
----Registers an in-process handler for an AeroSpace event (no item needed; mbar adds
----the hidden carrier item `__mbar_aerospace`). Several handlers per event all run, in
----registration order.
+---Registers an item-less, in-process handler for an AeroSpace event: item settings
+---(`updates`, `drawing`, the default item) do not affect it, `env.SENDER` is the event
+---and there is no `env.NAME`. Several handlers per event all run, in registration
+---order. When mbar already knows the state for the event, the handler is called once
+---right away with it.
 ---@param event mbar.AerospaceEvent
 ---@param fn mbar.Handler
 function mbar.aerospace.on(event, fn) end
