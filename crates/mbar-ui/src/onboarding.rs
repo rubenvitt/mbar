@@ -61,6 +61,10 @@ pub enum OldKind {
     /// Something else named `sketchybar` or `borders` that shadows the app on the PATH:
     /// reported only.
     Foreign,
+    /// A Homebrew link into its own formula (`/usr/local/bin/borders ->
+    /// ../Cellar/borders/…` or `../opt/borders/…` on Intel Macs): the cleanup's
+    /// `brew uninstall` removes it, otherwise it stays like `Foreign` (`removed_by_brew`).
+    Homebrew,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +91,15 @@ fn link_target(p: &Path) -> Option<PathBuf> {
     })
 }
 
+/// Whether `target` lies in Homebrew's keg of `formula`: a `Cellar/<formula>` or
+/// `opt/<formula>` pair of components (`../Cellar/borders/1.9.0/bin/borders`).
+fn in_brew_keg(target: &Path, formula: &str) -> bool {
+    let parts: Vec<_> = target.components().map(|c| c.as_os_str()).collect();
+    parts
+        .windows(2)
+        .any(|w| (w[0] == "Cellar" || w[0] == "opt") && w[1] == formula)
+}
+
 fn classify(path: &Path, bundle_root: Option<&Path>) -> Option<OldKind> {
     let meta = std::fs::symlink_metadata(path).ok()?;
     let target = link_target(path);
@@ -111,6 +124,9 @@ fn classify(path: &Path, bundle_root: Option<&Path>) -> Option<OldKind> {
     match name {
         "mbar" | "mbar-ui" => Some(OldKind::Binary),
         "sketchybar" | "borders" if points_to_mbar => Some(OldKind::Binary),
+        "sketchybar" | "borders" if target.as_deref().is_some_and(|t| in_brew_keg(t, name)) => {
+            Some(OldKind::Homebrew)
+        }
         "sketchybar" | "borders" if meta.is_file() || target.is_some() => Some(OldKind::Foreign),
         _ => None,
     }
@@ -128,7 +144,12 @@ pub fn find_old_installs(
     ] {
         for name in ["mbar", "sketchybar", "borders", "mbar-ui"] {
             let p = dir.join(name);
-            if let Some(kind) = classify(&p, bundle_root) {
+            if let Some(mut kind) = classify(&p, bundle_root) {
+                // Homebrew links only its own prefix (`/usr/local/bin`); a link of yours
+                // into a keg outlives `brew uninstall`.
+                if kind == OldKind::Homebrew && !admin {
+                    kind = OldKind::Foreign;
+                }
                 out.push(OldInstall {
                     path: p,
                     kind,
@@ -163,6 +184,56 @@ impl BrewState {
     /// The cleanup has something to do for Homebrew `borders`.
     pub fn borders_has_work(&self) -> bool {
         self.borders_installed || self.borders_running
+    }
+}
+
+/// Whether the cleanup's `brew uninstall` removes `o`: a `Homebrew` link whose formula
+/// is installed and whose "Also uninstall Homebrew …" switch is on. Anything else that
+/// is not mbar stays in place.
+pub fn removed_by_brew(
+    o: &OldInstall,
+    brew: &BrewState,
+    remove_brew_sketchybar: bool,
+    remove_brew_borders: bool,
+) -> bool {
+    o.kind == OldKind::Homebrew
+        && match o.path.file_name().and_then(|n| n.to_str()) {
+            Some("sketchybar") => remove_brew_sketchybar && brew.sketchybar_installed,
+            Some("borders") => remove_brew_borders && brew.borders_installed,
+            _ => false,
+        }
+}
+
+/// Whether the cleanup leaves `o` where it is (not mbar and not removed by
+/// `brew uninstall`).
+pub fn left_in_place(
+    o: &OldInstall,
+    brew: &BrewState,
+    remove_brew_sketchybar: bool,
+    remove_brew_borders: bool,
+) -> bool {
+    match o.kind {
+        OldKind::Foreign => true,
+        OldKind::Homebrew => !removed_by_brew(o, brew, remove_brew_sketchybar, remove_brew_borders),
+        OldKind::Binary | OldKind::LaunchAgent => false,
+    }
+}
+
+/// What the cleanup does with `o`, as the setup lists it.
+pub fn old_install_fate(
+    o: &OldInstall,
+    brew: &BrewState,
+    remove_brew_sketchybar: bool,
+    remove_brew_borders: bool,
+) -> &'static str {
+    match o.kind {
+        OldKind::Binary if o.admin => "removed with the commands step (admin)",
+        OldKind::Binary => "removed",
+        OldKind::LaunchAgent => "stopped and removed",
+        _ if removed_by_brew(o, brew, remove_brew_sketchybar, remove_brew_borders) => {
+            "removed by brew uninstall"
+        }
+        OldKind::Foreign | OldKind::Homebrew => "not mbar, left in place",
     }
 }
 
@@ -258,10 +329,76 @@ pub fn window_manager_configs(home: &Path) -> [PathBuf; 4] {
     ]
 }
 
-/// What the take-over step says about window-manager lines that start `borders`.
-pub const LAUNCH_LINE_ADVICE: &str = "These keep working through mbar's `borders` command \
-     when the window manager's PATH contains the /etc/paths.d entries (a login shell's \
-     does). Otherwise remove them: mbar already runs your bordersrc.";
+/// Where mbar.app's `bin` directory is when the running bundle is unknown.
+pub const DEFAULT_BIN_DIR: &str = "/Applications/mbar.app/Contents/Resources/bin";
+
+/// Shown after the launch lines and their advice.
+pub const LAUNCH_LINE_DOCS: &str = "See docs/MIGRATING.md#migrating-from-jankyborders.";
+
+/// How a window-manager line starts JankyBorders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Launch {
+    /// `borders …`; `args`: the line passes arguments (settings).
+    Borders { args: bool },
+    /// `brew services start|restart|run borders`.
+    BrewService,
+}
+
+/// What the take-over step says about one launch line (`docs/MIGRATING.md`,
+/// "Migrating from JankyBorders"). `bordersrc`: the config mbar runs in place, if any;
+/// `bin_dir`: the running bundle's `bin` directory (`DEFAULT_BIN_DIR` when unknown).
+///
+/// Only a line that starts `borders` without settings, or Homebrew's service, while a
+/// `bordersrc` exists is plain removal: mbar runs that `bordersrc` itself. Settings on
+/// the line, or no `bordersrc` at all, have to move somewhere first.
+pub fn launch_line_advice(
+    launch: Launch,
+    bordersrc: Option<&Path>,
+    bin_dir: Option<&Path>,
+) -> String {
+    const CONFIGURE: &str =
+        "put the settings in ~/.config/borders/bordersrc or in mbar.borders{…} in init.lua";
+    let link = bin_dir
+        .unwrap_or(Path::new(DEFAULT_BIN_DIR))
+        .join("borders");
+    match (launch, bordersrc) {
+        (Launch::BrewService, Some(rc)) => format!(
+            "Remove this line: it starts Homebrew's JankyBorders, which the cleanup \
+             uninstalls, and mbar runs {} itself.",
+            rc.display()
+        ),
+        (Launch::BrewService, None) => format!(
+            "Remove this line: it starts Homebrew's JankyBorders, which the cleanup \
+             uninstalls. mbar draws no borders until they are configured: {CONFIGURE}."
+        ),
+        (Launch::Borders { args: false }, Some(rc)) => format!(
+            "Remove this line: mbar runs {} itself, and a bare `borders` now only reports \
+             that borders are already running.",
+            rc.display()
+        ),
+        (Launch::Borders { args: false }, None) => format!(
+            "Without a bordersrc this line ran JankyBorders with its defaults; mbar draws \
+             no borders until they are configured: {CONFIGURE}, then remove the line."
+        ),
+        (Launch::Borders { args: true }, rc) => {
+            let mut s = format!(
+                "This line passes settings. Keep them: move them into \
+                 ~/.config/borders/bordersrc (or mbar.borders{{…}} in init.lua) and remove \
+                 the line, or call mbar's link by its full path: {} … (a bare `borders` \
+                 works only when the window manager's PATH contains the /etc/paths.d \
+                 entries).",
+                link.display()
+            );
+            if let Some(rc) = rc {
+                s.push_str(&format!(
+                    " mbar also runs {}, so keep each setting in one place.",
+                    rc.display()
+                ));
+            }
+            s
+        }
+    }
+}
 
 /// A line in a window-manager config that starts `borders`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,6 +408,7 @@ pub struct LaunchLine {
     pub line: usize,
     /// The line as written, trimmed.
     pub text: String,
+    pub launch: Launch,
 }
 
 /// Lines that start `borders` in the window-manager configs that exist under `home`.
@@ -280,88 +418,221 @@ pub fn borders_launch_lines(home: &Path) -> Vec<LaunchLine> {
         let Ok(content) = std::fs::read_to_string(&file) else {
             continue;
         };
-        for (line, text) in borders_launch_lines_in(&content) {
+        let toml = file.extension().is_some_and(|e| e == "toml");
+        for (line, text, launch) in borders_launch_lines_in(&content, toml) {
             out.push(LaunchLine {
                 file: file.clone(),
                 line,
                 text,
+                launch,
             });
         }
     }
     out
 }
 
-/// `(1-based line number, trimmed line)` of every line of a shell script (`yabairc`)
-/// or TOML file (`aerospace.toml`) that runs `borders` as a command: `borders k=v &`,
-/// `exec-and-forget borders …`, `/opt/homebrew/bin/borders …`,
-/// `brew services start borders`. Comments and `borders` as an argument
-/// (`sketchybar --set borders …`, `command -v borders`, `pkill borders`) do not count.
-pub fn borders_launch_lines_in(content: &str) -> Vec<(usize, String)> {
+/// `(1-based line number, trimmed line, how)` of every line of a shell script
+/// (`yabairc`) or, with `toml`, a TOML file (`aerospace.toml`) that runs `borders` as a
+/// command: `borders k=v &`, `exec-and-forget borders …`, `/opt/homebrew/bin/borders …`,
+/// `else borders …`, `sh -c 'borders …'`, `brew services start borders`. Comments and
+/// `borders` as an argument (`sketchybar --set borders …`, `command -v borders`,
+/// `pkill borders`, `echo "borders started"`) do not count.
+pub fn borders_launch_lines_in(content: &str, toml: bool) -> Vec<(usize, String, Launch)> {
     content
         .lines()
         .enumerate()
-        .filter(|(_, l)| line_runs_borders(l))
-        .map(|(i, l)| (i + 1, l.trim().to_string()))
+        .filter_map(|(i, l)| line_launch(l, toml).map(|how| (i + 1, l.trim().to_string(), how)))
         .collect()
 }
 
-fn line_runs_borders(line: &str) -> bool {
-    // Command boundaries in shell and TOML: separators, subshells and quotes (TOML
-    // strings and `action="…"` arguments hold whole commands).
-    strip_comment(line)
-        .split(|c: char| {
-            matches!(
-                c,
-                ';' | '&' | '|' | '(' | ')' | '`' | '\'' | '"' | '[' | ']' | '{' | '}' | ','
-            )
-        })
-        .any(segment_runs_borders)
-}
-
-/// The line up to a `#` that starts a comment (at the start or after whitespace).
-fn strip_comment(line: &str) -> &str {
-    let bytes = line.as_bytes();
-    for (i, b) in bytes.iter().enumerate() {
-        if *b == b'#' && (i == 0 || bytes[i - 1].is_ascii_whitespace()) {
-            return &line[..i];
+/// Splits `line` into simple commands (words, quotes removed) and returns the first
+/// that starts `borders`. A quoted string is a command of its own only where a command
+/// string starts: after `exec-and-forget`, a shell's `-c`, yabai's `action=` and, in
+/// TOML, as a value or an array element. Anywhere else it is part of a word, i.e. an
+/// argument (`echo "borders started"`).
+fn line_launch(line: &str, toml: bool) -> Option<Launch> {
+    let mut seg: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let end_word = |seg: &mut Vec<String>, word: &mut String, in_word: &mut bool| {
+        if std::mem::take(in_word) {
+            seg.push(std::mem::take(word));
+        }
+    };
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        let separator = match c {
+            ';' | '&' | '|' | '(' | ')' | '`' => true,
+            '[' | ']' | ',' => toml,
+            // `{ borders & }`; `${HOME}` stays one word.
+            '{' | '}' => !in_word,
+            _ => false,
+        };
+        if separator {
+            end_word(&mut seg, &mut word, &mut in_word);
+            if let Some(how) = segment_launch(&seg) {
+                return Some(how);
+            }
+            seg.clear();
+            continue;
+        }
+        match c {
+            '\'' | '"' => {
+                let mut quoted = String::new();
+                while let Some(d) = chars.next() {
+                    match d {
+                        _ if d == c => break,
+                        '\\' if c == '"' => quoted.extend(chars.next()),
+                        _ => quoted.push(d),
+                    }
+                }
+                let at_word = in_word.then_some(word.as_str());
+                if starts_command_string(&seg, at_word, toml) {
+                    if let Some(how) = line_launch(&quoted, false) {
+                        return Some(how);
+                    }
+                }
+                word.push_str(&quoted);
+                in_word = true;
+            }
+            '#' if !in_word => break,
+            '\\' => {
+                word.extend(chars.next());
+                in_word = true;
+            }
+            c if c.is_whitespace() => end_word(&mut seg, &mut word, &mut in_word),
+            c => {
+                word.push(c);
+                in_word = true;
+            }
         }
     }
-    line
+    end_word(&mut seg, &mut word, &mut in_word);
+    segment_launch(&seg)
 }
 
-/// Whether the command of one segment is `borders` (after launchers and environment
-/// assignments) or `brew services start|restart|run borders`.
-fn segment_runs_borders(segment: &str) -> bool {
-    let mut words = segment.split_whitespace().peekable();
-    // `FOO=bar borders …`
-    while words
-        .peek()
-        .is_some_and(|w| w.contains('=') && !w.starts_with('='))
-    {
-        words.next();
+/// Whether a quote that follows the words `seg` (and the unfinished `word`) opens a
+/// command string.
+fn starts_command_string(seg: &[String], word: Option<&str>, toml: bool) -> bool {
+    let is_shell = |w: &str| {
+        let name = w.rsplit('/').next().unwrap_or(w);
+        matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh" | "fish")
+    };
+    // `-c`, `-lc`, `-ic` after a shell.
+    let is_dash_c = |w: &str| {
+        w.strip_prefix('-')
+            .is_some_and(|o| o.ends_with('c') && o.chars().all(|c| c.is_ascii_alphabetic()))
+    };
+    match word {
+        // yabai signals run `action="…"` with `sh -c`.
+        Some("action=") => true,
+        Some(w) => toml && toml_value_start(seg, w),
+        None => match seg {
+            // A TOML array element or a string at the start of a line.
+            [] => toml,
+            [.., last] if last == "exec-and-forget" => true,
+            [before @ .., last] if is_dash_c(last) && before.iter().any(|w| is_shell(w)) => true,
+            _ => toml && toml_value_start(seg, ""),
+        },
     }
-    while let Some(word) = words.next() {
-        match word {
-            "exec-and-forget" | "exec" | "nohup" | "env" | "time" => {
-                // The launcher's options and assignments.
-                while words
-                    .peek()
-                    .is_some_and(|w| w.starts_with('-') || w.contains('='))
-                {
-                    words.next();
+}
+
+/// `key =` (or `key=`) before a TOML string value.
+fn toml_value_start(seg: &[String], word: &str) -> bool {
+    let mut prefix = seg.join(" ");
+    prefix.push(' ');
+    prefix.push_str(word);
+    prefix.trim().strip_suffix('=').is_some_and(|key| {
+        let key = key.trim();
+        !key.is_empty() && !key.contains(char::is_whitespace)
+    })
+}
+
+/// Shell words and launchers in front of the command word.
+const PREFIX_KEYWORDS: [&str; 9] = [
+    "if",
+    "then",
+    "else",
+    "elif",
+    "do",
+    "while",
+    "until",
+    "!",
+    "exec-and-forget",
+];
+
+/// How one simple command starts `borders`: its command word (after shell keywords,
+/// launchers with their options and environment assignments) is `borders`, or it is
+/// `brew services start|restart|run borders`.
+fn segment_launch(words: &[String]) -> Option<Launch> {
+    let is_assignment = |w: &str| {
+        w.find('=').is_some_and(|p| {
+            p > 0
+                && w[..p]
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+    };
+    // Launcher options that take a value (`sudo -u root`, `nice -n 5`, `exec -a name`).
+    let takes_value = |launcher: &str, opt: &str| {
+        matches!(
+            (launcher, opt),
+            (
+                "sudo",
+                "-u" | "-g" | "-p" | "-C" | "-h" | "-U" | "-r" | "-t" | "-D" | "-R" | "-T"
+            ) | ("env", "-u" | "-C")
+                | ("exec", "-a")
+                | ("nice", "-n")
+        )
+    };
+    let mut i = 0;
+    loop {
+        let w = words.get(i)?.as_str();
+        match w {
+            _ if PREFIX_KEYWORDS.contains(&w) || is_assignment(w) => i += 1,
+            "time" | "nohup" | "nice" | "sudo" | "env" | "exec" | "command" => {
+                i += 1;
+                while let Some(opt) = words.get(i).filter(|o| o.len() > 1 && o.starts_with('-')) {
+                    // `command -v borders` only looks it up.
+                    if w == "command" && (opt == "-v" || opt == "-V") {
+                        return None;
+                    }
+                    i += if takes_value(w, opt) { 2 } else { 1 };
                 }
             }
-            // `command -v borders` only looks it up.
-            "command" if words.peek().is_some_and(|w| w.starts_with('-')) => return false,
-            "command" => {}
-            w if w == "brew" || w.ends_with("/brew") => {
-                let rest: Vec<&str> = words.take(3).collect();
-                return matches!(
-                    rest.as_slice(),
-                    ["services", "start" | "restart" | "run", "borders"]
-                );
+            _ if w == "brew" || w.ends_with("/brew") => {
+                return match words.get(i + 1..i + 4)? {
+                    [a, b, c]
+                        if a == "services"
+                            && matches!(b.as_str(), "start" | "restart" | "run")
+                            && c == "borders" =>
+                    {
+                        Some(Launch::BrewService)
+                    }
+                    _ => None,
+                };
             }
-            w => return w == "borders" || w.ends_with("/borders"),
+            _ if w == "borders" || w.ends_with("/borders") => {
+                return Some(Launch::Borders {
+                    args: has_arguments(&words[i + 1..]),
+                });
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Whether `words` hold anything but redirections (`>/dev/null`, `2>`, `> log`).
+fn has_arguments(words: &[String]) -> bool {
+    let mut it = words.iter();
+    while let Some(w) = it.next() {
+        let op = w.trim_start_matches(|c: char| c.is_ascii_digit());
+        if !op.starts_with(['>', '<']) {
+            return true;
+        }
+        // A bare operator: the target is the next word.
+        if op.trim_start_matches(['>', '<', '&', '|']).is_empty() {
+            it.next();
         }
     }
     false
@@ -461,6 +732,59 @@ pub fn find_brew() -> Option<PathBuf> {
         .find(|p| p.exists())
 }
 
+/// `brew list --formula` and `brew services list` through `brew_bin`, parsed; the
+/// default state without Homebrew.
+pub fn detect_brew(brew_bin: Option<&Path>) -> BrewState {
+    let Some(b) = brew_bin else {
+        return BrewState::default();
+    };
+    let out = |args: &[&str]| {
+        Command::new(b)
+            .args(args)
+            .stderr(std::process::Stdio::null())
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default()
+    };
+    parse_brew(&out(&["list", "--formula"]), &out(&["services", "list"]))
+}
+
+/// The JankyBorders part of the cleanup: stop the `borders` service (harmless when
+/// stopped), then, with `uninstall` and the formula installed, `brew uninstall
+/// borders`. Shared by the setup and the System page's "Stop and remove JankyBorders".
+pub fn borders_cleanup_commands(
+    brew: &BrewState,
+    brew_bin: Option<&Path>,
+    uninstall: bool,
+) -> Vec<Vec<String>> {
+    let Some(b) = brew_bin.map(|p| p.to_string_lossy().into_owned()) else {
+        return Vec::new();
+    };
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    let mut out = Vec::new();
+    if brew.borders_has_work() {
+        out.push(s(&[&b, "services", "stop", "borders"]));
+        if uninstall && brew.borders_installed {
+            out.push(s(&[&b, "uninstall", "borders"]));
+        }
+    }
+    out
+}
+
+/// The System page's warning while Homebrew JankyBorders is still around (it draws
+/// a second set of borders over mbar's); `None` when it is gone.
+pub fn brew_borders_warning(brew: &BrewState) -> Option<String> {
+    let what = match (brew.borders_installed, brew.borders_running) {
+        (true, true) => "installed and running",
+        (true, false) => "installed",
+        (false, true) => "running",
+        (false, false) => return None,
+    };
+    Some(format!(
+        "JankyBorders from Homebrew is still {what}; it draws borders too."
+    ))
+}
+
 /// User-level cleanup commands, in order: Homebrew services and formulas (sketchybar,
 /// borders, mbar; each service stops before its formula is uninstalled), the legacy
 /// launch agent (bootout, then remove the plist), user-owned old binaries. Admin-owned
@@ -485,12 +809,11 @@ pub fn cleanup_commands(
                 out.push(s(&[&b, "uninstall", "sketchybar"]));
             }
         }
-        if brew.borders_has_work() {
-            out.push(s(&[&b, "services", "stop", "borders"]));
-            if remove_brew_borders && brew.borders_installed {
-                out.push(s(&[&b, "uninstall", "borders"]));
-            }
-        }
+        out.extend(borders_cleanup_commands(
+            brew,
+            Some(Path::new(&b)),
+            remove_brew_borders,
+        ));
         if brew.mbar_installed {
             out.push(s(&[&b, "services", "stop", "mbar"]));
             out.push(s(&[&b, "uninstall", "mbar"]));
@@ -922,6 +1245,174 @@ mod tests {
     }
 
     #[test]
+    fn borders_cleanup_from_the_system_page() {
+        let brew_bin = Some(Path::new("/usr/local/bin/brew"));
+        let run = |brew: &BrewState, bin: Option<&Path>| -> Vec<String> {
+            borders_cleanup_commands(brew, bin, true)
+                .iter()
+                .map(|c| c.join(" "))
+                .collect()
+        };
+        let both = BrewState {
+            borders_installed: true,
+            borders_running: true,
+            ..BrewState::default()
+        };
+        assert_eq!(
+            run(&both, brew_bin),
+            [
+                "/usr/local/bin/brew services stop borders",
+                "/usr/local/bin/brew uninstall borders"
+            ]
+        );
+        let running = BrewState {
+            borders_running: true,
+            ..BrewState::default()
+        };
+        assert_eq!(
+            run(&running, brew_bin),
+            ["/usr/local/bin/brew services stop borders"]
+        );
+        assert!(run(&BrewState::default(), brew_bin).is_empty());
+        assert!(run(&both, None).is_empty());
+        // SketchyBar and mbar formulae are not this button's business.
+        let others = BrewState {
+            sketchybar_installed: true,
+            sketchybar_running: true,
+            mbar_installed: true,
+            ..BrewState::default()
+        };
+        assert!(run(&others, brew_bin).is_empty());
+        // Without Homebrew there is nothing to detect.
+        assert_eq!(detect_brew(None), BrewState::default());
+    }
+
+    #[test]
+    fn brew_borders_warning_text() {
+        let state = |installed, running| BrewState {
+            borders_installed: installed,
+            borders_running: running,
+            ..BrewState::default()
+        };
+        assert_eq!(brew_borders_warning(&state(false, false)), None);
+        assert_eq!(
+            brew_borders_warning(&state(true, true)).unwrap(),
+            "JankyBorders from Homebrew is still installed and running; it draws borders too."
+        );
+        assert!(brew_borders_warning(&state(true, false))
+            .unwrap()
+            .contains("still installed;"));
+        assert!(brew_borders_warning(&state(false, true))
+            .unwrap()
+            .contains("still running;"));
+    }
+
+    #[test]
+    fn homebrew_links_go_with_brew_uninstall() {
+        let link = |name: &str| OldInstall {
+            path: PathBuf::from("/usr/local/bin").join(name),
+            kind: OldKind::Homebrew,
+            admin: true,
+        };
+        let installed = BrewState {
+            sketchybar_installed: true,
+            borders_installed: true,
+            ..BrewState::default()
+        };
+        let b = link("borders");
+        let sb = link("sketchybar");
+        assert!(removed_by_brew(&b, &installed, false, true));
+        assert!(!removed_by_brew(&b, &installed, true, false));
+        assert!(removed_by_brew(&sb, &installed, true, false));
+        assert!(!removed_by_brew(&sb, &installed, false, true));
+        // Not installed (only a stale link): `brew uninstall` does not run.
+        assert!(!removed_by_brew(&b, &BrewState::default(), true, true));
+        assert_eq!(
+            old_install_fate(&b, &installed, true, true),
+            "removed by brew uninstall"
+        );
+        assert!(!left_in_place(&b, &installed, true, true));
+        assert_eq!(
+            old_install_fate(&b, &installed, true, false),
+            "not mbar, left in place"
+        );
+        assert!(left_in_place(&b, &installed, true, false));
+        // Foreign entries stay whatever the switches say.
+        let foreign = OldInstall {
+            kind: OldKind::Foreign,
+            ..link("borders")
+        };
+        assert!(!removed_by_brew(&foreign, &installed, true, true));
+        assert!(left_in_place(&foreign, &installed, true, true));
+        assert_eq!(
+            old_install_fate(&foreign, &installed, true, true),
+            "not mbar, left in place"
+        );
+        // mbar's own leftovers are never "left in place".
+        let bin = OldInstall {
+            kind: OldKind::Binary,
+            ..link("mbar")
+        };
+        assert!(!left_in_place(&bin, &installed, false, false));
+        assert_eq!(
+            old_install_fate(&bin, &installed, false, false),
+            "removed with the commands step (admin)"
+        );
+        // The cleanup itself never `rm`s a Homebrew link: `brew uninstall` does.
+        let cmds = cleanup_commands(
+            &[link("borders")],
+            &installed,
+            Some(Path::new("/usr/local/bin/brew")),
+            501,
+            true,
+            true,
+        );
+        assert!(!cmds.iter().any(|c| c[0] == "/bin/rm"));
+    }
+
+    #[test]
+    fn intel_homebrew_links_are_classified() {
+        let root = tmp("intel-brew");
+        let home = root.join("home");
+        let ulb = root.join("usr/local/bin");
+        std::fs::create_dir_all(&ulb).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        symlink("../Cellar/borders/1.9.0/bin/borders", ulb.join("borders")).unwrap();
+        symlink("../opt/sketchybar/bin/sketchybar", ulb.join("sketchybar")).unwrap();
+        let found = find_old_installs(&home, &ulb, None);
+        let kinds: Vec<_> = found
+            .iter()
+            .map(|o| (o.path.clone(), o.kind.clone()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (ulb.join("sketchybar"), OldKind::Homebrew),
+                (ulb.join("borders"), OldKind::Homebrew),
+            ]
+        );
+        // The same link in ~/.local/bin is yours: `brew uninstall` leaves it dangling.
+        let lb = home.join(".local/bin");
+        std::fs::create_dir_all(&lb).unwrap();
+        symlink("/usr/local/opt/borders/bin/borders", lb.join("borders")).unwrap();
+        assert!(find_old_installs(&home, &ulb, None)
+            .iter()
+            .any(|o| o.path == lb.join("borders") && o.kind == OldKind::Foreign));
+        assert!(in_brew_keg(
+            Path::new("/usr/local/Cellar/borders/1.9.0/bin/borders"),
+            "borders"
+        ));
+        assert!(!in_brew_keg(
+            Path::new("/usr/local/Cellar/sketchybar/2.0/bin/borders"),
+            "borders"
+        ));
+        assert!(!in_brew_keg(
+            Path::new("/opt/homebrew/bin/borders"),
+            "borders"
+        ));
+    }
+
+    #[test]
     fn borders_links_and_binaries() {
         let root = tmp("borders-old");
         let home = root.join("home");
@@ -941,11 +1432,17 @@ mod tests {
             .collect();
         assert!(got.contains(&(lb.join("borders"), OldKind::Binary, false)));
         assert!(got.contains(&(ulb.join("borders"), OldKind::Foreign, true)));
-        // A foreign link (to a Homebrew Cellar) is reported, not removed.
+        // Intel Homebrew's link into the Cellar: `brew uninstall borders` removes it.
         std::fs::remove_file(ulb.join("borders")).unwrap();
         symlink("../Cellar/borders/1.9.0/bin/borders", ulb.join("borders")).unwrap();
         let found = find_old_installs(&home, &ulb, None);
         assert!(found
+            .iter()
+            .any(|o| o.path == ulb.join("borders") && o.kind == OldKind::Homebrew));
+        // A link into another formula's keg is somebody else's: reported only.
+        std::fs::remove_file(ulb.join("borders")).unwrap();
+        symlink("../Cellar/other/1.0/bin/borders", ulb.join("borders")).unwrap();
+        assert!(find_old_installs(&home, &ulb, None)
             .iter()
             .any(|o| o.path == ulb.join("borders") && o.kind == OldKind::Foreign));
         // A `borders` link into the app is kept.
@@ -998,25 +1495,73 @@ after-login-command = ['exec-and-forget /opt/homebrew/bin/borders width=6']
 alt-b = 'exec-and-forget sketchybar --set borders label=x'
 alt-c = \"exec-and-forget borders style=square\" # restyle
 ";
-        let got = borders_launch_lines_in(toml);
+        let got = borders_launch_lines_in(toml, true);
+        let args = Launch::Borders { args: true };
         assert_eq!(
             got,
             vec![
                 (
                     4,
                     "'exec-and-forget borders active_color=0xffe1e3e4 inactive_color=0xff494d64 width=5.0',"
-                        .to_string()
+                        .to_string(),
+                    args
                 ),
                 (
                     6,
                     "after-login-command = ['exec-and-forget /opt/homebrew/bin/borders width=6']"
-                        .to_string()
+                        .to_string(),
+                    args
                 ),
                 (
                     8,
-                    "alt-c = \"exec-and-forget borders style=square\" # restyle".to_string()
+                    "alt-c = \"exec-and-forget borders style=square\" # restyle".to_string(),
+                    args
                 ),
             ]
+        );
+    }
+
+    fn launches(content: &str, toml: bool) -> Vec<Launch> {
+        borders_launch_lines_in(content, toml)
+            .into_iter()
+            .map(|l| l.2)
+            .collect()
+    }
+
+    #[test]
+    fn launch_lines_in_toml_strings() {
+        let bare = Launch::Borders { args: false };
+        let args = Launch::Borders { args: true };
+        // Values, `key="…"` and array elements hold commands.
+        assert_eq!(launches("a = 'exec-and-forget borders'", true), [bare]);
+        assert_eq!(launches("a=\"exec-and-forget borders x=1\"", true), [args]);
+        assert_eq!(
+            launches(
+                "a = ['exec-and-forget sketchybar', 'exec-and-forget borders']",
+                true
+            ),
+            [bare]
+        );
+        // A shell inside the string.
+        assert_eq!(
+            launches(
+                "a = ['exec-and-forget /bin/bash -c \"borders width=5\"']",
+                true
+            ),
+            [args]
+        );
+        assert_eq!(
+            launches("a = 'exec-and-forget brew services start borders'", true),
+            [Launch::BrewService]
+        );
+        // Arguments to other commands, and comments.
+        assert!(launches("a = 'exec-and-forget echo \"borders on\"'", true).is_empty());
+        assert!(launches("a = 'exec-and-forget pgrep -x borders'", true).is_empty());
+        assert!(launches("# a = 'exec-and-forget borders'", true).is_empty());
+        // `#` inside a string is not a comment.
+        assert_eq!(
+            launches("a = 'exec-and-forget borders active_color=0xff#'", true),
+            [args]
         );
     }
 
@@ -1040,19 +1585,147 @@ brew services stop borders
 yabai -m signal --add event=window_focused action=\"borders width=6\"
 my-borders-wrapper width=4
 ";
-        let lines: Vec<usize> = borders_launch_lines_in(rc).iter().map(|l| l.0).collect();
+        let lines: Vec<usize> = borders_launch_lines_in(rc, false)
+            .iter()
+            .map(|l| l.0)
+            .collect();
         assert_eq!(lines, vec![3, 10, 11, 12, 13, 15]);
         assert_eq!(
-            borders_launch_lines_in(rc)[0].1,
+            borders_launch_lines_in(rc, false)[0].1,
             "borders active_color=0xffe1e3e4 inactive_color=0xff494d64 width=5.0 &"
         );
-        assert!(borders_launch_lines_in("").is_empty());
-        assert!(borders_launch_lines_in("bordersrc\nborders_x\n").is_empty());
+        assert!(borders_launch_lines_in("", false).is_empty());
+        assert!(borders_launch_lines_in("bordersrc\nborders_x\n", false).is_empty());
         // `exec` with options, `env` with assignments, `command` without `-v`.
         assert_eq!(
-            borders_launch_lines_in("exec -c borders\nenv -i A=1 borders\ncommand borders\n").len(),
+            borders_launch_lines_in(
+                "exec -c borders\nenv -i A=1 borders\ncommand borders\n",
+                false
+            )
+            .len(),
             3
         );
+    }
+
+    #[test]
+    fn launch_lines_skip_keywords_and_launchers() {
+        let bare = Launch::Borders { args: false };
+        let args = Launch::Borders { args: true };
+        assert_eq!(
+            launches(
+                "if pgrep -x borders >/dev/null; then :; else borders width=5 & fi",
+                false
+            ),
+            [args]
+        );
+        assert_eq!(
+            launches("if ! pgrep borders; then borders; fi", false),
+            [bare]
+        );
+        assert_eq!(
+            launches("while true; do borders style=round; done", false),
+            [args]
+        );
+        assert_eq!(launches("! borders", false), [bare]);
+        assert_eq!(launches("time -p borders", false), [bare]);
+        assert_eq!(
+            launches("sudo -u me nice -n 5 borders width=3", false),
+            [args]
+        );
+        assert_eq!(
+            launches("nohup env A=1 exec -a jb borders &", false),
+            [bare]
+        );
+        assert_eq!(launches("{ borders & }", false), [bare]);
+        assert_eq!(launches("${HOME}/bin/borders hidpi=on", false), [args]);
+        assert_eq!(launches("command -p borders", false), [bare]);
+        assert!(launches("command -V borders", false).is_empty());
+        // Redirections are no settings; anything else is.
+        assert_eq!(
+            launches("borders >/dev/null 2>&1 &\nborders > /tmp/b.log &", false),
+            [bare, bare]
+        );
+        assert_eq!(launches("borders \"${options[@]}\"", false), [args]);
+        assert_eq!(
+            launches("\"/opt/homebrew/bin/borders\" width=5", false),
+            [args]
+        );
+        assert_eq!(
+            launches("/usr/local/bin/brew services restart borders", false),
+            [Launch::BrewService]
+        );
+    }
+
+    #[test]
+    fn launch_lines_quoted_arguments_do_not_count() {
+        for line in [
+            "echo \"borders started\"",
+            "killall \"borders\"",
+            "pgrep -x 'borders'",
+            "sketchybar --set x label=\"borders on\"",
+            "FOO=\"borders x\"",
+            "notify 'started' \"borders\"",
+            "pgrep -c 'borders'",
+            "printf '%s' '-c' 'borders'",
+        ] {
+            assert!(launches(line, false).is_empty(), "{line}");
+        }
+        // Command strings: a shell's `-c` and yabai's `action=`.
+        let args = Launch::Borders { args: true };
+        assert_eq!(launches("sh -c 'borders width=5'", false), [args]);
+        assert_eq!(
+            launches("/bin/zsh -lc \"borders width=5 &\"", false),
+            [args]
+        );
+        assert_eq!(
+            launches(
+                "yabai -m signal --add event=x action='borders width=6'",
+                false
+            ),
+            [args]
+        );
+        // TOML rules do not apply to a shell script.
+        assert!(launches("a = 'borders width=5'", false).is_empty());
+    }
+
+    #[test]
+    fn launch_line_advice_depends_on_the_line_and_bordersrc() {
+        let rc = Path::new("/Users/r/.config/borders/bordersrc");
+        let bin = Path::new("/Users/r/Applications/mbar.app/Contents/Resources/bin");
+        let bare = Launch::Borders { args: false };
+        let args = Launch::Borders { args: true };
+        // Settings on the line: keep them; with the bundle's own full path.
+        for rc in [None, Some(rc)] {
+            let a = launch_line_advice(args, rc, Some(bin));
+            assert!(a.contains("passes settings"), "{a}");
+            assert!(a.contains("~/.config/borders/bordersrc"), "{a}");
+            assert!(a.contains("mbar.borders"), "{a}");
+            assert!(
+                a.contains("/Users/r/Applications/mbar.app/Contents/Resources/bin/borders"),
+                "{a}"
+            );
+            assert!(!a.starts_with("Remove"), "{a}");
+            assert_eq!(a.contains("keep each setting in one place"), rc.is_some());
+        }
+        assert!(launch_line_advice(args, None, None)
+            .contains("/Applications/mbar.app/Contents/Resources/bin/borders"));
+        // A bare `borders` with a bordersrc: remove it.
+        let a = launch_line_advice(bare, Some(rc), Some(bin));
+        assert!(a.starts_with("Remove this line"), "{a}");
+        assert!(a.contains(&*rc.to_string_lossy()), "{a}");
+        // Without a bordersrc: configure first, never "mbar already runs your bordersrc".
+        let a = launch_line_advice(bare, None, Some(bin));
+        assert!(!a.starts_with("Remove"), "{a}");
+        assert!(a.contains("mbar.borders"), "{a}");
+        assert!(!a.contains("runs your bordersrc"), "{a}");
+        // Homebrew's service never keeps working: always remove it.
+        for rc in [None, Some(rc)] {
+            let a = launch_line_advice(Launch::BrewService, rc, Some(bin));
+            assert!(a.starts_with("Remove this line"), "{a}");
+            assert!(a.contains("uninstalls"), "{a}");
+            assert_eq!(a.contains("mbar.borders"), rc.is_none(), "{a}");
+        }
+        assert!(LAUNCH_LINE_DOCS.contains("docs/MIGRATING.md#migrating-from-jankyborders"));
     }
 
     #[test]
@@ -1078,11 +1751,13 @@ my-borders-wrapper width=4
                     file: home.join(".config/aerospace/aerospace.toml"),
                     line: 1,
                     text: "after-startup-command = ['exec-and-forget borders']".into(),
+                    launch: Launch::Borders { args: false },
                 },
                 LaunchLine {
                     file: home.join(".config/yabai/yabairc"),
                     line: 3,
                     text: "borders width=5 &".into(),
+                    launch: Launch::Borders { args: true },
                 },
             ]
         );
