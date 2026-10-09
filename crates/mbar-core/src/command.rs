@@ -79,6 +79,9 @@ pub enum QueryTarget {
     /// Extension `--query borders`: the window-borders configuration (an existing item
     /// named `borders` still wins).
     Borders,
+    /// Extension `--query aerospace`: AeroSpace connection status and state (an existing
+    /// item named `aerospace` still wins).
+    Aerospace,
 }
 
 /// `--monitor [events|stats|all]` (extension).
@@ -432,6 +435,7 @@ fn batch_command(command: &str, line: &[&str]) -> Command {
             "stats" => QueryTarget::Stats,
             "menus" => QueryTarget::Menus,
             "borders" => QueryTarget::Borders,
+            "aerospace" => QueryTarget::Aerospace,
             other => QueryTarget::Name(other.to_string()),
         }),
         "--reorder" => Command::Reorder(rest(0)),

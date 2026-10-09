@@ -21,6 +21,7 @@
 //! Helper methods are grouped by spec area below; each group lists the functions it calls
 //! from other work packages (see `docs/IMPLEMENTATION-PLAN.md` "Cross-package contracts").
 
+use crate::aerospace::{self, AerospaceEvent};
 use crate::animation::{self, AnimStep, Animator};
 use crate::bar::{BarState, DISPLAY_MAIN};
 use crate::command::{
@@ -41,7 +42,7 @@ use crate::platform::{
 use crate::props::{
     AnimSpec, AnimTarget, HiddenRequest, PropCx, PropEffects, PropRequest, PropResult,
 };
-use crate::provider;
+use crate::provider::{self, ProviderKind};
 use crate::query::{self, QueryCx, Stats};
 use crate::script::{self, EnvVars, Sender, MACH_HELPER_DESTROY};
 use crate::value;
@@ -239,6 +240,13 @@ pub struct Runtime {
     lua_total_us: u64,
     /// `--exit` was executed: ignore the rest of the message.
     exiting: bool,
+    /// `PlatformRequest::StartAerospace` was emitted (once per runtime lifetime; the
+    /// connection survives `--reload`).
+    aerospace_started: bool,
+    /// `provider=aerospace` items whose label must be re-applied from
+    /// `model.aerospace` at the end of the current input (coalesces repeated
+    /// `ProviderChanged` requests of one message).
+    aerospace_pending: Vec<ItemId>,
 }
 
 /// `lua:<id>` script values (`docs/LUA.md`).
@@ -345,6 +353,8 @@ impl Runtime {
             monitor_req: None,
             lua_total_us: 0,
             exiting: false,
+            aerospace_started: false,
+            aerospace_pending: Vec::new(),
         }
     }
 
@@ -408,11 +418,28 @@ impl Runtime {
             Input::DisplaysChanged => self.displays_changed(&mut effects, res),
             Input::Lua(req) => self.handle_lua(req, &mut effects, res),
             Input::MenuTitles { app, titles } => self.menu_titles(app, titles, &mut effects),
-            // Implemented by the AeroSpace work package (design §Core).
-            Input::Aerospace(_) | Input::AerospaceStatus(_) => {}
+            Input::Aerospace(ev) => self.aerospace_event(ev, &mut effects),
+            Input::AerospaceStatus(status) => self.model.aerospace.status = status,
         }
+        self.flush_aerospace_providers(&mut effects, res);
         self.refresh(false, res);
         effects
+    }
+
+    /// Requests the AeroSpace connection from outside a message (Lua `mbar.aerospace.*`
+    /// in the binary): `Some(Effect::Platform(PlatformRequest::StartAerospace))` the first
+    /// time it is needed in this runtime's lifetime (subscriptions to `aerospace_*`
+    /// events, `provider=aerospace` and `--query aerospace` request it too), `None` once it
+    /// was requested. The caller handles the returned effect like any other effect.
+    pub fn request_aerospace(&mut self) -> Option<Effect> {
+        let mut effects = Vec::new();
+        self.start_aerospace(&mut effects);
+        effects.pop()
+    }
+
+    /// Whether `PlatformRequest::StartAerospace` has been emitted.
+    pub fn aerospace_started(&self) -> bool {
+        self.aerospace_started
     }
 
     /// Steps animations (`Animator::step` + [`Runtime::apply_anim_steps`]), lays out
@@ -781,6 +808,9 @@ impl Runtime {
             let is_query = matches!(cmd, Command::Query(_));
             let before = rsp.len();
             refresh |= self.exec(cmd, &mut rsp, effects, res);
+            // `provider=aerospace` labels are applied per command, so a later `--query` of
+            // the same message sees them.
+            self.flush_aerospace_providers(effects, res);
             if !is_query && rsp.len() > before {
                 effects.push(Effect::Log(rsp[before..].to_string()));
             }
@@ -832,6 +862,11 @@ impl Runtime {
                 false
             }
             Command::AddEvent { name, notification } => {
+                // The AeroSpace events are built in (delivered by the core, aerospace
+                // design §Events): the SketchyBar recipe's `--add event
+                // aerospace_workspace_change [<notification>]` registers the name as before
+                // (same bit, `--trigger` keeps working) but never observes a notification.
+                let notification = notification.filter(|_| !aerospace::is_event_name(&name));
                 match self.model.events.append(&name, notification.as_deref()) {
                     AppendResult::Added(_) => {
                         if let Some(n) = notification {
@@ -870,7 +905,7 @@ impl Runtime {
                 false
             }
             Command::Query(target) => {
-                self.exec_query(&target, rsp, res);
+                self.exec_query(&target, rsp, effects, res);
                 false
             }
             Command::Reorder(names) => {
@@ -1575,7 +1610,7 @@ impl Runtime {
             return;
         };
         let item = self.model.items.remove(idx);
-        if item.provider.kind.is_some() {
+        if item.provider.kind.is_some_and(|k| !k.is_core()) {
             effects.push(Effect::Platform(PlatformRequest::StopProvider { item: id }));
         }
         if item.has_alias() {
@@ -1726,10 +1761,20 @@ impl Runtime {
         }
     }
 
-    /// `--query` (calls `query::query` with a `QueryCx`).
-    fn exec_query(&mut self, target: &QueryTarget, rsp: &mut String, res: &mut dyn Resources) {
+    /// `--query` (calls `query::query` with a `QueryCx`). `--query aerospace` (served from
+    /// the state, i.e. no item named `aerospace`) starts the AeroSpace connection.
+    fn exec_query(
+        &mut self,
+        target: &QueryTarget,
+        rsp: &mut String,
+        effects: &mut Vec<Effect>,
+        res: &mut dyn Resources,
+    ) {
         if matches!(target, QueryTarget::Stats) {
             self.fill_stats();
+        }
+        if matches!(target, QueryTarget::Aerospace) && self.model.find("aerospace").is_none() {
+            self.start_aerospace(effects);
         }
         let extras = if matches!(target, QueryTarget::DefaultMenuItems) {
             res.menu_extras()
@@ -1776,11 +1821,13 @@ impl Runtime {
     /// re-initialised (events back to built-ins, listeners kept; the borders configuration is
     /// carried over, as JankyBorders was a separate process unaffected by bar reloads, so the
     /// borders a window manager's launch line set survive; the re-run config applies its
-    /// `--borders` keys on top), bars recreated, `Effect::RunConfig`.
+    /// `--borders` keys on top; the AeroSpace state and status are carried over as the
+    /// connection survives and AeroSpace does not resend its initial state), bars recreated,
+    /// `Effect::RunConfig`.
     fn reload(&mut self, path: Option<String>, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
         self.send_mach_destroy(effects);
         for it in &self.model.items {
-            if it.provider.kind.is_some() {
+            if it.provider.kind.is_some_and(|k| !k.is_core()) {
                 effects.push(Effect::Platform(PlatformRequest::StopProvider {
                     item: it.id,
                 }));
@@ -1793,8 +1840,11 @@ impl Runtime {
         }
         self.animator.clear();
         let borders = std::mem::take(&mut self.model.borders);
+        let aerospace = std::mem::take(&mut self.model.aerospace);
         self.model = Model::new();
         self.model.borders = borders;
+        self.model.aerospace = aerospace;
+        self.aerospace_pending.clear();
         self.anim = None;
         self.sleeps = false;
         self.force_refresh = false;
@@ -2108,6 +2158,14 @@ impl Runtime {
             return;
         };
         for ev in events {
+            if aerospace::is_event_name(ev) {
+                // Built-in AeroSpace events: registered on first use (same registry entry
+                // as `--add event`), and the connection is started.
+                if self.model.events.flag(ev).is_none() {
+                    self.model.events.append(ev, None);
+                }
+                self.start_aerospace(effects);
+            }
             let Some(flag) = self.model.events.flag(ev) else {
                 let _ = write!(rsp, "[?] Event: '{ev}' not found\n");
                 continue;
@@ -3195,6 +3253,16 @@ impl Runtime {
         };
         let cfg = &item.provider;
         let req = match cfg.kind {
+            Some(k) if k.is_core() => {
+                // Core provider: stop a platform provider the item may have had, start the
+                // connection and apply the stored state at the end of the input.
+                effects.push(Effect::Platform(PlatformRequest::StopProvider { item: id }));
+                if !self.aerospace_pending.contains(&id) {
+                    self.aerospace_pending.push(id);
+                }
+                self.start_aerospace(effects);
+                return;
+            }
             None => PlatformRequest::StopProvider { item: id },
             Some(k) => PlatformRequest::StartProvider {
                 item: id,
@@ -3210,7 +3278,8 @@ impl Runtime {
     }
 
     /// `Input::ProviderSample`: label/icon update (as `--set`) + script run with
-    /// `SENDER=provider`, `INFO=<json>`.
+    /// `SENDER=provider`, `INFO=<json>`. Samples for items without a provider or with a core
+    /// provider (a late sample of a replaced platform provider) are dropped.
     fn provider_sample(
         &mut self,
         id: ItemId,
@@ -3221,9 +3290,25 @@ impl Runtime {
         let Some(item) = self.model.item(id) else {
             return;
         };
-        if item.provider.kind.is_none() {
-            return;
+        match item.provider.kind {
+            Some(k) if !k.is_core() => {}
+            _ => return,
         }
+        self.apply_provider_sample(id, values, effects, res);
+    }
+
+    /// Applies one sample to an item with a provider: label/icon from the templates (as
+    /// `--set`, no animation), then the item's script with `SENDER=provider`.
+    fn apply_provider_sample(
+        &mut self,
+        id: ItemId,
+        values: Vec<(String, String)>,
+        effects: &mut Vec<Effect>,
+        res: &mut dyn Resources,
+    ) {
+        let Some(item) = self.model.item(id) else {
+            return;
+        };
         let out = provider::apply_sample(&item.provider, &values);
         self.anim = None;
         for (key, v) in [("label", out.label), ("icon", out.icon)] {
@@ -3329,6 +3414,67 @@ impl Runtime {
                 }
             }
         }
+    }
+
+    // ------------------------------------------------------------------------------
+    // AeroSpace (extension, `docs/superpowers/specs/2026-10-09-aerospace-design.md` §Core).
+    // ------------------------------------------------------------------------------
+
+    /// Emits `PlatformRequest::StartAerospace` the first time AeroSpace is used.
+    fn start_aerospace(&mut self, effects: &mut Vec<Effect>) {
+        if !self.aerospace_started {
+            self.aerospace_started = true;
+            effects.push(Effect::Platform(PlatformRequest::StartAerospace));
+        }
+    }
+
+    /// `Input::Aerospace`: updates `model.aerospace`, triggers the event for its
+    /// subscribers (`INFO` + the event's variables, like every other event) and queues the
+    /// `provider=aerospace` items when the state changed.
+    fn aerospace_event(&mut self, ev: AerospaceEvent, effects: &mut Vec<Effect>) {
+        let state = self.model.aerospace.apply(&ev);
+        let mut env = EnvVars::new();
+        env.set("INFO", ev.info_json());
+        for (k, v) in ev.env() {
+            env.set(k, v);
+        }
+        self.trigger_event(EventInfo::new(ev.event_name(), Some(env)), effects);
+        if state {
+            for it in &self.model.items {
+                if it.provider.kind == Some(ProviderKind::Aerospace)
+                    && !self.aerospace_pending.contains(&it.id)
+                {
+                    self.aerospace_pending.push(it.id);
+                }
+            }
+        }
+    }
+
+    /// Applies the AeroSpace state to the queued `provider=aerospace` items (a provider
+    /// sample: label/icon templates + script with `SENDER=provider`). Nothing is applied
+    /// before the first state-carrying event arrived.
+    fn flush_aerospace_providers(&mut self, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
+        if self.aerospace_pending.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.aerospace_pending);
+        if !self.model.aerospace.known {
+            return;
+        }
+        // Provider labels never animate; keep the message's `--animate` for later commands.
+        let anim = self.anim.take();
+        for id in pending {
+            let Some(item) = self.model.item(id) else {
+                continue;
+            };
+            if item.provider.kind != Some(ProviderKind::Aerospace) {
+                continue;
+            }
+            let values =
+                provider::aerospace_sample(&self.model.aerospace, item.provider.args.as_deref());
+            self.apply_provider_sample(id, values, effects, res);
+        }
+        self.anim = anim;
     }
 
     /// Hover tracking helper: the item whose (emulated) window is topmost under `p`.

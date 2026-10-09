@@ -199,9 +199,123 @@ pub struct AerospaceStatus {
     pub error: Option<String>,
 }
 
+/// What the runtime knows about AeroSpace (`Model::aerospace`): the state carried by the
+/// event stream plus the connection status. Survives `--reload` (the connection does too,
+/// so AeroSpace does not resend its initial state).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AerospaceState {
+    /// At least one state-carrying event (workspace, focus, monitor, mode) arrived.
+    pub known: bool,
+    pub focused_workspace: String,
+    pub prev_workspace: String,
+    /// Current binding mode (`main` …); empty until reported.
+    pub mode: String,
+    /// Focused monitor id (1-based); `0` until reported.
+    pub monitor: i64,
+    pub status: AerospaceStatus,
+}
+
+impl AerospaceState {
+    fn focus_workspace(&mut self, workspace: &str, prev: Option<&str>) {
+        match prev {
+            Some(p) if !p.is_empty() => self.prev_workspace = p.to_string(),
+            _ if self.focused_workspace != workspace && !self.focused_workspace.is_empty() => {
+                self.prev_workspace = std::mem::take(&mut self.focused_workspace);
+            }
+            _ => {}
+        }
+        self.focused_workspace = workspace.to_string();
+    }
+
+    /// Updates the state from one event. Returns whether the event carries state
+    /// (workspace, focus, monitor or mode); `window-detected` and `binding-triggered`
+    /// do not.
+    pub fn apply(&mut self, ev: &AerospaceEvent) -> bool {
+        match ev {
+            AerospaceEvent::WorkspaceChanged {
+                workspace,
+                prev_workspace,
+            } => self.focus_workspace(workspace, Some(prev_workspace)),
+            AerospaceEvent::FocusChanged { workspace, .. } => self.focus_workspace(workspace, None),
+            AerospaceEvent::MonitorChanged {
+                workspace,
+                monitor_id,
+            } => {
+                self.monitor = *monitor_id;
+                self.focus_workspace(workspace, None);
+            }
+            AerospaceEvent::ModeChanged { mode } => {
+                self.mode = mode.clone().unwrap_or_default();
+            }
+            AerospaceEvent::WindowDetected { .. } | AerospaceEvent::BindingTriggered { .. } => {
+                return false
+            }
+        }
+        self.known = true;
+        true
+    }
+
+    /// `--query aerospace` (design §`--query aerospace`): TAB indented, strings
+    /// JSON-escaped, `None` strings empty, trailing newline.
+    pub fn to_json(&self) -> String {
+        use crate::value::{format_bool, json_escape};
+        let s = |v: &str| json_escape(v);
+        let o = |v: &Option<String>| json_escape(v.as_deref().unwrap_or(""));
+        format!(
+            "{{\n\t\"connected\": \"{}\",\n\t\"transport\": \"{}\",\n\t\"server_version\": \"{}\",\n\t\"error\": \"{}\",\n\t\"focused_workspace\": \"{}\",\n\t\"prev_workspace\": \"{}\",\n\t\"mode\": \"{}\",\n\t\"monitor\": {}\n}}\n",
+            format_bool(self.status.connected),
+            self.status.transport.as_str(),
+            o(&self.status.server_version),
+            o(&self.status.error),
+            s(&self.focused_workspace),
+            s(&self.prev_workspace),
+            s(&self.mode),
+            self.monitor,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_follows_events() {
+        let mut st = AerospaceState::default();
+        assert!(!st.apply(&AerospaceEvent::BindingTriggered {
+            mode: "main".into(),
+            binding: "alt-1".into()
+        }));
+        assert!(!st.known);
+        st.apply(&AerospaceEvent::FocusChanged {
+            window_id: None,
+            workspace: "1".into(),
+        });
+        assert_eq!(
+            (st.focused_workspace.as_str(), st.prev_workspace.as_str()),
+            ("1", "")
+        );
+        st.apply(&AerospaceEvent::MonitorChanged {
+            workspace: "3".into(),
+            monitor_id: 2,
+        });
+        assert_eq!(
+            (st.focused_workspace.as_str(), st.prev_workspace.as_str()),
+            ("3", "1")
+        );
+        assert_eq!(st.monitor, 2);
+        st.apply(&AerospaceEvent::WorkspaceChanged {
+            workspace: "4".into(),
+            prev_workspace: "2".into(),
+        });
+        assert_eq!(
+            (st.focused_workspace.as_str(), st.prev_workspace.as_str()),
+            ("4", "2")
+        );
+        st.apply(&AerospaceEvent::ModeChanged { mode: None });
+        assert_eq!(st.mode, "");
+        assert!(st.known);
+    }
 
     #[test]
     fn parses_every_event_type() {
