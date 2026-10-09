@@ -897,6 +897,10 @@ pub fn borders_drawing_args(on: bool) -> Vec<String> {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AerospaceInfo {
     pub connected: bool,
+    /// Whether mbar uses the integration at all (an `aerospace_*` subscription,
+    /// `provider=aerospace` or Lua `mbar.aerospace`). Daemons that predate the `active`
+    /// key read as on.
+    pub active: bool,
     /// `socket`, `cli` or `none`.
     pub transport: String,
     /// AeroSpace's `serverVersionAndHash`, when known.
@@ -935,6 +939,7 @@ impl AerospaceInfo {
         };
         Ok(AerospaceInfo {
             connected: on_off(v.get("connected")),
+            active: v.get("active").is_none_or(|a| on_off(Some(a))),
             transport: s("transport"),
             server_version: s("server_version"),
             error: s("error"),
@@ -951,6 +956,10 @@ impl AerospaceInfo {
 
     /// One status line for the System page.
     pub fn summary(&self) -> String {
+        if !self.active {
+            // The daemon does not connect then: no connection error to report.
+            return "Not in use (no aerospace_* subscription or provider=aerospace)".to_string();
+        }
         if !self.connected {
             return if self.error.is_empty() {
                 "AeroSpace not running".to_string()
@@ -1882,7 +1891,7 @@ mod tests {
     }
 
     /// The `--query aerospace` layout from the design doc.
-    const AEROSPACE_QUERY: &str = "{\n\t\"connected\": \"on\",\n\t\"transport\": \"socket\",\n\t\"server_version\": \"0.20.0-Beta 33fa0643\",\n\t\"error\": \"\",\n\t\"focused_workspace\": \"2\",\n\t\"prev_workspace\": \"1\",\n\t\"mode\": \"main\",\n\t\"monitor\": 1\n}\n";
+    const AEROSPACE_QUERY: &str = "{\n\t\"connected\": \"on\",\n\t\"active\": \"on\",\n\t\"transport\": \"socket\",\n\t\"server_version\": \"0.20.0-Beta 33fa0643\",\n\t\"error\": \"\",\n\t\"focused_workspace\": \"2\",\n\t\"prev_workspace\": \"1\",\n\t\"mode\": \"main\",\n\t\"monitor\": 1\n}\n";
 
     #[test]
     fn aerospace_query_parsed() {
@@ -1891,6 +1900,7 @@ mod tests {
             a,
             AerospaceInfo {
                 connected: true,
+                active: true,
                 transport: "socket".into(),
                 server_version: "0.20.0-Beta 33fa0643".into(),
                 error: String::new(),
@@ -1926,6 +1936,33 @@ mod tests {
             ..a
         };
         assert_eq!(quiet.summary(), "AeroSpace not running");
+    }
+
+    #[test]
+    fn aerospace_query_active() {
+        // Not in use: no connection error, whatever the daemon reports.
+        let off = "{\n\t\"connected\": \"off\",\n\t\"active\": \"off\",\n\t\"transport\": \"none\",\n\t\"server_version\": \"\",\n\t\"error\": \"connection refused\",\n\t\"focused_workspace\": \"\",\n\t\"prev_workspace\": \"\",\n\t\"mode\": \"\",\n\t\"monitor\": 0\n}\n";
+        let a = AerospaceInfo::parse(off).unwrap();
+        assert!(!a.active);
+        assert_eq!(
+            a.summary(),
+            "Not in use (no aerospace_* subscription or provider=aerospace)"
+        );
+        // In use but not connected: the error again.
+        let on = off.replace("\"active\": \"off\"", "\"active\": \"on\"");
+        let a = AerospaceInfo::parse(&on).unwrap();
+        assert!(a.active);
+        assert_eq!(a.summary(), "Not connected: connection refused");
+        // A daemon without the key (older mbar): in use.
+        let old = AEROSPACE_QUERY.replace("\t\"active\": \"on\",\n", "");
+        assert!(!old.contains("active"));
+        let a = AerospaceInfo::parse(&old).unwrap();
+        assert!(a.active);
+        assert!(
+            a.summary().starts_with("Connected via socket"),
+            "{}",
+            a.summary()
+        );
     }
 
     #[test]

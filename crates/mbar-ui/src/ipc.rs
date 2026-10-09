@@ -160,7 +160,8 @@ impl Client {
     }
 
     /// `--query aerospace`: the connection to AeroSpace and its focused workspace and
-    /// mode. The first query makes the daemon connect (it connects lazily).
+    /// mode. The query does not make the daemon connect; `active` says whether mbar
+    /// uses the integration at all.
     pub fn query_aerospace(&self) -> Result<AerospaceInfo, IpcError> {
         let rsp = self.send_strs(&["--query", "aerospace"])?;
         AerospaceInfo::parse(&rsp).map_err(IpcError::Io)

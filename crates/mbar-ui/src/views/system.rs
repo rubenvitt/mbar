@@ -72,8 +72,8 @@ pub struct SystemView {
     /// again once completed).
     brew: ob::BrewState,
     removing_brew_borders: bool,
-    /// `--query aerospace`; `Ok(None)` when AeroSpace is not installed (not asked, since
-    /// the query makes the daemon connect); `None` until read or while the daemon is gone.
+    /// `--query aerospace`; `Ok(None)` when AeroSpace is not installed (not asked);
+    /// `None` until read or while the daemon is gone.
     aerospace: Option<Result<Option<AerospaceInfo>, String>>,
     reading_aerospace: bool,
     launch_agent: bool,
@@ -204,7 +204,8 @@ impl SystemView {
             cx,
             |client| {
                 let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
-                if !ob::aerospace_installed(&home) {
+                let xdg = std::env::var("XDG_CONFIG_HOME").unwrap_or_default();
+                if !ob::aerospace_installed(&home, &xdg) {
                     return Ok(None);
                 }
                 client

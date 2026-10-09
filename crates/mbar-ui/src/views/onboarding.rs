@@ -109,8 +109,9 @@ struct SetupPlan {
     borders_helpers: Vec<PathBuf>,
     /// Window-manager config lines that start `borders`.
     launch_lines: Vec<ob::LaunchLine>,
-    /// AeroSpace `exec-on-workspace-change` settings that run the SketchyBar trigger.
-    aerospace_triggers: Vec<ob::WorkspaceTrigger>,
+    /// AeroSpace settings that run SketchyBar triggers for mbar's `aerospace_*` events.
+    /// Advisory: listed with advice, but they do not keep the step open.
+    aerospace_triggers: Vec<ob::AerospaceTrigger>,
     starter_needed: bool,
     login: LoginItem,
 }
@@ -149,7 +150,7 @@ impl SetupPlan {
             bordersrc: ob::bordersrc(&home),
             borders_helpers: ob::borders_helpers(&home.join(".config/borders")),
             launch_lines: ob::borders_launch_lines(&home),
-            aerospace_triggers: ob::aerospace_triggers(&home),
+            aerospace_triggers: ob::aerospace_triggers(&home, &xdg),
             starter_needed: ob::needs_starter_config(&home, &xdg),
             bundle_root: root,
             bin_dir: bin,
@@ -177,6 +178,16 @@ impl SetupPlan {
         !self.borders_helpers.is_empty() || !self.launch_lines.is_empty()
     }
 
+    /// The output for a step that detection finds done; it points at advisory items
+    /// that are left.
+    fn nothing_to_do_note(&self, step: Step) -> &'static str {
+        if step == Step::TakeOver && !self.aerospace_triggers.is_empty() {
+            "Nothing required; see the AeroSpace advice above"
+        } else {
+            "Nothing to do"
+        }
+    }
+
     /// Steps detection already finds done.
     fn nothing_to_do(&self, step: Step) -> bool {
         match step {
@@ -189,11 +200,10 @@ impl SetupPlan {
                         .iter()
                         .all(|o| matches!(o.kind, ob::OldKind::Foreign | ob::OldKind::Homebrew))
             }
+            // AeroSpace triggers are advisory, like a `bordersrc`: the setup keeps
+            // working with them (the details still list them).
             Step::TakeOver => {
-                self.sbarlua.is_none()
-                    && self.felix.is_empty()
-                    && !self.borders_needs_review()
-                    && self.aerospace_triggers.is_empty()
+                self.sbarlua.is_none() && self.felix.is_empty() && !self.borders_needs_review()
             }
             Step::Starter => !self.starter_needed,
             Step::CommandLine => self.paths_d == ob::PathsD::Current,
@@ -276,7 +286,7 @@ impl SetupView {
             |this, plan, cx| {
                 for (step, state) in &mut this.states {
                     if *state == StepState::Pending && plan.nothing_to_do(*step) {
-                        *state = StepState::Done("Nothing to do".into());
+                        *state = StepState::Done(plan.nothing_to_do_note(*step).into());
                     }
                 }
                 this.plan = Some(plan);
@@ -602,7 +612,8 @@ impl SetupView {
                 }
                 if !plan.aerospace_triggers.is_empty() {
                     col = col.child(line(
-                        "AeroSpace runs the SketchyBar trigger on every workspace change here:"
+                        "Your AeroSpace config triggers events mbar now receives itself \
+                         (optional to change; this step does not wait for it):"
                             .into(),
                     ));
                     for t in &plan.aerospace_triggers {
@@ -811,7 +822,8 @@ fn run(step: Step, plan: &SetupPlan, remove_brew: RemoveBrew) -> Result<String, 
             }
             for t in &plan.aerospace_triggers {
                 log.push_str(&format!(
-                    "Runs the SketchyBar trigger: {}:{}: {}\n  {}\n",
+                    "Triggers {}: {}:{}: {}\n  {}\n",
+                    t.event,
                     t.file.display(),
                     t.line,
                     t.text,
