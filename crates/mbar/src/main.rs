@@ -353,6 +353,7 @@ Querying information, see https://felixkratz.github.io/SketchyBar/config/queryin
 \x20     --query default_menu_items\tQuery names of available items for aliases\n\
 \x20     --query stats             \tQuery runtime statistics (mbar)\n\
 \x20     --query menus             \tQuery the front application's menu titles (mbar)\n\
+\x20     --query borders           \tQuery the window borders configuration (mbar)\n\
 \x20     --monitor [events|stats|all]\tStream events / statistics as JSON lines (mbar)\n\
 \n\
 Animations, see https://felixkratz.github.io/SketchyBar/config/animations\n\
@@ -364,6 +365,10 @@ Animations, see https://felixkratz.github.io/SketchyBar/config/animations\n\
 Menus (mbar)\n\
 \x20     --menu <index|title>       \tOpen a menu of the front application\n\
 \x20     --menubar hide|show|toggle \tAuto-hide the native menu bar\n\
+\n\
+Window borders (mbar), JankyBorders keys, see docs/EXTENSIONS.md\n\
+\x20     --borders <key>=<value> ... <key>=<value>\n\
+\x20                                 \tConfigure window borders (also drawing=on|off)\n\
 \n\
 Reloading the config\n\
 \x20     --hotload <boolean>        \tEnable or disable the config hotloader\n\
@@ -460,6 +465,8 @@ mod tests {
         assert!(h.ends_with("config\n\n"));
         assert!(h.contains("--headless"));
         assert!(h.contains("~/.config/mbar/init.lua"));
+        assert!(h.contains("\n      --borders <key>=<value> ... <key>=<value>\n"));
+        assert!(h.contains("\n      --query borders           \tQuery the window borders"));
     }
 
     /// The fenced block of `cli.md` §1.3.

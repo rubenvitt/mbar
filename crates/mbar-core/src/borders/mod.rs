@@ -124,15 +124,24 @@ impl std::ops::BitOrAssign for UpdateMask {
     }
 }
 
-/// The borders configuration held in the [`crate::Model`].
+/// The most `apply-to` overrides kept (deviation, `docs/DEVIATIONS.md`). JankyBorders
+/// stores an override on the border and loses it when the window closes; mbar's core does
+/// not see windows close, so overrides of closed windows stay until a `RECREATE_ALL`
+/// message. The cap keeps a per-focus script that sends `apply-to` for every window from
+/// growing the list forever: adding one more drops the oldest.
+pub const MAX_OVERRIDES: usize = 64;
+
+/// The borders configuration held in the [`crate::Model`]. It survives `--reload` and
+/// hotload.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct BordersState {
     /// Whether borders are drawn (`drawing=`, extension). Off until configured.
     pub drawing: bool,
-    /// A `--borders` message was applied since start / the last `--reload`.
+    /// A `--borders` message was applied since start.
     pub configured: bool,
     pub settings: BorderSettings,
-    /// `apply-to=<wid>` overrides, in insertion order.
+    /// `apply-to=<wid>` overrides, oldest first (a rebuilt override moves to the end); at
+    /// most [`MAX_OVERRIDES`].
     pub overrides: Vec<(u32, BorderSettings)>,
 }
 
@@ -260,10 +269,12 @@ impl BordersState {
     /// apply.
     ///
     /// - The extension key `drawing=` takes an mbar boolean (`value::parse_bool`). The
-    ///   first message after start or `--reload` without `drawing=` turns drawing on.
+    ///   first message after start without `drawing=` turns drawing on.
     /// - `apply-to=<wid>` with `wid > 0` (the last one of the message wins, as the C code
-    ///   overwrites `settings.apply_to`) routes the other keys into the override of that
-    ///   window, created from the current global settings when it does not exist yet. The
+    ///   overwrites `settings.apply_to`) rebuilds the override of that window as the
+    ///   current global settings plus this message's keys, replacing any earlier override
+    ///   for it (BR-IPC-07 step 3); the rebuilt override moves to the end of the list,
+    ///   which keeps at most [`MAX_OVERRIDES`] entries (the oldest is dropped). The
     ///   globals are untouched and `RECREATE_ALL` is dropped from the mask (BR-IPC-09:
     ///   `hidpi`/lists in an override recreate nothing). `apply-to=0` takes the global
     ///   path. The sticky `apply-to` of a primary started with `apply-to=N` (BQ10) does not
@@ -309,14 +320,13 @@ impl BordersState {
             }
         };
         if target > 0 {
-            let idx = match self.overrides.iter().position(|(wid, _)| *wid == target) {
-                Some(idx) => idx,
-                None => {
-                    self.overrides.push((target, self.settings.clone()));
-                    self.overrides.len() - 1
-                }
-            };
-            parse_all(&mut self.overrides[idx].1, rsp);
+            let mut settings = self.settings.clone();
+            parse_all(&mut settings, rsp);
+            self.overrides.retain(|(wid, _)| *wid != target);
+            self.overrides.push((target, settings));
+            if self.overrides.len() > MAX_OVERRIDES {
+                self.overrides.remove(0);
+            }
             mask.0 &= !UpdateMask::RECREATE_ALL;
         } else {
             parse_all(&mut self.settings, rsp);
@@ -333,9 +343,15 @@ impl BordersState {
             mask |= UpdateMask(UpdateMask::RECREATE_ALL);
         }
 
-        let changed = self.drawing != before_drawing
-            || self.settings != before_settings
-            || self.overrides != before_overrides;
+        // Order-insensitive for the overrides: re-sending an unchanged override only moves
+        // it to the end of the list, which the platform does not see.
+        let same_overrides = self.overrides.len() == before_overrides.len()
+            && self
+                .overrides
+                .iter()
+                .all(|o| before_overrides.iter().any(|b| b == o));
+        let changed =
+            self.drawing != before_drawing || self.settings != before_settings || !same_overrides;
         changed.then(|| self.update(mask))
     }
 
@@ -351,7 +367,7 @@ impl BordersState {
 
     /// `--query borders` (extension): tab-indented JSON like the other queries, colors in
     /// their input syntax, floats as `%f`, ending with `}\n`. `overrides` lists
-    /// `{ "window": <wid>, …the same keys }` in insertion order.
+    /// `{ "window": <wid>, …the same keys }` oldest first.
     pub fn to_json(&self) -> String {
         let mut out = String::from("{\n");
         let _ = write!(out, "\t\"drawing\": \"{}\",\n", format_bool(self.drawing));
@@ -539,12 +555,14 @@ mod tests {
         assert!(o.hidpi);
         // BR-IPC-09: no recreate from an override.
         assert_eq!(u.mask, UpdateMask(UpdateMask::ACTIVE | UpdateMask::SETTING));
-        // A second message for the same window updates that override in place.
+        // BR-IPC-07: a second message for the same window rebuilds that override from the
+        // globals plus its own keys; the earlier message's keys are gone.
         apply(&mut st, &["apply-to=42", "width=9"]);
         assert_eq!(st.overrides.len(), 1);
         assert_eq!(st.overrides[0].1.width, 9.0);
-        assert_eq!(st.overrides[0].1.active, BorderColor::Solid(0xffff0000));
-        // Another window gets its own override, in insertion order.
+        assert_eq!(st.overrides[0].1.active, BorderColor::Solid(0xff111111));
+        assert!(!st.overrides[0].1.hidpi);
+        // Another window gets its own override, oldest first.
         apply(&mut st, &["apply-to=7", "style=square"]);
         assert_eq!(
             st.overrides.iter().map(|(w, _)| *w).collect::<Vec<_>>(),
@@ -552,6 +570,41 @@ mod tests {
         );
         // Unchanged override: nothing to send.
         assert_eq!(apply(&mut st, &["apply-to=7", "style=s"]).0, None);
+        // Rebuilding 42 moves it to the end; re-sending it unchanged sends nothing.
+        apply(&mut st, &["apply-to=42", "width=8"]);
+        assert_eq!(
+            st.overrides.iter().map(|(w, _)| *w).collect::<Vec<_>>(),
+            vec![7, 42]
+        );
+        assert_eq!(apply(&mut st, &["apply-to=7", "style=square"]).0, None);
+        assert_eq!(
+            st.overrides.iter().map(|(w, _)| *w).collect::<Vec<_>>(),
+            vec![42, 7]
+        );
+    }
+
+    #[test]
+    fn overrides_are_capped_dropping_the_oldest() {
+        let mut st = BordersState::default();
+        for wid in 1..=MAX_OVERRIDES as u32 {
+            apply(&mut st, &[&format!("apply-to={wid}"), "width=7"]);
+        }
+        assert_eq!(st.overrides.len(), MAX_OVERRIDES);
+        assert_eq!(st.overrides[0].0, 1);
+        // Re-sending window 1 refreshes it instead of adding an entry.
+        apply(&mut st, &["apply-to=1", "width=8"]);
+        assert_eq!(st.overrides.len(), MAX_OVERRIDES);
+        assert_eq!(st.overrides[0].0, 2);
+        // One more window drops the oldest (2), not the refreshed 1.
+        let new = MAX_OVERRIDES as u32 + 1;
+        let u = apply(&mut st, &[&format!("apply-to={new}"), "width=9"])
+            .0
+            .unwrap();
+        assert_eq!(u.overrides.len(), MAX_OVERRIDES);
+        assert_eq!(st.overrides[0].0, 3);
+        assert_eq!(st.overrides.last().unwrap().0, new);
+        assert!(st.overrides.iter().any(|(w, _)| *w == 1));
+        assert!(!st.overrides.iter().any(|(w, _)| *w == 2));
     }
 
     #[test]

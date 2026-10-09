@@ -84,8 +84,13 @@ mbar --query borders
   `gradient(top_right=0x…,bottom_left=0x…)` (the input syntax). `ax_focus` is
   `auto` until set (auto = on when mbar has Accessibility permission, which is
   JankyBorders' default). `overrides` lists `{ "window": <wid>, …same keys }`.
-- `--reload` resets the borders configuration with the rest of the model and
-  runs the config (and `bordersrc`, below) again.
+- The borders configuration **survives** `--reload` and hotload (JankyBorders
+  was a separate process that bar reloads never touched, so borders set by a
+  window manager's launch line such as `exec-and-forget borders …` in
+  `aerospace.toml` stay). The reload carries `model.borders` over into the new
+  model and sends no `SetBorders`; the config and `bordersrc` (below) run again
+  and apply their keys on top, which sends an update only when something
+  changed. To turn borders off, send `--borders drawing=off`.
 
 ### 2. `borders` argv0 mode (compatibility)
 
@@ -105,13 +110,23 @@ mbar --query borders
 
 ### 3. Config file `bordersrc`
 
-After the main config ran (daemon start and every `--reload`), the default bar
-`mbar` runs `~/.config/borders/bordersrc`, else `~/.bordersrc`, if one is a
+Together with the main config (daemon start and every `--reload`), the default
+bar `mbar` runs `~/.config/borders/bordersrc`, else `~/.bordersrc`, if one is a
 regular file (spec §4 lookup; `$XDG_CONFIG_HOME` is not consulted, as in
 JankyBorders). It runs like any shell config of mbar: made executable if
 needed, `sh -c` with the path **quoted**, the bundle's `Resources/bin` first on
 `PATH` (so its `borders …` lines reach mbar through the link), killed after
-60 s. Users who move their settings into `init.lua` delete the file.
+60 s. It is started right after the main config is started: a shell config
+(`mbarrc`, `sketchybarrc`) and `bordersrc` run **concurrently**, so their
+`--borders` messages can interleave in any order; a Lua config runs
+synchronously, so there `bordersrc` runs after it. Keep each borders setting in
+one file. Users who move their settings into `init.lua` delete the file.
+
+On macOS, when a foreign JankyBorders is running (its mach service
+`git.felix.borders` is registered), mbar does **not** run `bordersrc` and logs
+`bordersrc not run: JankyBorders is running (git.felix.borders); stop it with
+brew services stop borders or finish the borders step in mbar.app setup`. The
+`mbar.app` System page shows a warning with a button that stops it.
 
 ### 4. Lua
 
@@ -139,7 +154,8 @@ Booleans become `on`/`off`. Types in `lua/mbar.d.lua` (`mbar.BordersProps`).
   `command -v borders` resolves into the bundle.
 - **System page:** a "Window borders" section: status (on/off, active and
   inactive color, width, style) from `--query borders`, a switch that sends
-  `--borders drawing=on|off`.
+  `--borders drawing=on|off`, and a warning with a button that stops a running
+  JankyBorders (`git.felix.borders` registered).
 
 ## Architecture
 
@@ -217,7 +233,7 @@ pub struct BordersState {
     pub drawing: bool,                // false until configured
     pub configured: bool,             // a --borders message was applied
     pub settings: BorderSettings,
-    pub overrides: Vec<(u32, BorderSettings)>, // apply-to=<wid>, insertion order
+    pub overrides: Vec<(u32, BorderSettings)>, // apply-to=<wid>, oldest first, at most 64
 }
 
 /// What the platform receives.
@@ -247,11 +263,13 @@ impl BordersState {
 ```
 
 - `PlatformRequest::SetBorders(Box<BordersUpdate>)` is emitted once per message
-  that changed something, and once with `drawing: false` from `--reload` when
-  borders were drawing before.
-- `apply-to=<wid>` (wid > 0): the message's other keys go into the override of
-  that window (created from the current global settings), the global settings
-  are untouched. `apply-to=0` takes the global path. A global message also
+  that changed something; `--reload` keeps `model.borders` and emits none.
+- `apply-to=<wid>` (wid > 0): the override of that window is rebuilt as the
+  current global settings plus this message's keys, replacing any earlier
+  override for it (BR-IPC-07), and moves to the end of the list; the global
+  settings are untouched. At most `MAX_OVERRIDES` (64) overrides are kept, the
+  oldest is dropped (mbar: the core does not see windows close, so overrides of
+  closed windows stay until `RECREATE_ALL` or the cap). `apply-to=0` takes the global path. A global message also
   applies its keys to every override (BR-IPC-08). `RECREATE_ALL` clears all
   overrides (JankyBorders loses them on recreate).
 - Pure helpers the platform uses (Linux-tested): `BorderSettings::color_for(focused) -> BorderColor`,

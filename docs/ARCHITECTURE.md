@@ -111,7 +111,8 @@ and their border windows:
                                                          resize/order/focus/space change)
 ```
 
-* One `SetBorders` per message that changed something. It carries the complete settings,
+* One `SetBorders` per message that changed something (none from `--reload`: the
+  configuration survives it). It carries the complete settings,
   the `apply-to` overrides, `drawing` and an update mask (redraw focused / unfocused /
   all, recreate all).
 * Window move, resize and order events (hundreds per second while dragging) are handled
@@ -171,8 +172,13 @@ and their border windows:
   `borders-v1.9.0`; the arguments are checked with the core parser, invalid ones print
   JankyBorders' `[?]` lines, and the valid ones go to the bar `mbar` as `--borders …`.
   It retries for up to 5 s while mbar is not reachable and never starts a daemon.
-* After its config, the default bar `mbar` runs `~/.config/borders/bordersrc` (else
-  `~/.bordersrc`), on start and on every `--reload`.
+* Together with its config, the default bar `mbar` runs `~/.config/borders/bordersrc`
+  (else `~/.bordersrc`), on start and on every `--reload`. It is started right after the
+  config is spawned: with a shell config both run concurrently; a Lua config runs
+  synchronously, so there `bordersrc` runs after it. On macOS it is skipped (with a log
+  line) while a foreign JankyBorders holds `git.felix.borders`.
+* The borders configuration in the model survives `--reload` and hotload, like the
+  separate JankyBorders process did; the re-run config and `bordersrc` apply on top.
 * Config lookup: `--config`, `$XDG_CONFIG_HOME/mbar/mbarrc`, `~/.config/mbar/mbarrc`,
   then SketchyBar locations `$XDG_CONFIG_HOME/sketchybar/sketchybarrc`, `~/.config/sketchybar/sketchybarrc`.
 * `SIGTERM`/`SIGINT`/`SIGHUP` end the daemon like `--exit` (self-pipe → `Event::Terminate`

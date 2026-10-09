@@ -37,7 +37,7 @@ pub struct Model {
     /// Window z-order must be refreshed.
     pub needs_ordering: bool,
     /// Window-borders configuration (`--borders`, extension; `docs/spec/borders.md`).
-    /// Reset by `--reload` with the rest of the model.
+    /// Survives `--reload` / hotload (carried over by `Runtime::reload`).
     pub borders: BordersState,
     next_id: u64,
     /// `ItemId` → index into `items` (PERF-8). `items` is a public `Vec` that the runtime
