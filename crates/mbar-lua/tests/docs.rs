@@ -27,8 +27,13 @@ impl Host for Mock {
 }
 
 fn stock_example() -> &'static str {
+    example("stock")
+}
+
+/// The code block after `<!-- example: <name> -->` in `docs/LUA.md`.
+fn example(name: &str) -> &'static str {
     let start = LUA_MD
-        .find("<!-- example: stock -->")
+        .find(&format!("<!-- example: {name} -->"))
         .expect("example marker");
     let rest = &LUA_MD[start..];
     let code = rest.find("```lua\n").expect("code block") + "```lua\n".len();
@@ -73,6 +78,39 @@ fn definitions_compile() {
     // A long bracket keeps the file verbatim; load() only compiles it.
     let src = format!("assert(load([==========[{DEFS}]==========], '=mbar.d.lua'))");
     engine.load_string(&src, "=defs", &mut host).unwrap();
+}
+
+#[test]
+fn borders_example() {
+    let mut engine = LuaEngine::new().unwrap();
+    let mut host = Mock::default();
+    engine
+        .load_string(example("borders"), "=init.lua", &mut host)
+        .unwrap();
+    let msg = host.messages.concat();
+    assert_eq!(
+        msg.iter().filter(|a| *a == "--borders").count(),
+        4,
+        "{msg:?}"
+    );
+    assert!(has_seq(
+        &msg,
+        &[
+            "--borders",
+            "active_color=0xffe1e3e4",
+            "blacklist=Safari,kitty",
+            "hidpi=off",
+            "inactive_color=0xff494d64",
+            "style=round",
+            "width=5",
+        ]
+    ));
+    assert!(has_seq(&msg, &["--borders", "drawing=off"]));
+    // The core's JankyBorders parser accepts every pair.
+    let pairs: Vec<String> = msg.into_iter().filter(|a| a != "--borders").collect();
+    let (valid, errors) = mbar_core::borders::validate_args(&pairs);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(valid, pairs);
 }
 
 #[test]
