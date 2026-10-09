@@ -14,7 +14,8 @@
 //!   `Input::ScriptFinished`), or the Lua handler when the script is `lua:<id>`.
 //! * `LuaCallback` → `LuaEngine::run_handler`.
 //! * `RunConfig` → (re)load the config: shell config in a child (bash when it has no
-//!   shebang), `init.lua` in a fresh `LuaEngine`.
+//!   shebang), `init.lua` in a fresh `LuaEngine`; then, for the default bar,
+//!   JankyBorders' `bordersrc` like a shell config (borders design §3).
 //! * `Exit`, `Log`, `Monitor`, `Platform(SetHotload)` handled here; every other
 //!   `PlatformRequest` goes to the platform.
 //!
@@ -472,8 +473,35 @@ impl Driver {
 
     // ------------------------------------------------------------------ config
 
-    /// `exec_config_file` (`cli.md` §10.2). `path` replaces the stored config path.
+    /// `exec_config_file` (`cli.md` §10.2), then JankyBorders' `bordersrc` (borders design
+    /// §3). `path` replaces the stored config path.
     fn run_config(&mut self, path: Option<String>, res: &mut dyn Resources) {
+        self.run_main_config(path, res);
+        self.run_bordersrc();
+    }
+
+    /// Runs `bordersrc` when this is the default bar and one exists, in addition to (and
+    /// started after) the main config, whether or not that one exists. Like a shell
+    /// config: made executable, `sh -c` with the quoted path, the daemon's environment
+    /// (the bundle's `bin` first on `PATH`, so its `borders …` lines reach this daemon
+    /// through the link), killed after 60 s. A shell config runs concurrently with it.
+    fn run_bordersrc(&mut self) {
+        let found = mbar_app::config::find_bordersrc(&self.rt.config.home);
+        let Some((path, spec)) = bordersrc_spawn(&self.bar_name, found) else {
+            return;
+        };
+        ensure_executable(&path);
+        // Not a runtime script either (see `run_main_config`).
+        let r = scripts::spawn(spec, &self.base_env, SCRIPT_TIMEOUT, |pid, _| {
+            log::debug!("bordersrc (pid {pid}) exited");
+        });
+        if r.is_err() {
+            daemon_log(&format!("failed to execute file '{}'", path.display()));
+        }
+    }
+
+    /// The main config (`exec_config_file`, `cli.md` §10.2).
+    fn run_main_config(&mut self, path: Option<String>, res: &mut dyn Resources) {
         if let Some(p) = path {
             let p = std::fs::canonicalize(&p).unwrap_or_else(|_| PathBuf::from(p));
             self.rt.config.config_path = Some(p.to_string_lossy().into_owned());
@@ -739,6 +767,24 @@ fn config_command(path: &Path) -> String {
     }
 }
 
+/// Whether and how the bar `bar_name` runs the `bordersrc` found by
+/// `mbar_app::config::find_bordersrc` (borders design §3): only the default bar does,
+/// with the same command line as a shell config ([`config_command`], path quoted) and
+/// the file's directory as working directory.
+fn bordersrc_spawn(bar_name: &str, bordersrc: Option<PathBuf>) -> Option<(PathBuf, Spawn)> {
+    if bar_name != mbar_ipc::DEFAULT_BAR_NAME {
+        return None;
+    }
+    let path = bordersrc?;
+    let spec = Spawn {
+        command: config_command(&path),
+        env: Vec::new(),
+        cwd: path.parent().map(Path::to_path_buf),
+        capture: false,
+    };
+    Some((path, spec))
+}
+
 /// `chmod(mode | S_IXUSR)` (`cli.md` §10.2 step 4).
 fn ensure_executable(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -811,6 +857,40 @@ mod tests {
     fn lua_config_detection() {
         assert!(is_lua_config(Path::new("/a/init.lua")));
         assert!(!is_lua_config(Path::new("/a/mbarrc")));
+    }
+
+    /// Borders design §3: only the default bar runs `bordersrc`, quoted like a shell
+    /// config, from its own directory.
+    #[test]
+    fn bordersrc_runs_for_the_default_bar_only() {
+        let dir = std::env::temp_dir().join(format!("mbar-brc-drv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rc = dir.join("it's bordersrc");
+        std::fs::write(&rc, "#!/bin/sh\nborders width=5.0\n").unwrap();
+
+        assert!(bordersrc_spawn("mbar", None).is_none());
+        assert!(bordersrc_spawn("bottom_bar", Some(rc.clone())).is_none());
+        let (path, spec) = bordersrc_spawn("mbar", Some(rc.clone())).unwrap();
+        assert_eq!(path, rc);
+        assert_eq!(
+            spec.command,
+            scripts::shell_quote(&rc.to_string_lossy()),
+            "shebang: the quoted path itself"
+        );
+        assert!(
+            spec.command.contains(r"it'\''s bordersrc"),
+            "{}",
+            spec.command
+        );
+        assert_eq!(spec.cwd.as_deref(), Some(dir.as_path()));
+        assert!(spec.env.is_empty() && !spec.capture);
+
+        // Without a shebang it runs like a shebang-less shell config.
+        std::fs::write(&rc, "borders width=5.0\n").unwrap();
+        let (_, spec) = bordersrc_spawn("mbar", Some(rc.clone())).unwrap();
+        assert_eq!(spec.command, config_command(&rc));
+        assert!(spec.command.contains("exec bash"), "{}", spec.command);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // ------------------------------------------------------------ driver harness
