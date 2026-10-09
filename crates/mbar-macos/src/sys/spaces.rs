@@ -1,17 +1,17 @@
 //! Mission Control spaces via the private SkyLight API (`docs/spec/bar.md` §6.4, §7;
 //! `docs/spec/events.md` §5.2, §5.11): spaces per display, mission-control indices,
 //! `space_change` / `space_windows_change` INFO payloads, per-space window tracking, space
-//! capture (`space.<n>` images) and the SkyLight notify procs (including alias capture
-//! gating).
+//! capture (`space.<n>` images) and the SkyLight notify handling (including alias capture
+//! gating). The notify proc and the per-window notification set are shared with the
+//! window borders ([`super::notify`]).
 
+use super::notify::{self as shared, Owner};
 use super::skylight as sls;
 use super::util::{self, owned};
 use super::{Sink, SysEvent};
 use objc2_app_kit::NSRunningApplication;
 use objc2_core_foundation::{CFArray, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_graphics::CGImage;
-use std::collections::HashSet;
-use std::ffi::c_void;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -340,6 +340,7 @@ fn suitable_windows(windows: &CFArray) -> Vec<u32> {
 }
 
 /// Suitable windows on space `dsid` with their owner pid (`app_windows_update_space`).
+/// Windows of mbar's own process (bar panels, border windows) never count.
 pub fn windows_on_space(dsid: u64) -> Vec<(u32, i32)> {
     let Some(copy) = sls::SLSCopyWindowsWithOptionsAndTags() else {
         return Vec::new();
@@ -366,9 +367,11 @@ pub fn windows_on_space(dsid: u64) -> Vec<(u32, i32)> {
     if list.is_empty() {
         return Vec::new();
     }
+    let own = std::process::id() as i32;
     suitable_windows(&list)
         .into_iter()
         .filter_map(|wid| owner_pid(wid).map(|pid| (wid, pid)))
+        .filter(|(_, pid)| *pid != own)
         .collect()
 }
 
@@ -424,7 +427,6 @@ struct TrackedWindow {
 
 #[derive(Default)]
 struct NotifyState {
-    registered: HashSet<u32>,
     space_sink: Option<Sink>,
     windows_sink: Option<Sink>,
     windows: Vec<TrackedWindow>,
@@ -463,23 +465,7 @@ pub fn capture_disabled() -> bool {
 }
 
 fn register(ids: &[u32]) {
-    let Some(reg) = sls::SLSRegisterNotifyProc() else {
-        log::warn!("SLSRegisterNotifyProc unavailable");
-        return;
-    };
-    let todo: Vec<u32> = with_state(|s| {
-        ids.iter()
-            .copied()
-            .filter(|id| s.registered.insert(*id))
-            .collect()
-    });
-    for id in todo {
-        // SAFETY: `notify_proc` matches SkyLight's handler signature and lives forever.
-        let err = unsafe { reg(notify_proc, id, std::ptr::null_mut()) };
-        if err != 0 {
-            log::warn!("SLSRegisterNotifyProc({id}) failed: {err}");
-        }
-    }
+    shared::register(ids);
 }
 
 /// Starts space notifications (`sketchybar.c:system_events/space_events`): SkyLight
@@ -599,10 +585,7 @@ fn update_space(sid: u64, silent: bool) -> Option<String> {
 }
 
 fn request_window_notifications(wids: &[u32]) {
-    if let Some(f) = sls::SLSRequestNotificationsForWindows() {
-        // SAFETY: pointer/count describe a valid u32 slice.
-        unsafe { f(sls::cid(), wids.as_ptr(), wids.len() as i32) };
-    }
+    shared::request_windows(Owner::Spaces, wids);
 }
 
 fn post_space_change() {
@@ -630,15 +613,11 @@ fn set_gate(value: i64) {
     }
 }
 
-unsafe extern "C" fn notify_proc(event: u32, data: *mut c_void, len: usize, _ctx: *mut c_void) {
-    // Never unwind into SkyLight.
-    let _ = std::panic::catch_unwind(|| {
-        // SAFETY: `data` points to `len` bytes provided by SkyLight for this event.
-        unsafe { handle_notify(event, data as *const u8, len) }
-    });
-}
-
-unsafe fn handle_notify(event: u32, data: *const u8, len: usize) {
+/// Spaces' part of the shared notify proc ([`super::notify`]).
+///
+/// # Safety
+/// `data` must be null or point to `len` readable bytes (the SkyLight payload).
+pub(crate) unsafe fn handle_notify(event: u32, data: *const u8, len: usize) {
     let windows_started = space_window_events_started();
     match event {
         notify::CAPTURE_DISABLE_TEMPORARILY => set_gate(monotonic_ns()),

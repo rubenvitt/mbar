@@ -21,6 +21,11 @@
 //! | `SetMenuBarHidden(b)` | `menus::set_menubar_autohide(b)` (restored on exit) |
 //! | `SetHotload(b)` | `HotloadWatcher::set_enabled(b)` (normally consumed by the driver) |
 //! | `MachSend{service, payload}` | `mach_server::send_to_service` on a worker thread |
+//! | `SetBorders(update)` | `borders::configure(update)` (main thread; window events then go straight from the SkyLight notify proc to `sys::borders`) |
+//!
+//! Window borders also follow `DisplaysReconfigured` / `SystemWoke` (recreate),
+//! `SpaceChange` (consistency pass) and `FrontAppSwitched` (focus re-check) in
+//! [`Services::translate`]; [`Services::shutdown`] destroys every border window.
 
 use super::convert::{self, monitored_kind, sys_event_to_input, window_mouse_input};
 use super::resources::{core_rect, MacResources};
@@ -28,6 +33,7 @@ use super::windows::WindowManager;
 use crate::gfx::text::TextSystem;
 use crate::gfx::window::{MouseEvent as ViewMouse, MouseEventKind};
 use crate::sys::alias::{self, AliasScheduler};
+use crate::sys::borders;
 use crate::sys::events::{media, SystemEvents};
 use crate::sys::hotload::HotloadWatcher;
 use crate::sys::mach_server::{self, MachServer};
@@ -167,16 +173,27 @@ impl Services {
             p.on_event(&ev);
         }
         match ev {
-            SysEvent::DisplaysReconfigured { .. } | SysEvent::SystemWoke { .. } => {
+            SysEvent::DisplaysReconfigured { .. } => {
                 res.refresh_displays();
                 wm.mark_displays_changed();
+                borders::on_displays_changed();
             }
-            SysEvent::DisplayChange { .. } | SysEvent::SpaceChange { .. } => {
+            SysEvent::SystemWoke { .. } => {
                 res.refresh_displays();
+                wm.mark_displays_changed();
+                borders::on_system_woke();
+            }
+            SysEvent::DisplayChange { .. } => res.refresh_displays(),
+            SysEvent::SpaceChange { .. } => {
+                res.refresh_displays();
+                borders::on_space_changed();
             }
             SysEvent::MenuBarHidingChanged => res.refresh_menu_bar(),
             SysEvent::WifiChange(ref s) => res.last_ssid = Some(s.clone()),
-            SysEvent::FrontAppSwitched { .. } => self.ensure_menu_observer(),
+            SysEvent::FrontAppSwitched { .. } => {
+                self.ensure_menu_observer();
+                borders::on_front_app_switched();
+            }
             SysEvent::SpaceWindowsChange { ref info_json, .. } => {
                 let sup = &mut res.suppressed_space_windows;
                 if let Some(i) = sup.iter().position(|s| s == info_json) {
@@ -339,7 +356,7 @@ impl Services {
             PlatformRequest::SetMenuBarHidden(hidden) => menus::set_menubar_autohide(hidden),
             PlatformRequest::SetHotload(on) => self.sync_hotload(on),
             PlatformRequest::MachSend { service, payload } => self.mach_send(service, payload),
-            PlatformRequest::SetBorders(_) => log::debug!("window borders not implemented yet"),
+            PlatformRequest::SetBorders(update) => borders::configure(*update),
         }
     }
 
@@ -367,8 +384,10 @@ impl Services {
         }
     }
 
-    /// Exit cleanup: restore the menu-bar auto-hide setting, stop the media helper.
+    /// Exit cleanup: restore the menu-bar auto-hide setting, stop the media helper, destroy
+    /// the border windows.
     pub fn shutdown(&mut self) {
+        borders::shutdown();
         menus::restore_menubar_autohide();
         media::stop();
         self.mach_tx = None;
