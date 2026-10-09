@@ -485,9 +485,11 @@ impl Driver {
     /// config: made executable, `sh -c` with the quoted path, the daemon's environment
     /// (the bundle's `bin` first on `PATH`, so its `borders …` lines reach this daemon
     /// through the link), killed after 60 s. A shell config runs concurrently with it.
+    /// Skipped (and logged) while JankyBorders itself runs, see [`bordersrc_spawn`].
     fn run_bordersrc(&mut self) {
         let found = mbar_app::config::find_bordersrc(&self.rt.config.home);
-        let Some((path, spec)) = bordersrc_spawn(&self.bar_name, found) else {
+        let foreign = || mbar_ipc::service_registered(JANKYBORDERS_SERVICE);
+        let Some((path, spec)) = bordersrc_spawn(&self.bar_name, found, foreign) else {
             return;
         };
         ensure_executable(&path);
@@ -767,15 +769,32 @@ fn config_command(path: &Path) -> String {
     }
 }
 
+/// JankyBorders' bootstrap service: registered while a (Homebrew) `borders` daemon runs.
+const JANKYBORDERS_SERVICE: &str = "git.felix.borders";
+
 /// Whether and how the bar `bar_name` runs the `bordersrc` found by
 /// `mbar_app::config::find_bordersrc` (borders design §3): only the default bar does,
 /// with the same command line as a shell config ([`config_command`], path quoted) and
-/// the file's directory as working directory.
-fn bordersrc_spawn(bar_name: &str, bordersrc: Option<PathBuf>) -> Option<(PathBuf, Spawn)> {
+/// the file's directory as working directory. Not while a foreign JankyBorders runs
+/// (`jankyborders_running`, asked only when there is a `bordersrc` to run): its
+/// `borders …` lines would reach this daemon through the bundled link and both would
+/// draw borders.
+fn bordersrc_spawn(
+    bar_name: &str,
+    bordersrc: Option<PathBuf>,
+    jankyborders_running: impl FnOnce() -> bool,
+) -> Option<(PathBuf, Spawn)> {
     if bar_name != mbar_ipc::DEFAULT_BAR_NAME {
         return None;
     }
     let path = bordersrc?;
+    if jankyborders_running() {
+        daemon_log(&format!(
+            "bordersrc not run: JankyBorders is running ({JANKYBORDERS_SERVICE}); stop it \
+             with brew services stop borders or finish the borders step in mbar.app setup"
+        ));
+        return None;
+    }
     let spec = Spawn {
         command: config_command(&path),
         env: Vec::new(),
@@ -868,9 +887,13 @@ mod tests {
         let rc = dir.join("it's bordersrc");
         std::fs::write(&rc, "#!/bin/sh\nborders width=5.0\n").unwrap();
 
-        assert!(bordersrc_spawn("mbar", None).is_none());
-        assert!(bordersrc_spawn("bottom_bar", Some(rc.clone())).is_none());
-        let (path, spec) = bordersrc_spawn("mbar", Some(rc.clone())).unwrap();
+        let none = || false;
+        let unasked = || -> bool { panic!("JankyBorders check without a bordersrc to run") };
+        assert!(bordersrc_spawn("mbar", None, unasked).is_none());
+        assert!(bordersrc_spawn("bottom_bar", Some(rc.clone()), unasked).is_none());
+        // A foreign JankyBorders runs: no spawn (it would draw borders too).
+        assert!(bordersrc_spawn("mbar", Some(rc.clone()), || true).is_none());
+        let (path, spec) = bordersrc_spawn("mbar", Some(rc.clone()), none).unwrap();
         assert_eq!(path, rc);
         assert_eq!(
             spec.command,
@@ -887,7 +910,7 @@ mod tests {
 
         // Without a shebang it runs like a shebang-less shell config.
         std::fs::write(&rc, "borders width=5.0\n").unwrap();
-        let (_, spec) = bordersrc_spawn("mbar", Some(rc.clone())).unwrap();
+        let (_, spec) = bordersrc_spawn("mbar", Some(rc.clone()), none).unwrap();
         assert_eq!(spec.command, config_command(&rc));
         assert!(spec.command.contains("exec bash"), "{}", spec.command);
         std::fs::remove_dir_all(&dir).unwrap();
