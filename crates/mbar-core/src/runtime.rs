@@ -408,6 +408,8 @@ impl Runtime {
             Input::DisplaysChanged => self.displays_changed(&mut effects, res),
             Input::Lua(req) => self.handle_lua(req, &mut effects, res),
             Input::MenuTitles { app, titles } => self.menu_titles(app, titles, &mut effects),
+            // Implemented by the AeroSpace work package (design §Core).
+            Input::Aerospace(_) | Input::AerospaceStatus(_) => {}
         }
         self.refresh(false, res);
         effects

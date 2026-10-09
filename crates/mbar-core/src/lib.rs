@@ -3,6 +3,7 @@
 
 #![allow(clippy::write_with_newline)]
 
+pub mod aerospace;
 pub mod animation;
 pub mod bar;
 pub mod borders;
