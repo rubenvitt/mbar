@@ -437,6 +437,78 @@ settings are in `mbar.query("borders")`. The borders settings survive
 `mbar --reload` and hotload, so deleting an `mbar.borders` call does not turn
 borders off on the next reload; `mbar.borders({ drawing = false })` does.
 
+### AeroSpace
+
+`mbar.aerospace` talks to a running
+[AeroSpace](https://github.com/nikitabobko/AeroSpace) directly, without a
+shell. The events, the provider and the connection are described in
+[`EXTENSIONS.md`](EXTENSIONS.md#aerospace).
+
+| Function | Notes |
+|---|---|
+| `mbar.aerospace.run(args, fn?)` | Runs one AeroSpace command, e.g. `{ "workspace", "3" }`. `fn(r)` gets `r.exit_code`, `r.stdout` and `r.stderr`. Without `fn` it is fire and forget. |
+| `mbar.aerospace.query(args, fn)` | Like `run`, but `fn(value, err)` gets stdout parsed as JSON (a Lua table). `err` is set when the command or the parse failed. |
+| `mbar.aerospace.on(event, fn)` | Registers an in-process handler for an AeroSpace event. `event` is the name with or without the `aerospace_` prefix (`"workspace_change"` = `"aerospace_workspace_change"`). No item is needed. |
+
+Commands run on a worker thread. The callbacks run on the daemon's Lua
+thread, like `mbar.exec` callbacks, so a hanging AeroSpace never blocks the
+bar. The first `mbar.aerospace` call connects mbar to AeroSpace.
+
+Workspace items with the focused one highlighted (this replaces the
+`exec-on-workspace-change` recipe from AeroSpace's `docs/goodies.adoc`):
+
+```lua
+local spaces = {}
+
+local function highlight(focused)
+  for sid, item in pairs(spaces) do
+    item:set({ background = { drawing = sid == focused } })
+  end
+end
+
+mbar.aerospace.run({ "list-workspaces", "--all" }, function(r)
+  if r.exit_code ~= 0 then return end
+  for sid in r.stdout:gmatch("[^\n]+") do
+    spaces[sid] = mbar.add("item", "space." .. sid, "left", {
+      label = sid,
+      background = { color = 0x44ffffff, corner_radius = 5, height = 20, drawing = false },
+      click_script = function() mbar.aerospace.run({ "workspace", sid }) end,
+    })
+  end
+  -- The first workspace event may have come before the items existed.
+  local state = mbar.query("aerospace")
+  if state then highlight(state.focused_workspace) end
+end)
+
+mbar.aerospace.on("workspace_change", function(env)
+  highlight(env.FOCUSED_WORKSPACE)
+end)
+```
+
+The handler's `env` holds the event's variables as strings
+(`FOCUSED_WORKSPACE`, `PREV_WORKSPACE`, …) and `INFO`; `env.info` is `INFO`
+decoded. Items can also subscribe like to any other event:
+`item:subscribe("aerospace_mode_change", fn)`.
+
+The current binding mode as a label, without a handler:
+
+```lua
+mbar.add("item", "aerospace.mode", "right", {
+  provider = { "aerospace", args = "mode" },
+})
+```
+
+Windows of the focused workspace:
+
+```lua
+mbar.aerospace.query({ "list-windows", "--workspace", "focused", "--json" }, function(windows, err)
+  if err then return end
+  local apps = {}
+  for _, w in ipairs(windows) do apps[#apps + 1] = w["app-name"] end
+  mbar.set("windows", { label = table.concat(apps, " ") })
+end)
+```
+
 ## Differences from SbarLua
 
 * `require("sketchybar")` works and returns `mbar`; `sbar.event_loop()` is a
