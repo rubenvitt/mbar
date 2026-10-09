@@ -79,7 +79,7 @@ impl Step {
         match self {
             Step::Location => "Move to Applications",
             Step::Cleanup => "Remove SketchyBar, JankyBorders and old mbar installs",
-            Step::TakeOver => "Use your SketchyBar and JankyBorders configs",
+            Step::TakeOver => "Use your SketchyBar, JankyBorders and AeroSpace configs",
             Step::Starter => "Create a starter config",
             Step::CommandLine => "Install the `mbar`, `sketchybar` and `borders` commands",
             Step::LoginItem => "Start mbar at login",
@@ -109,6 +109,8 @@ struct SetupPlan {
     borders_helpers: Vec<PathBuf>,
     /// Window-manager config lines that start `borders`.
     launch_lines: Vec<ob::LaunchLine>,
+    /// AeroSpace `exec-on-workspace-change` settings that run the SketchyBar trigger.
+    aerospace_triggers: Vec<ob::WorkspaceTrigger>,
     starter_needed: bool,
     login: LoginItem,
 }
@@ -147,6 +149,7 @@ impl SetupPlan {
             bordersrc: ob::bordersrc(&home),
             borders_helpers: ob::borders_helpers(&home.join(".config/borders")),
             launch_lines: ob::borders_launch_lines(&home),
+            aerospace_triggers: ob::aerospace_triggers(&home),
             starter_needed: ob::needs_starter_config(&home, &xdg),
             bundle_root: root,
             bin_dir: bin,
@@ -187,7 +190,10 @@ impl SetupPlan {
                         .all(|o| matches!(o.kind, ob::OldKind::Foreign | ob::OldKind::Homebrew))
             }
             Step::TakeOver => {
-                self.sbarlua.is_none() && self.felix.is_empty() && !self.borders_needs_review()
+                self.sbarlua.is_none()
+                    && self.felix.is_empty()
+                    && !self.borders_needs_review()
+                    && self.aerospace_triggers.is_empty()
             }
             Step::Starter => !self.starter_needed,
             Step::CommandLine => self.paths_d == ob::PathsD::Current,
@@ -594,6 +600,25 @@ impl SetupView {
                     }
                     col = col.child(line(ob::LAUNCH_LINE_DOCS.into()));
                 }
+                if !plan.aerospace_triggers.is_empty() {
+                    col = col.child(line(
+                        "AeroSpace runs the SketchyBar trigger on every workspace change here:"
+                            .into(),
+                    ));
+                    for t in &plan.aerospace_triggers {
+                        col = col
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_family("Menlo")
+                                    .text_color(muted)
+                                    .whitespace_normal()
+                                    .child(format!("{}:{}: {}", t.file.display(), t.line, t.text)),
+                            )
+                            .child(line(t.advice()));
+                    }
+                    col = col.child(line(ob::AEROSPACE_TRIGGER_DOCS.into()));
+                }
             }
             Step::Starter => {
                 col = col.child(line(
@@ -782,6 +807,19 @@ fn run(step: Step, plan: &SetupPlan, remove_brew: RemoveBrew) -> Result<String, 
             }
             if !plan.launch_lines.is_empty() {
                 log.push_str(ob::LAUNCH_LINE_DOCS);
+                log.push('\n');
+            }
+            for t in &plan.aerospace_triggers {
+                log.push_str(&format!(
+                    "Runs the SketchyBar trigger: {}:{}: {}\n  {}\n",
+                    t.file.display(),
+                    t.line,
+                    t.text,
+                    t.advice()
+                ));
+            }
+            if !plan.aerospace_triggers.is_empty() {
+                log.push_str(ob::AEROSPACE_TRIGGER_DOCS);
                 log.push('\n');
             }
             Ok(log)
