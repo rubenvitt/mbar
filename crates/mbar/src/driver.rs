@@ -1351,7 +1351,10 @@ mod tests {
         d.post = post.clone();
         let (release_tx, release_rx) = mpsc::channel::<()>();
         let release_rx = Mutex::new(release_rx);
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let started_tx = Mutex::new(started_tx);
         d.aerospace_worker = AerospaceWorker::spawn_with(post, move |args| {
+            let _ = started_tx.lock().unwrap().send(());
             // Hangs like an unresponsive AeroSpace until the test releases it.
             let _ = release_rx.lock().unwrap().recv();
             AerospaceResult {
@@ -1362,25 +1365,31 @@ mod tests {
         });
         // `request_aerospace` must not start a real subscription in this test.
         let _ = d.rt.request_aerospace();
+        // Job 1 is taken off the queue and hangs; only then is the queue filled, so the
+        // split between accepted and rejected jobs does not depend on thread timing.
+        d.lua_aerospace(vec!["workspace".into(), "1".into()], Some(1));
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("worker did not start job 1");
         let total = AEROSPACE_QUEUE as u64 + 10;
-        for id in 1..=total {
+        for id in 2..=total {
             d.lua_aerospace(vec!["workspace".into(), id.to_string()], Some(id));
         }
-        // At most one job in progress plus a full queue are accepted.
+        // One job in progress plus a full queue are accepted, the rest fails at once.
+        let accepted = AEROSPACE_QUEUE as u64 + 1;
         let rejected: Vec<(u64, AerospaceResult)> = done.lock().unwrap().drain(..).collect();
-        assert!(rejected.len() >= 9, "{} rejected", rejected.len());
-        for (id, r) in &rejected {
-            assert!(*id > AEROSPACE_QUEUE as u64, "job {id} rejected");
+        let rejected_ids: Vec<u64> = rejected.iter().map(|(id, _)| *id).collect();
+        assert_eq!(rejected_ids, (accepted + 1..=total).collect::<Vec<_>>());
+        for (_, r) in &rejected {
             assert_eq!(r.exit_code, -1);
             assert_eq!(r.stderr, AEROSPACE_QUEUE_FULL);
         }
         // Released, the accepted ones complete in order.
-        let accepted = total as usize - rejected.len();
         for _ in 0..accepted {
             release_tx.send(()).unwrap();
         }
         let start = Instant::now();
-        while done.lock().unwrap().len() < accepted {
+        while (done.lock().unwrap().len() as u64) < accepted {
             assert!(
                 start.elapsed() < Duration::from_secs(5),
                 "jobs did not finish"
@@ -1389,7 +1398,7 @@ mod tests {
         }
         let finished = done.lock().unwrap();
         let ids: Vec<u64> = finished.iter().map(|(id, _)| *id).collect();
-        assert_eq!(ids, (1..=accepted as u64).collect::<Vec<_>>());
+        assert_eq!(ids, (1..=accepted).collect::<Vec<_>>());
         assert!(finished.iter().all(|(_, r)| r.exit_code == 0));
     }
 
