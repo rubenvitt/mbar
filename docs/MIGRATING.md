@@ -8,6 +8,9 @@ needs a few small edits.
 mbar also draws JankyBorders' window borders. If you use JankyBorders
 (`borders`), see [Migrating from JankyBorders](#migrating-from-jankyborders).
 
+mbar receives AeroSpace's events itself. If AeroSpace triggers your bar, see
+[Using AeroSpace](#using-aerospace).
+
 ## Quick checklist
 
 1. Install `mbar.app` ([`INSTALL.md`](INSTALL.md)); its setup stops and
@@ -527,3 +530,120 @@ one of them, please report it.
 
 Questions 6 and 7 of the spec (the raw MIG sub-level reply and the symtab scan
 for `CGSGetConnectionPortById`) do not apply: mbar does not use either (B15).
+
+## Using AeroSpace
+
+mbar receives [AeroSpace](https://github.com/nikitabobko/AeroSpace)'s events
+itself. AeroSpace no longer has to run `sketchybar --trigger` on every
+workspace switch. The events, the provider and the connection are in
+[`EXTENSIONS.md`](EXTENSIONS.md#aerospace).
+
+Each workspace switch with the SketchyBar recipe forks bash, then
+`sketchybar --trigger`, then one plugin script per workspace item (each forking
+`sketchybar --set`). With mbar the event arrives directly. With Lua handlers no
+process starts at all.
+
+### Checklist
+
+1. Remove the `exec-on-workspace-change` line from `~/.aerospace.toml` (or
+   `~/.config/aerospace/aerospace.toml`). If it stays, items get
+   `aerospace_workspace_change` twice. That is harmless, but costs the forks.
+   The setup in `mbar.app` lists these lines.
+2. Keep your `sketchybarrc`. The AeroSpace items and their plugin scripts keep
+   working unchanged: `aerospace_workspace_change` is built in and sets
+   `FOCUSED_WORKSPACE`, as the trigger did. `--add event
+   aerospace_workspace_change` is accepted and does nothing.
+3. Optionally, move the items to Lua (below): handlers then run inside mbar,
+   and `mbar.aerospace.run` replaces `click_script="aerospace workspace …"`.
+
+### Before
+
+The recipe from AeroSpace's `docs/goodies.adoc`:
+
+```toml
+# ~/.aerospace.toml
+exec-on-workspace-change = ['/bin/bash', '-c',
+    'sketchybar --trigger aerospace_workspace_change FOCUSED_WORKSPACE=$AEROSPACE_FOCUSED_WORKSPACE'
+]
+```
+
+```sh
+# sketchybarrc
+sketchybar --add event aerospace_workspace_change
+
+for sid in $(aerospace list-workspaces --all); do
+    sketchybar --add item space.$sid left \
+        --subscribe space.$sid aerospace_workspace_change \
+        --set space.$sid \
+        background.color=0x44ffffff \
+        background.corner_radius=5 \
+        background.height=20 \
+        background.drawing=off \
+        label="$sid" \
+        click_script="aerospace workspace $sid" \
+        script="$CONFIG_DIR/plugins/aerospace.sh $sid"
+done
+```
+
+```sh
+# plugins/aerospace.sh
+#!/usr/bin/env bash
+if [ "$1" = "$FOCUSED_WORKSPACE" ]; then
+    sketchybar --set $NAME background.drawing=on
+else
+    sketchybar --set $NAME background.drawing=off
+fi
+```
+
+### After
+
+`aerospace.toml`: the `exec-on-workspace-change` setting is gone, all of it
+(the array may span several lines).
+
+`sketchybarrc` and `plugins/aerospace.sh` can stay as they are. The
+`--add event` line may go.
+
+Or in `~/.config/mbar/init.lua`, without the plugin script:
+
+```lua
+local spaces = {}
+
+local function highlight(focused)
+  for sid, item in pairs(spaces) do
+    item:set({ background = { drawing = sid == focused } })
+  end
+end
+
+mbar.aerospace.run({ "list-workspaces", "--all" }, function(r)
+  if r.exit_code ~= 0 then return end
+  for sid in r.stdout:gmatch("[^\n]+") do
+    spaces[sid] = mbar.add("item", "space." .. sid, "left", {
+      label = sid,
+      background = { color = 0x44ffffff, corner_radius = 5, height = 20, drawing = false },
+      click_script = function() mbar.aerospace.run({ "workspace", sid }) end,
+    })
+  end
+  local state = mbar.query("aerospace")
+  if state then highlight(state.focused_workspace) end
+end)
+
+mbar.aerospace.on("workspace_change", function(env)
+  highlight(env.FOCUSED_WORKSPACE)
+end)
+```
+
+The handler runs inside mbar on every switch; the click runs the AeroSpace
+command without a shell. `mbar --query aerospace` shows whether mbar is
+connected and how (socket or CLI fallback).
+
+### Notes
+
+- mbar connects only when the config uses AeroSpace: an `aerospace_*`
+  subscription, `provider=aerospace`, `--query aerospace` or `mbar.aerospace`.
+- When AeroSpace restarts, mbar reconnects by itself (backoff up to 30 s).
+- AeroSpace versions without the socket protocol work through the
+  `aerospace` CLI (`aerospace subscribe --all`). Versions whose CLI has no
+  `subscribe` either get no events; keep the `exec-on-workspace-change` line
+  there.
+- Other `exec-on-workspace-change` commands (not the SketchyBar trigger) are
+  not affected. Keep them.

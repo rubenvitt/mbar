@@ -15,6 +15,9 @@ for macOS. Goals, in priority order:
    (`borders`): mbar draws the window borders itself, and `borders …` calls reach it
    through a `borders -> mbar` link (`docs/spec/borders.md`). `git.felix.borders` is not
    registered either.
+   [AeroSpace](https://github.com/nikitabobko/AeroSpace) stays a separate program: mbar
+   subscribes to its event stream and sends it commands over its socket, so the
+   SketchyBar recipe's `aerospace_workspace_change` arrives without a shell chain.
 2. **Faster**: GPU (Metal) rendering, damage-driven redraw, frame-paced animations,
    cached text runs, coalesced updates, native data providers instead of
    fork/exec'ing shell scripts every few seconds.
@@ -35,6 +38,7 @@ crates/
   mbar-ipc/             wire protocol: Unix socket (all platforms) + mach (macOS)
   mbar-macos/           everything that touches Apple frameworks (cfg(target_os="macos"))
   mbar-lua/             embedded Lua 5.4 config/scripting (mlua), in-process callbacks
+  mbar-aerospace/       AeroSpace client: socket protocol, CLI fallback, event subscription
   mbar/                 the binary: client mode, daemon mode, headless platform
   mbar-ui/              separate management app (GPUI + gpui-kit), talks to the daemon over IPC
 ```
@@ -63,6 +67,7 @@ Pure logic. No Apple types, no threads, no I/O except what is injected.
 | `script` | env var construction for scripts |
 | `provider` | native providers (clock, cpu, memory, battery, ...) formatting |
 | `borders` | window-border configuration (`--borders`, `--query borders`): JankyBorders' argument parser, settings, `apply-to` overrides, update masks |
+| `aerospace` | AeroSpace events (`AerospaceEvent`: JSON parsing, mbar event names, script variables, `INFO`) and the connection status (`AerospaceStatus`) for `--query aerospace` |
 | `platform` | the traits/enums the core uses to talk to a platform |
 | `runtime` | `Runtime`: owns all state, consumes `Input`, emits `Effect`s |
 
@@ -123,6 +128,42 @@ and their border windows:
   to it.
 * Display reconfiguration and wake recreate all borders; shutdown destroys them.
 
+#### AeroSpace
+
+The core owns the events, the stored state and the lazy start. The connection lives in
+`crates/mbar-aerospace`, driven by the binary on both platforms:
+
+```
+ first aerospace_* subscription / provider=aerospace / --query aerospace / mbar.aerospace
+                                   │
+                                   ▼
+        Runtime ──► Effect::Platform(PlatformRequest::StartAerospace)   (once)
+                                   │
+                                   ▼
+        driver ──► mbar_aerospace::subscribe(on_event, on_status)
+                                   │ background thread: socket (or `aerospace subscribe
+                                   │ --all` child), reconnect with backoff
+                                   ▼
+        Input::Aerospace(ev) / Input::AerospaceStatus(s)  ──► event queue (Waker)
+                                   │
+                                   ▼
+        Runtime: trigger ev.event_name() with ev.env() and INFO for subscribers
+                 (scripts and Lua handlers), update the stored state and the
+                 provider=aerospace items; keep the status for --query aerospace
+```
+
+* `crates/mbar-aerospace` is platform-independent (std + serde_json + mbar-core types)
+  and tested on Linux against a fake AeroSpace server.
+* Socket: `/tmp/bobko.aerospace-$USER.sock`, handshake `u32 LE 1`, then frames of
+  `u32 LE length` + JSON. One connection runs `subscribe --all` and becomes an event
+  stream; each command uses its own request.
+* Fallback for servers without the socket protocol: a long-running
+  `aerospace subscribe --all` child (one JSON object per line) and `aerospace <args>`
+  per command.
+* Lua `mbar.aerospace.run/query` run on a worker thread (`mbar_aerospace::run` blocks);
+  results come back as Lua callbacks on the daemon's thread.
+* The connection and the stored state survive `--reload`.
+
 ### mbar-ipc
 
 * Unix domain socket `<dir>/mbar_<user>_<bar_name>.socket` (mode 0600), where `<dir>` is
@@ -179,6 +220,9 @@ and their border windows:
   line) while a foreign JankyBorders holds `git.felix.borders`.
 * The borders configuration in the model survives `--reload` and hotload, like the
   separate JankyBorders process did; the re-run config and `bordersrc` apply on top.
+* The driver handles `PlatformRequest::StartAerospace` itself (on both platforms): it
+  starts one `mbar_aerospace::subscribe` and feeds its callbacks into the event queue as
+  `Input::Aerospace` / `Input::AerospaceStatus`.
 * Config lookup: `--config`, `$XDG_CONFIG_HOME/mbar/mbarrc`, `~/.config/mbar/mbarrc`,
   then SketchyBar locations `$XDG_CONFIG_HOME/sketchybar/sketchybarrc`, `~/.config/sketchybar/sketchybarrc`.
 * `SIGTERM`/`SIGINT`/`SIGHUP` end the daemon like `--exit` (self-pipe → `Event::Terminate`
@@ -219,7 +263,8 @@ client of the daemon and uses only public commands plus a few query extensions
 * **Performance**: frame times, redraws per window, script spawns and durations,
   slowest handlers.
 * **System**: permission status (Accessibility for `app_menu`, Screen Recording for
-  aliases), native menu-bar auto-hide toggle, launch at login, reload config.
+  aliases), native menu-bar auto-hide toggle, window borders, the AeroSpace connection
+  (`--query aerospace`), launch at login, reload config.
 
 The bar itself does **not** use GPUI: it needs exact control over window levels,
 all-spaces behaviour, private blur and a minimal memory footprint, so it keeps its own

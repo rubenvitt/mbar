@@ -45,8 +45,9 @@ query.rs       JSON for --query
 borders/       window borders (JankyBorders take-over, extension): BorderSettings,
                BordersState (`--borders`, `--query borders`, held in Model), parse.rs
                (JankyBorders argument grammar), pure helpers the platform uses
-aerospace.rs   AeroSpace events (names, env, INFO), AerospaceStatus, AerospaceState
-               (held in Model; `--query aerospace`, `provider=aerospace`)
+aerospace.rs   AeroSpace (extension): AerospaceEvent (JSON parsing, event names, env,
+               INFO), AerospaceStatus, AerospaceState (held in Model; `--query aerospace`,
+               `provider=aerospace`)
 event.rs       EventKind, EventMask, CustomEvents, EventInfo
 script.rs      ScriptEnv building
 provider.rs    native providers: names, templates

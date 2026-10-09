@@ -3,7 +3,8 @@
 Everything here is new in mbar. A plain SketchyBar config never triggers any of it, so
 existing configs behave exactly as documented in `docs/spec/`. Window borders take over
 JankyBorders; its own command line (`borders …`) is covered in
-[Window borders](#window-borders).
+[Window borders](#window-borders). [AeroSpace](#aerospace) events are built in; mbar
+connects to AeroSpace only when a config uses them.
 
 ## Command line
 
@@ -15,6 +16,7 @@ JankyBorders; its own command line (`borders …`) is covered in
 | `--menu <index\|title>` | Opens that top-level menu of the front app (index 0 = Apple menu). |
 | `--borders <key>=<value> ...` | Window borders (JankyBorders options plus `drawing=`). See [Window borders](#window-borders). |
 | `--query borders` | JSON of the borders configuration. See [Window borders](#window-borders). |
+| `--query aerospace` | JSON of the AeroSpace connection and state. See [AeroSpace](#aerospace). |
 | `--menubar hide\|show\|toggle` | Sets macOS "Automatically hide and show the menu bar" (`_HIHideMenuBar`) and notifies the system. |
 | `--reload` | Reloads the config (SketchyBar has this as `--hotload`-adjacent behaviour; mbar exposes it explicitly). |
 | `-h`, `--help` (as `mbar`) | Invoked under any name other than `sketchybar`, the help lists mbar's config locations, `--headless` and the extensions above (and `--clone` in the order the code reads it). Invoked as `sketchybar` (e.g. a `sketchybar -> mbar` symlink), it prints SketchyBar's `misc/help.h` verbatim (`cli.md` §1.3), just as `-v` prints `sketchybar-v2.24.0`. |
@@ -45,7 +47,7 @@ JankyBorders; its own command line (`borders …`) is covered in
 
 | Property | Description |
 |---|---|
-| `provider=<name>` | Native data source updating the item without spawning a script. Names: `clock`, `cpu`, `memory`, `battery`, `volume`, `wifi`, `network`, `disk`, `front_app`, `media`. `none` disables. |
+| `provider=<name>` | Native data source updating the item without spawning a script. Names: `clock`, `cpu`, `memory`, `battery`, `volume`, `wifi`, `network`, `disk`, `front_app`, `media`, `aerospace` (see [AeroSpace](#aerospace)). `none` disables. |
 | `provider.format=<template>` | Template for `label` with `{key}` placeholders, e.g. `"{percent}%"`. Default per provider. |
 | `provider.icon_format=<template>` | Optional template for `icon`. |
 | `provider.freq=<seconds>` | Sampling interval (float). Event-driven providers (`volume`, `wifi`, `front_app`, `media`, `battery`) ignore it. |
@@ -247,6 +249,130 @@ arrays are joined with `,`, booleans become `on`/`off`. `{ glow = 0xff… }` and
 `{ gradient = { top_left = 0x…, bottom_right = 0x… } }` (or `top_right`/`bottom_left`)
 become the JankyBorders color strings. Details in [`LUA.md`](LUA.md); the type is
 `mbar.BordersProps` in `lua/mbar.d.lua`.
+
+## AeroSpace
+
+mbar talks to a running [AeroSpace](https://github.com/nikitabobko/AeroSpace)
+directly. It subscribes to AeroSpace's event stream and sends commands over its
+socket, so no `exec-on-workspace-change` shell chain is needed. AeroSpace stays a
+separate program that manages the windows. The design is in
+[`superpowers/specs/2026-10-09-aerospace-design.md`](superpowers/specs/2026-10-09-aerospace-design.md);
+moving an existing setup over is in [`MIGRATING.md`](MIGRATING.md#using-aerospace).
+
+### Events
+
+| mbar event | AeroSpace event | Variables (besides `NAME`, `SENDER`, `INFO`) |
+|---|---|---|
+| `aerospace_workspace_change` | `focused-workspace-changed` | `FOCUSED_WORKSPACE`, `PREV_WORKSPACE` |
+| `aerospace_focus_change` | `focus-changed` | `FOCUSED_WORKSPACE`, `WINDOW_ID` (empty on an empty workspace) |
+| `aerospace_monitor_change` | `focused-monitor-changed` | `FOCUSED_WORKSPACE`, `MONITOR_ID` (1-based) |
+| `aerospace_mode_change` | `mode-changed` | `MODE` |
+| `aerospace_window_detected` | `window-detected` | `WINDOW_ID`, `WORKSPACE`, `APP_BUNDLE_ID`, `APP_NAME` |
+| `aerospace_binding_triggered` | `binding-triggered` | `MODE`, `BINDING` |
+
+`INFO` holds the same data as a JSON object with lower-case keys, for example
+`{"focused_workspace":"2","prev_workspace":"1"}`.
+
+```sh
+mbar --add item workspace left \
+     --subscribe workspace aerospace_workspace_change \
+     --set workspace script='mbar --set $NAME label="$FOCUSED_WORKSPACE"'
+```
+
+- The events are built in: `--subscribe` works without `--add event`. A config that
+  still runs `--add event aerospace_workspace_change` (the SketchyBar recipe) is
+  accepted and changes nothing.
+- A manual `--trigger aerospace_workspace_change FOCUSED_WORKSPACE=…` keeps working.
+  If AeroSpace's `exec-on-workspace-change` still sends it, items get the event twice
+  (harmless). Remove that line from `aerospace.toml`.
+- On connect, AeroSpace sends the current workspace, focus, monitor and mode right
+  away, so items are correct at startup without a separate query.
+
+### Provider `provider=aerospace`
+
+Sets the item's label from AeroSpace's events, without a script:
+
+| `provider.args` | label |
+|---|---|
+| (none) or `workspace` | focused workspace |
+| `mode` | current binding mode (`main`, …) |
+| `monitor` | focused monitor id |
+
+```sh
+mbar --add item aerospace.mode right --set aerospace.mode provider=aerospace provider.args=mode
+```
+
+Highlighting the focused workspace item is a handler on `aerospace_workspace_change`
+(a script, or Lua as in [`LUA.md`](LUA.md#aerospace)).
+
+### `--query aerospace`
+
+```json
+{
+	"connected": "on",
+	"transport": "socket",
+	"server_version": "0.20.0-Beta 33fa0643",
+	"error": "",
+	"focused_workspace": "2",
+	"prev_workspace": "1",
+	"mode": "main",
+	"monitor": 1
+}
+```
+
+`transport` is `socket`, `cli` or `none`. `error` says why the last connection attempt
+failed while `connected` is `off`. An item named `aerospace` wins over this query, as
+with `--query borders`. The System page of `mbar.app` shows the same status.
+
+### Lua
+
+```lua
+mbar.aerospace.run({ "workspace", "3" })                        -- fire and forget
+mbar.aerospace.run({ "list-workspaces", "--all" }, function(r)  -- r.exit_code, r.stdout, r.stderr
+end)
+mbar.aerospace.query({ "list-windows", "--all", "--json" }, function(list, err)
+  -- stdout parsed as JSON; err is set when the command or the parse failed
+end)
+mbar.aerospace.on("workspace_change", function(env) end)         -- = aerospace_workspace_change
+```
+
+Commands run on a worker thread. Callbacks run on the daemon's Lua thread, like
+`mbar.exec` callbacks. A hanging AeroSpace never blocks the bar. `on` takes the event
+name with or without the `aerospace_` prefix and registers an in-process handler that
+needs no item. Details in [`LUA.md`](LUA.md#aerospace).
+
+### Connection
+
+The connection starts lazily, on the first of:
+
+- a `--subscribe` to any `aerospace_*` event,
+- an item with `provider=aerospace`,
+- `--query aerospace`,
+- a Lua `mbar.aerospace` call.
+
+Without any of these mbar never connects, so nothing changes for users without
+AeroSpace. The connection and the stored state (focused and previous workspace, mode,
+monitor) survive `--reload`.
+
+**Socket.** mbar uses AeroSpace's socket `/tmp/bobko.aerospace-$USER.sock` and its
+documented protocol (AeroSpace `docs/guide.adoc`, "Socket protocol"): a version
+handshake, then length-prefixed JSON frames. Commands are `ClientRequest`s; events come
+from one connection running `subscribe --all`.
+
+**CLI fallback.** For AeroSpace versions whose server predates the socket protocol (the
+handshake gets another version, the socket closes, or there is no answer within 1 s),
+mbar runs one long-lived `aerospace subscribe --all` child for the events and
+`aerospace <args>` for commands. The `aerospace` binary is looked up on `PATH`, then in
+`/opt/homebrew/bin`, `/usr/local/bin` and
+`/Applications/AeroSpace.app/Contents/Resources/bin`. If the CLI has no `subscribe`
+either, `--query aerospace` says so in `error`, and only manual `--trigger`s work.
+
+**Reconnect.** When AeroSpace quits or restarts, mbar retries with a backoff (1 s,
+doubling, at most 30 s) for as long as it runs. Every change shows in
+`--query aerospace`.
+
+**Overrides.** `MBAR_AEROSPACE_SOCKET` replaces the socket path and
+`MBAR_AEROSPACE_CLI` the `aerospace` binary. Both are meant for tests.
 
 ## Lua
 

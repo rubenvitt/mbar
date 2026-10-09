@@ -1,8 +1,9 @@
 //! System: daemon status and start, reload, native menu bar auto-hide, window borders
 //! (`--query borders` / `--borders drawing=…`, design doc
 //! `docs/superpowers/specs/2026-10-09-borders-design.md` §5; plus stopping and removing
-//! a Homebrew JankyBorders that is still there after setup), permission hints and
-//! launch at login.
+//! a Homebrew JankyBorders that is still there after setup), the AeroSpace connection
+//! (`--query aerospace`, design doc `docs/superpowers/specs/2026-10-09-aerospace-design.md`),
+//! permission hints and launch at login.
 
 use std::time::Duration;
 
@@ -15,7 +16,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::*;
 use mbar_ui_model::ipc::DaemonStatus;
-use mbar_ui_model::model::BordersInfo;
+use mbar_ui_model::model::{AerospaceInfo, BordersInfo};
 use mbar_ui_model::onboarding as ob;
 use mbar_ui_model::system::{
     self as sys, Permissions, ACCESSIBILITY_SETTINGS_URL, SCREEN_RECORDING_SETTINGS_URL,
@@ -71,6 +72,10 @@ pub struct SystemView {
     /// again once completed).
     brew: ob::BrewState,
     removing_brew_borders: bool,
+    /// `--query aerospace`; `Ok(None)` when AeroSpace is not installed (not asked, since
+    /// the query makes the daemon connect); `None` until read or while the daemon is gone.
+    aerospace: Option<Result<Option<AerospaceInfo>, String>>,
+    reading_aerospace: bool,
     launch_agent: bool,
     /// Running from mbar.app on macOS: login item, updates and setup instead of the
     /// source-build hints.
@@ -112,6 +117,8 @@ impl SystemView {
             reading_borders: false,
             brew: ob::BrewState::default(),
             removing_brew_borders: false,
+            aerospace: None,
+            reading_aerospace: false,
             launch_agent: sys::launch_agent_path().is_some_and(|p| p.exists()),
             #[cfg(target_os = "macos")]
             app: sys::current_bundle().map(|bundle| AppState {
@@ -150,6 +157,7 @@ impl SystemView {
                         // Probed through the daemon; stale once it is gone.
                         this.permissions = None;
                         this.borders = None;
+                        this.aerospace = None;
                     }
                     this.status = status;
                     cx.notify();
@@ -161,6 +169,7 @@ impl SystemView {
                 // A reload or a `borders …` call elsewhere changes it: follow the poll.
                 if connected {
                     this.read_borders(cx);
+                    this.read_aerospace(cx);
                 }
                 None
             },
@@ -179,6 +188,34 @@ impl SystemView {
                 this.reading_borders = false;
                 if this.borders.as_ref() != Some(&borders) {
                     this.borders = Some(borders);
+                    cx.notify();
+                }
+                None
+            },
+        );
+    }
+
+    fn read_aerospace(&mut self, cx: &mut Context<Self>) {
+        if self.reading_aerospace {
+            return;
+        }
+        self.reading_aerospace = true;
+        self.shared.spawn_blocking(
+            cx,
+            |client| {
+                let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+                if !ob::aerospace_installed(&home) {
+                    return Ok(None);
+                }
+                client
+                    .query_aerospace()
+                    .map(Some)
+                    .map_err(|e| e.to_string())
+            },
+            |this, aerospace, cx| {
+                this.reading_aerospace = false;
+                if this.aerospace.as_ref() != Some(&aerospace) {
+                    this.aerospace = Some(aerospace);
                     cx.notify();
                 }
                 None
@@ -614,6 +651,34 @@ impl Render for SystemView {
                     ),
             );
 
+        let aerospace_status = match &self.aerospace {
+            Some(Ok(Some(a))) => a.summary(),
+            Some(Ok(None)) => "AeroSpace not found (no AeroSpace.app, no aerospace.toml)".into(),
+            Some(Err(e)) => format!("Unavailable: {e}"),
+            None if connected => "Reading…".to_string(),
+            None => "mbar is not running".to_string(),
+        };
+        let aerospace = section("AeroSpace", cx)
+            .child(
+                div()
+                    .text_xs()
+                    .font_family("Menlo")
+                    .text_color(cx.theme().muted_foreground)
+                    .whitespace_normal()
+                    .child(aerospace_status),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .whitespace_normal()
+                    .child(
+                        "mbar receives AeroSpace's events itself: `aerospace_workspace_change` \
+                         and the other `aerospace_*` events, `provider=aerospace` and \
+                         `mbar.aerospace` in init.lua. No `exec-on-workspace-change` needed.",
+                    ),
+            );
+
         let perms = self.permissions.as_ref();
         let permissions = section("Permissions", cx)
             .child(permission_row(
@@ -687,6 +752,7 @@ impl Render for SystemView {
                     .child(daemon)
                     .child(menubar)
                     .child(borders)
+                    .child(aerospace)
                     .child(permissions)
                     .children(tail),
             )

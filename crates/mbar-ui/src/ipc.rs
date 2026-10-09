@@ -12,8 +12,8 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::model::{
-    borders_drawing_args, parse_monitor_line, set_args, trigger_args, BarInfo, BordersInfo,
-    ItemInfo, MonitorMessage, Snapshot, Stats, Target,
+    borders_drawing_args, parse_monitor_line, set_args, trigger_args, AerospaceInfo, BarInfo,
+    BordersInfo, ItemInfo, MonitorMessage, Snapshot, Stats, Target,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -157,6 +157,13 @@ impl Client {
     pub fn query_borders(&self) -> Result<BordersInfo, IpcError> {
         let rsp = self.send_strs(&["--query", "borders"])?;
         BordersInfo::parse(&rsp).map_err(IpcError::Io)
+    }
+
+    /// `--query aerospace`: the connection to AeroSpace and its focused workspace and
+    /// mode. The first query makes the daemon connect (it connects lazily).
+    pub fn query_aerospace(&self) -> Result<AerospaceInfo, IpcError> {
+        let rsp = self.send_strs(&["--query", "aerospace"])?;
+        AerospaceInfo::parse(&rsp).map_err(IpcError::Io)
     }
 
     /// `--borders drawing=on|off`.
