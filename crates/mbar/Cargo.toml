@@ -11,6 +11,7 @@ name = "mbar"
 path = "src/main.rs"
 
 [dependencies]
+mbar-aerospace = { workspace = true }
 mbar-app = { workspace = true }
 mbar-core = { workspace = true }
 mbar-ipc = { workspace = true }

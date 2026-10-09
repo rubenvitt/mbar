@@ -446,17 +446,25 @@ shell. The events, the provider and the connection are described in
 
 | Function | Notes |
 |---|---|
-| `mbar.aerospace.run(args, fn?)` | Runs one AeroSpace command, e.g. `{ "workspace", "3" }`. `fn(r)` gets `r.exit_code`, `r.stdout` and `r.stderr`. Without `fn` it is fire and forget. |
-| `mbar.aerospace.query(args, fn)` | Like `run`, but `fn(value, err)` gets stdout parsed as JSON (a Lua table). `err` is set when the command or the parse failed. |
-| `mbar.aerospace.on(event, fn)` | Registers an in-process handler for an AeroSpace event. `event` is the name with or without the `aerospace_` prefix (`"workspace_change"` = `"aerospace_workspace_change"`). No item is needed. |
+| `mbar.aerospace.run(args, fn?)` | Runs one AeroSpace command, e.g. `{ "workspace", "3" }` (numbers are converted to strings). `fn(r)` gets `r.exit_code`, `r.stdout` and `r.stderr`. When the command could not run at all (AeroSpace not running, timeout), `r.exit_code` is `-1` and `r.stderr` says why. Without `fn` it is fire and forget (failures are logged). |
+| `mbar.aerospace.query(args, fn)` | Like `run`, but `fn(value, err)` gets stdout parsed as JSON (a Lua table). When the command failed or its output is not JSON, `value` is `nil` and `err` holds the error output or the parse error. |
+| `mbar.aerospace.on(event, fn)` | Registers an in-process handler for an AeroSpace event. `event` is the name with or without the `aerospace_` prefix (`"workspace_change"` = `"aerospace_workspace_change"`); other names are an error. Every handler registered for an event runs, in registration order. No item of yours is needed. |
 
-Commands run on a worker thread. The callbacks run on the daemon's Lua
-thread, like `mbar.exec` callbacks, so a hanging AeroSpace never blocks the
-bar. The first `mbar.aerospace` call connects mbar to AeroSpace.
+Commands run one after another on a worker thread, in the order Lua issued
+them. The callbacks run on the daemon's Lua thread, like `mbar.exec`
+callbacks, so a hanging AeroSpace never blocks the bar. The first
+`mbar.aerospace` call connects mbar to AeroSpace.
+
+The daemon delivers events to items only, so the first `on` adds one item
+named `__mbar_aerospace` with `drawing=off` that carries all `on` handlers.
+It takes no space in the bar, but `--query bar` lists it like any other
+item. Do not remove or reuse it. Like every handler, `on` handlers are
+registered again when `--reload` re-runs the config.
 
 Workspace items with the focused one highlighted (this replaces the
 `exec-on-workspace-change` recipe from AeroSpace's `docs/goodies.adoc`):
 
+<!-- example: aerospace-spaces -->
 ```lua
 local spaces = {}
 
@@ -500,6 +508,7 @@ mbar.add("item", "aerospace.mode", "right", {
 
 Windows of the focused workspace:
 
+<!-- example: aerospace-windows -->
 ```lua
 mbar.aerospace.query({ "list-windows", "--workspace", "focused", "--json" }, function(windows, err)
   if err then return end
@@ -545,7 +554,8 @@ end)
 
 The `mbar-lua` crate does not depend on `mbar-core`. The daemon implements
 `mbar_lua::Host` (`command(argv) -> response`, `spawn_shell(cmd, callback)`,
-`schedule(delay, callback)`) and owns one `LuaEngine` per config load:
+`schedule(delay, callback)`, and `aerospace(args, callback)`, whose default only
+logs) and owns one `LuaEngine` per config load:
 
 * `LuaEngine::load_file(path, host)` runs `init.lua`.
 * When an item's `script` or `click_script` is `lua:<id>`
@@ -553,6 +563,11 @@ The `mbar-lua` crate does not depend on `mbar-core`. The daemon implements
   with the same environment a shell script would get, instead of spawning.
 * When a `spawn_shell` with `Some(id)` exits, call `exec_finished(id, stdout, host)`;
   when a `schedule` deadline passes, call `timer_fired(id, host)`.
+* `aerospace(args, callback)` runs an AeroSpace command off the main thread
+  and makes sure the AeroSpace connection is started; with `Some(id)`, call
+  `aerospace_finished(id, AerospaceResult { exit_code, stdout, stderr }, host)`
+  when it finished (`exit_code = -1` and the error in `stderr` when it could
+  not run).
 * `Host::command` runs while the engine is borrowed: events that target Lua
   handlers, and `--reload`, produced by those commands must be queued and run
   after the engine call returns.

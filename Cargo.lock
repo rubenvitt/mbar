@@ -169,6 +169,7 @@ version = "0.3.3"
 dependencies = [
  "libc",
  "log",
+ "mbar-aerospace",
  "mbar-app",
  "mbar-core",
  "mbar-ipc",

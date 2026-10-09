@@ -17,8 +17,8 @@
 //! # Host access (soundness)
 //!
 //! The `&mut dyn Host` of an engine call is only borrowed for that call. Each
-//! entry point runs inside [`mlua::Lua::scope`]: three *scoped* Lua functions
-//! (command / spawn / schedule) capture a `RefCell<&mut dyn Host>` and are stored
+//! entry point runs inside [`mlua::Lua::scope`]: four *scoped* Lua functions
+//! (command / spawn / schedule / aerospace) capture a `RefCell<&mut dyn Host>` and are stored
 //! in the Lua registry for the duration of the call. When the scope ends, mlua
 //! invalidates them (any later call raises a Lua error instead of touching a
 //! dangling reference) and the registry slots are cleared. No `unsafe` code is
@@ -32,11 +32,13 @@
 //! `--reload`; the daemon must **queue** those and run them after the current
 //! engine call returns (never call into the engine from inside `Host`).
 
+mod aerospace;
 mod api;
 mod json;
 mod props;
 mod shell;
 
+pub use aerospace::{AerospaceResult, AEROSPACE_CARRIER, AEROSPACE_EVENTS};
 pub use shell::SYNC_SHELL_ENV;
 
 use std::cell::RefCell;
@@ -65,6 +67,19 @@ pub trait Host {
     fn spawn_shell(&mut self, cmd: String, callback: Option<u64>);
     /// Calls [`LuaEngine::timer_fired`] with `callback` after `delay`.
     fn schedule(&mut self, delay: Duration, callback: u64);
+    /// Runs the AeroSpace command `args` (`mbar.aerospace.run` / `query`, e.g.
+    /// `["workspace", "3"]`) off the main thread, and makes sure the daemon is
+    /// connected to AeroSpace (its event stream). When the command finished and
+    /// `callback` is `Some(id)`, the daemon calls [`LuaEngine::aerospace_finished`]
+    /// with the result (a transport failure as `exit_code = -1` with the error in
+    /// `stderr`).
+    ///
+    /// The default implementation (hosts without AeroSpace support) only logs: the
+    /// callback never runs.
+    fn aerospace(&mut self, args: Vec<String>, callback: Option<u64>) {
+        let _ = callback;
+        log::warn!("lua: mbar.aerospace is not supported here (args {args:?})");
+    }
 }
 
 /// Errors from loading a config or running a callback.
@@ -147,7 +162,8 @@ impl LuaEngine {
     pub fn new() -> Result<Self> {
         let lua = Lua::new();
         let state = Rc::new(RefCell::new(api::State::default()));
-        api::install(&lua, &state)?;
+        let module = api::install(&lua, &state)?;
+        aerospace::install(&lua, &state, &module)?;
         shell::install(&lua, &state)?;
         Ok(LuaEngine {
             lua,
@@ -262,6 +278,26 @@ impl LuaEngine {
         })
     }
 
+    /// Completes an `mbar.aerospace.run(args, fn)` (`fn(result)` with a table
+    /// `{ exit_code, stdout, stderr }`) or `mbar.aerospace.query(args, fn)`
+    /// (`fn(value, err)`: `value` is stdout decoded as JSON when the command
+    /// succeeded and the output parses, else `nil` and `err` says why). An unknown
+    /// id is ignored.
+    pub fn aerospace_finished(
+        &mut self,
+        id: u64,
+        result: AerospaceResult,
+        host: &mut dyn Host,
+    ) -> Result<()> {
+        self.call(host, true, |lua, st| {
+            let query = aerospace::take_query(st, id);
+            let Some(f) = take_callback(lua, id)? else {
+                return Ok(());
+            };
+            aerospace::deliver(lua, f, query, &result)
+        })
+    }
+
     /// Completes an `mbar.delay(seconds, fn)`. An unknown id is ignored.
     pub fn timer_fired(&mut self, id: u64, host: &mut dyn Host) -> Result<()> {
         self.call(host, true, |lua, _| match take_callback(lua, id)? {
@@ -334,6 +370,12 @@ impl LuaEngine {
             lua.set_named_registry_value(api::KEY_HOST_COMMAND, command)?;
             lua.set_named_registry_value(api::KEY_HOST_SPAWN, spawn)?;
             lua.set_named_registry_value(api::KEY_HOST_SCHEDULE, schedule)?;
+            let aerospace =
+                scope.create_function(move |_, (args, id): (Vec<String>, Option<u64>)| {
+                    host.borrow_mut().aerospace(args, id);
+                    Ok(())
+                })?;
+            lua.set_named_registry_value(api::KEY_HOST_AEROSPACE, aerospace)?;
 
             let result = f(lua, st);
             // Commands issued before an error still go out, like the earlier
@@ -345,6 +387,7 @@ impl LuaEngine {
                 api::KEY_HOST_COMMAND,
                 api::KEY_HOST_SPAWN,
                 api::KEY_HOST_SCHEDULE,
+                api::KEY_HOST_AEROSPACE,
             ] {
                 lua.unset_named_registry_value(key)?;
             }

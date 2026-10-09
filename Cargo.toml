@@ -12,6 +12,7 @@ rust-version = "1.80"
 [workspace.dependencies]
 mbar-core = { path = "crates/mbar-core" }
 mbar-ipc = { path = "crates/mbar-ipc" }
+mbar-aerospace = { path = "crates/mbar-aerospace" }
 mbar-macos = { path = "crates/mbar-macos" }
 mbar-lua = { path = "crates/mbar-lua" }
 mbar-app = { path = "crates/mbar-app" }

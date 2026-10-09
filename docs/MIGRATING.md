@@ -605,6 +605,7 @@ fi
 
 Or in `~/.config/mbar/init.lua`, without the plugin script:
 
+<!-- example: aerospace-migrate -->
 ```lua
 local spaces = {}
 

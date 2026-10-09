@@ -336,10 +336,13 @@ end)
 mbar.aerospace.on("workspace_change", function(env) end)         -- = aerospace_workspace_change
 ```
 
-Commands run on a worker thread. Callbacks run on the daemon's Lua thread, like
-`mbar.exec` callbacks. A hanging AeroSpace never blocks the bar. `on` takes the event
-name with or without the `aerospace_` prefix and registers an in-process handler that
-needs no item. Details in [`LUA.md`](LUA.md#aerospace).
+Commands run one after another on a worker thread. Callbacks run on the daemon's Lua
+thread, like `mbar.exec` callbacks. A hanging AeroSpace never blocks the bar. A command
+that cannot run (AeroSpace not running) reaches `run` callbacks as `exit_code = -1` with
+the reason in `stderr`. `on` takes the event name with or without the `aerospace_`
+prefix and registers an in-process handler that needs no item of yours (mbar adds one
+hidden carrier item, `__mbar_aerospace`, with `drawing=off`). Details in
+[`LUA.md`](LUA.md#aerospace).
 
 ### Connection
 

@@ -18,6 +18,11 @@
 //!   JankyBorders' `bordersrc` like a shell config (borders design §3).
 //! * `Exit`, `Log`, `Monitor`, `Platform(SetHotload)` handled here; every other
 //!   `PlatformRequest` goes to the platform.
+//! * `Platform(StartAerospace)` handled here on every platform (aerospace design
+//!   §Binary): one `mbar_aerospace::subscribe` whose callbacks post `Input::Aerospace` /
+//!   `Input::AerospaceStatus`; it lives until the driver exits. Lua `mbar.aerospace.run`
+//!   / `query` commands run in order on one worker thread ([`AerospaceWorker`]) and come
+//!   back as [`Event::LuaAerospaceDone`].
 //!
 //! Lua re-entrancy (`docs/LUA.md`, `mbar_lua` crate docs): while the engine runs, the
 //! engine is taken out of the driver; `Host::command` feeds the runtime synchronously and
@@ -30,7 +35,7 @@
 use mbar_core::command::MonitorMode;
 use mbar_core::platform::{Effect, FrameOutput, Input, PlatformRequest, ReplyToken, Resources};
 use mbar_core::{Runtime, RuntimeConfig};
-use mbar_lua::{Host, LuaEngine};
+use mbar_lua::{AerospaceResult, Host, LuaEngine};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -60,6 +65,12 @@ pub enum Event {
         generation: u64,
         id: u64,
         output: String,
+    },
+    /// A Lua `mbar.aerospace.run` / `query` command with a callback finished.
+    LuaAerospaceDone {
+        generation: u64,
+        id: u64,
+        result: AerospaceResult,
     },
     /// `SIGTERM`/`SIGINT`/`SIGHUP` (`crate::signals`): shut down like `--exit`.
     Terminate { signal: i32 },
@@ -95,6 +106,11 @@ enum Deferred {
     TimerFired {
         generation: u64,
         id: u64,
+    },
+    AerospaceFinished {
+        generation: u64,
+        id: u64,
+        result: AerospaceResult,
     },
     RunConfig(Option<String>),
 }
@@ -146,6 +162,11 @@ pub struct Driver {
     exit: bool,
     /// Latest `Resources::now` seen (deadline for queued work).
     last_now: Option<Instant>,
+    /// The AeroSpace event stream, started by the first `PlatformRequest::StartAerospace`
+    /// (kept across `--reload`, stopped on exit).
+    aerospace: Option<mbar_aerospace::Subscription>,
+    /// Runs Lua `mbar.aerospace` commands (started on first use).
+    aerospace_worker: Option<AerospaceWorker>,
     /// `Input::Timer`s handed to the runtime (tests).
     #[cfg(test)]
     timer_inputs: u64,
@@ -179,6 +200,8 @@ impl Driver {
             platform_requests: Vec::new(),
             exit: false,
             last_now: None,
+            aerospace: None,
+            aerospace_worker: None,
             #[cfg(test)]
             timer_inputs: 0,
         }
@@ -227,6 +250,15 @@ impl Driver {
                 id,
                 output,
             }),
+            Event::LuaAerospaceDone {
+                generation,
+                id,
+                result,
+            } => self.deferred.push_back(Deferred::AerospaceFinished {
+                generation,
+                id,
+                result,
+            }),
             Event::Terminate { signal } => self.terminate(signal),
         }
         self.drain(res);
@@ -246,6 +278,7 @@ impl Driver {
         self.apply(fx);
         // Should the runtime have exited already, the signal still ends the loop.
         self.exit = true;
+        self.stop_aerospace();
     }
 
     /// Fires due timers (runtime, Lua), runs queued work and renders when
@@ -379,11 +412,15 @@ impl Driver {
                     }),
                     None => self.spawn_script(script, env, item),
                 },
-                Effect::Exit => self.exit = true,
+                Effect::Exit => {
+                    self.exit = true;
+                    self.stop_aerospace();
+                }
                 Effect::RunConfig { path } => self.deferred.push_back(Deferred::RunConfig(path)),
                 Effect::Platform(PlatformRequest::SetHotload(on)) => {
                     self.hotload.store(on, Ordering::Relaxed);
                 }
+                Effect::Platform(PlatformRequest::StartAerospace) => self.start_aerospace(),
                 Effect::Platform(req) => self.platform_requests.push(req),
                 Effect::LuaCallback { handler, env } => {
                     self.deferred.push_back(Deferred::Handler {
@@ -440,6 +477,13 @@ impl Driver {
                 }
                 Deferred::TimerFired { generation, id } if generation == self.lua_generation => {
                     self.with_lua(res, |e, h| e.timer_fired(id, h));
+                }
+                Deferred::AerospaceFinished {
+                    generation,
+                    id,
+                    result,
+                } if generation == self.lua_generation => {
+                    self.with_lua(res, |e, h| e.aerospace_finished(id, result, h));
                 }
                 Deferred::RunConfig(path) => self.run_config(path, res),
                 stale => log::debug!("dropping stale lua work {stale:?}"),
@@ -630,6 +674,67 @@ impl Driver {
         }
     }
 
+    // ------------------------------------------------------------------ AeroSpace
+
+    /// `PlatformRequest::StartAerospace`: subscribes to AeroSpace's event stream (once;
+    /// the runtime emits the request once, a repeated one is ignored). Events and status
+    /// changes go through the main loop like every other input.
+    fn start_aerospace(&mut self) {
+        if self.aerospace.is_some() || self.exit {
+            return;
+        }
+        let (on_event, on_status) = (self.post.clone(), self.post.clone());
+        self.aerospace = Some(mbar_aerospace::subscribe(
+            move |ev| on_event(Event::Input(Input::Aerospace(ev))),
+            move |status| on_status(Event::Input(Input::AerospaceStatus(status))),
+        ));
+    }
+
+    /// Stops the event stream and the command worker (exit).
+    fn stop_aerospace(&mut self) {
+        self.aerospace = None;
+        self.aerospace_worker = None;
+    }
+
+    /// Lua `mbar.aerospace.run` / `query`: makes sure the connection is started
+    /// (`Runtime::request_aerospace`), then queues the command on the worker. With a
+    /// callback, the result comes back as [`Event::LuaAerospaceDone`] for this config
+    /// generation.
+    fn lua_aerospace(&mut self, args: Vec<String>, callback: Option<u64>) {
+        if self.exit {
+            return;
+        }
+        if let Some(fx) = self.rt.request_aerospace() {
+            self.apply(vec![fx]);
+        }
+        if self.aerospace_worker.is_none() {
+            self.aerospace_worker = AerospaceWorker::spawn(self.post.clone());
+        }
+        let job = AerospaceJob {
+            args,
+            reply: callback.map(|id| (self.lua_generation, id)),
+        };
+        let sent = match &self.aerospace_worker {
+            Some(w) => w.tx.send(job).map_err(|e| e.0),
+            None => Err(job),
+        };
+        if let Err(job) = sent {
+            // No worker thread: report the failure like a transport error.
+            self.aerospace_worker = None;
+            if let Some((generation, id)) = job.reply {
+                (self.post)(Event::LuaAerospaceDone {
+                    generation,
+                    id,
+                    result: AerospaceResult {
+                        exit_code: -1,
+                        stdout: String::new(),
+                        stderr: "cannot start the AeroSpace command thread".into(),
+                    },
+                });
+            }
+        }
+    }
+
     // ------------------------------------------------------------------ --monitor
     //
     // Contract with mbar-ui (`StreamDecoder`): the connection stays open after the request;
@@ -714,6 +819,71 @@ fn monitor_writer(mut stream: UnixStream, rx: Receiver<Arc<[u8]>>) {
     }
 }
 
+/// One Lua `mbar.aerospace` command; `reply` is `(generation, callback id)`.
+struct AerospaceJob {
+    args: Vec<String>,
+    reply: Option<(u64, u64)>,
+}
+
+/// The thread that runs Lua `mbar.aerospace` commands (blocking socket / CLI calls, up to
+/// `mbar_aerospace::ANSWER_TIMEOUT` each) one after another, so the main loop never waits
+/// for AeroSpace and commands reach it in the order Lua issued them. Ends when the
+/// driver drops the sender.
+struct AerospaceWorker {
+    tx: mpsc::Sender<AerospaceJob>,
+}
+
+impl AerospaceWorker {
+    fn spawn(post: Post) -> Option<AerospaceWorker> {
+        let (tx, rx) = mpsc::channel::<AerospaceJob>();
+        let spawned = std::thread::Builder::new()
+            .name("mbar-aerospace-run".into())
+            .spawn(move || {
+                while let Ok(job) = rx.recv() {
+                    let result = aerospace_result(mbar_aerospace::run(&job.args));
+                    match job.reply {
+                        Some((generation, id)) => post(Event::LuaAerospaceDone {
+                            generation,
+                            id,
+                            result,
+                        }),
+                        None if result.exit_code != 0 => log::warn!(
+                            "lua: aerospace {:?} failed ({}): {}",
+                            job.args,
+                            result.exit_code,
+                            result.stderr.trim()
+                        ),
+                        None => {}
+                    }
+                }
+            });
+        match spawned {
+            Ok(_) => Some(AerospaceWorker { tx }),
+            Err(e) => {
+                log::warn!("lua: cannot spawn the AeroSpace command thread: {e}");
+                None
+            }
+        }
+    }
+}
+
+/// A command's answer as the Lua callback sees it; a transport error is `exit_code = -1`
+/// with the error text in `stderr`.
+fn aerospace_result(r: Result<mbar_aerospace::Answer, mbar_aerospace::Error>) -> AerospaceResult {
+    match r {
+        Ok(a) => AerospaceResult {
+            exit_code: a.exit_code,
+            stdout: a.stdout,
+            stderr: a.stderr,
+        },
+        Err(e) => AerospaceResult {
+            exit_code: -1,
+            stdout: String::new(),
+            stderr: e.to_string(),
+        },
+    }
+}
+
 /// `mbar_lua::Host` backed by the driver (the engine itself is taken out while it runs).
 struct LuaHost<'a, 'r> {
     d: &'a mut Driver,
@@ -738,6 +908,10 @@ impl Host for LuaHost<'_, '_> {
                 .push((at, self.d.lua_generation, callback)),
             None => log::debug!("lua: mbar.delay({delay:?}) never fires"),
         }
+    }
+
+    fn aerospace(&mut self, args: Vec<String>, callback: Option<u64>) {
+        self.d.lua_aerospace(args, callback);
     }
 }
 
@@ -1066,6 +1240,44 @@ mod tests {
         let r = req(&mut d, &mut res, &["--monitor", "stats"]).unwrap();
         assert!(r.starts_with("[!] Monitor"), "{r}");
         assert_eq!(d.monitors.len(), 1);
+    }
+
+    /// Aerospace design §Binary: `StartAerospace` is handled by the driver (one
+    /// subscription, repeated requests ignored), never handed to the platform, and the
+    /// subscription ends with the daemon.
+    #[test]
+    fn start_aerospace_is_handled_by_the_driver() {
+        let (mut d, mut res) = driver();
+        assert!(d.aerospace.is_none());
+        let q = req(&mut d, &mut res, &["--query", "aerospace"]).unwrap();
+        assert!(q.contains("\"connected\""), "{q}");
+        assert!(d.aerospace.is_some());
+        d.apply(vec![Effect::Platform(PlatformRequest::StartAerospace)]);
+        assert!(d.aerospace.is_some());
+        assert!(
+            !d.take_platform_requests()
+                .iter()
+                .any(|r| matches!(r, PlatformRequest::StartAerospace)),
+            "StartAerospace reached the platform"
+        );
+        req(&mut d, &mut res, &["--exit"]);
+        assert!(d.exit_requested());
+        assert!(d.aerospace.is_none(), "subscription must stop on exit");
+    }
+
+    /// A Lua `mbar.aerospace` result for an earlier config generation is dropped.
+    #[test]
+    fn stale_aerospace_results_are_dropped() {
+        let (mut d, mut res) = driver();
+        d.handle_event(
+            Event::LuaAerospaceDone {
+                generation: d.lua_generation + 7,
+                id: 1,
+                result: AerospaceResult::default(),
+            },
+            &mut res,
+        );
+        assert!(d.deferred.is_empty());
     }
 
     /// PERF-2: a `--monitor` subscriber that stops reading never blocks the main loop.
