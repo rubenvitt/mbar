@@ -12,7 +12,7 @@
 //! frame, not N.
 
 use mbar_core::animation::FRAME_INTERVAL;
-use mbar_core::platform::HeadlessResources;
+use mbar_core::platform::{HeadlessResources, PlatformRequest};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::Arc;
 use std::time::Instant;
@@ -123,9 +123,22 @@ fn step(
         );
     }
     for req in driver.take_platform_requests() {
-        log::debug!("headless: ignoring {req:?}");
+        ignore_request(&req);
     }
     status
+}
+
+/// Headless has no windows, menus or OS state: every request is logged and dropped.
+fn ignore_request(req: &PlatformRequest) {
+    match req {
+        // Borders design "Headless": there are no windows to draw borders around.
+        PlatformRequest::SetBorders(update) => log::debug!(
+            "headless: ignoring borders (drawing={}, {} override(s))",
+            update.drawing,
+            update.overrides.len()
+        ),
+        other => log::debug!("headless: ignoring {other:?}"),
+    }
 }
 
 #[cfg(test)]
@@ -231,5 +244,17 @@ mod tests {
         l.step();
         assert!(l.driver.exit_requested());
         assert!(after.lock().unwrap().is_none(), "request after --exit ran");
+    }
+
+    /// Borders design "Headless": `SetBorders` is dropped (no windows to draw around).
+    #[test]
+    fn set_borders_is_ignored() {
+        use mbar_core::borders::{BorderSettings, BordersUpdate, UpdateMask};
+        ignore_request(&PlatformRequest::SetBorders(Box::new(BordersUpdate {
+            drawing: true,
+            settings: BorderSettings::default(),
+            overrides: vec![(7, BorderSettings::default())],
+            mask: UpdateMask(UpdateMask::ALL),
+        })));
     }
 }

@@ -52,9 +52,56 @@ pub fn config_candidates(bar_name: &str, xdg: &str, home: &str) -> Vec<PathBuf> 
     out
 }
 
+/// JankyBorders' config file (`docs/spec/borders.md` BR-CFG-02, borders design §3): the
+/// first regular file of `$HOME/.config/borders/bordersrc` and `$HOME/.bordersrc`.
+/// `$XDG_CONFIG_HOME` is not consulted (as in JankyBorders); an empty `HOME` finds
+/// nothing. The default bar runs it after its own config.
+pub fn find_bordersrc(home: &str) -> Option<PathBuf> {
+    bordersrc_candidates(home).into_iter().find(|p| p.is_file())
+}
+
+/// The candidates of [`find_bordersrc`], in lookup order.
+pub fn bordersrc_candidates(home: &str) -> Vec<PathBuf> {
+    if home.is_empty() {
+        return Vec::new();
+    }
+    let home = Path::new(home);
+    vec![
+        home.join(".config/borders/bordersrc"),
+        home.join(".bordersrc"),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bordersrc_candidates_order() {
+        let c = bordersrc_candidates("/h");
+        let c: Vec<_> = c.iter().map(|p| p.to_str().unwrap()).collect();
+        assert_eq!(c, ["/h/.config/borders/bordersrc", "/h/.bordersrc"]);
+        assert!(bordersrc_candidates("").is_empty());
+        assert_eq!(find_bordersrc(""), None);
+    }
+
+    #[test]
+    fn bordersrc_lookup() {
+        let home = std::env::temp_dir().join(format!("mbar-brc-{}", std::process::id()));
+        let h = home.to_str().unwrap();
+        let dir = home.join(".config/borders");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(find_bordersrc(h), None);
+        std::fs::write(home.join(".bordersrc"), "").unwrap();
+        assert_eq!(find_bordersrc(h), Some(home.join(".bordersrc")));
+        // A directory named like the config is skipped.
+        std::fs::create_dir(dir.join("bordersrc")).unwrap();
+        assert_eq!(find_bordersrc(h), Some(home.join(".bordersrc")));
+        std::fs::remove_dir(dir.join("bordersrc")).unwrap();
+        std::fs::write(dir.join("bordersrc"), "").unwrap();
+        assert_eq!(find_bordersrc(h), Some(dir.join("bordersrc")));
+        std::fs::remove_dir_all(&home).unwrap();
+    }
 
     #[test]
     fn candidates_order() {
