@@ -339,6 +339,7 @@ impl Services {
             PlatformRequest::SetMenuBarHidden(hidden) => menus::set_menubar_autohide(hidden),
             PlatformRequest::SetHotload(on) => self.sync_hotload(on),
             PlatformRequest::MachSend { service, payload } => self.mach_send(service, payload),
+            PlatformRequest::SetBorders(_) => log::debug!("window borders not implemented yet"),
         }
     }
 

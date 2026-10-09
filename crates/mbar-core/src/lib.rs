@@ -5,6 +5,7 @@
 
 pub mod animation;
 pub mod bar;
+pub mod borders;
 pub mod color;
 pub mod command;
 pub mod components;

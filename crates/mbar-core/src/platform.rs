@@ -385,6 +385,9 @@ pub enum PlatformRequest {
         service: String,
         payload: Vec<u8>,
     },
+    /// The window-borders configuration changed (`--borders`, `--reload`;
+    /// `docs/spec/borders.md`).
+    SetBorders(Box<crate::borders::BordersUpdate>),
 }
 
 /// Actions requested by `Runtime::handle`.
