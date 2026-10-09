@@ -535,6 +535,58 @@ fn borders_symlink_reaches_running_daemon() {
     );
 }
 
+/// End to end: `borders` and `mbar --borders` change the configuration that
+/// `--query borders` reports; errors of the `--borders` domain follow mbar's `[!]` rule.
+#[test]
+fn borders_configuration_round_trip() {
+    let sb = Sandbox::new();
+    let _d = sb.daemon();
+    let v = sb.query("borders");
+    assert_eq!(v["drawing"], "off");
+    assert_eq!(v["width"], 4.0);
+
+    let out = sb.borders(&[
+        "active_color=gradient(top_left=0xff112233,bottom_right=0xff445566)",
+        "inactive_color=0xff494d64",
+        "width=6.5",
+        "style=square",
+        "blacklist=Safari,kitty",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let v = sb.query("borders");
+    assert_eq!(v["drawing"], "on");
+    assert_eq!(
+        v["active_color"],
+        "gradient(top_left=0xff112233,bottom_right=0xff445566)"
+    );
+    assert_eq!(v["inactive_color"], "0xff494d64");
+    assert_eq!(v["width"], 6.5);
+    assert_eq!(v["style"], "square");
+    assert_eq!(v["blacklist"], serde_json::json!(["Safari", "kitty"]));
+
+    let out = sb.mbar(&["--borders", "apply-to=42", "active_color=glow(0xff00ff00)"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let v = sb.query("borders");
+    assert_eq!(v["overrides"][0]["window"], 42);
+    assert_eq!(v["overrides"][0]["active_color"], "glow(0xff00ff00)");
+    assert_eq!(
+        v["active_color"],
+        "gradient(top_left=0xff112233,bottom_right=0xff445566)"
+    );
+
+    let out = sb.mbar(&["--borders", "drawing=off", "glow=1"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(stderr(&out), "[!] Borders: Invalid argument 'glow=1'\n");
+    assert_eq!(sb.query("borders")["drawing"], "off");
+
+    // `--reload` resets the configuration (no config, no bordersrc in the sandbox).
+    let out = sb.mbar(&["--reload"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    sb.wait_for("borders", "reset", |v| {
+        v["drawing"] == "off" && v["width"] == 4.0 && v["overrides"] == serde_json::json!([])
+    });
+}
+
 /// Borders design §3: the default bar runs `~/.config/borders/bordersrc` after its main
 /// config, with the sandbox `bin` (the `borders` link) on `PATH`, and again on every
 /// `--reload`. The executable bit is added by the daemon.
@@ -575,6 +627,9 @@ fn bordersrc_runs_after_config_and_on_reload() {
     let expected_rc = format!("bordersrc:mbar:{}:0", sb.bin.join("borders").display());
     let lines = wait_lines(&marker, 2);
     assert_eq!(lines, ["config".to_string(), expected_rc.clone()]);
+    let v = sb.query("borders");
+    assert_eq!(v["drawing"], "on");
+    assert_eq!(v["width"], 5.0);
 
     let out = sb.mbar(&["--reload"]);
     assert!(out.status.success(), "{}", stderr(&out));

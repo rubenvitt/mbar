@@ -132,15 +132,6 @@ fn process_name(pid: i32) -> String {
         .unwrap_or_default()
 }
 
-/// `app_allowed` (BR-WIN-03 step 3): whitelist first, then blacklist; exact,
-/// case-sensitive. Same rule as the core's `BorderSettings::admits`.
-fn app_allowed(settings: &BorderSettings, name: &str) -> bool {
-    if !settings.whitelist.is_empty() && !settings.whitelist.iter().any(|n| n == name) {
-        return false;
-    }
-    !(!settings.blacklist.is_empty() && settings.blacklist.iter().any(|n| n == name))
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Job {
     Focus,
@@ -486,7 +477,7 @@ impl Manager {
     /// `windows_window_create` (BR-WIN-03). Returns whether a new border was created.
     fn window_create(&mut self, wid: u32, sid: u64) -> bool {
         let pid = ffi::window_owner_pid(wid);
-        if pid == self.pid || !app_allowed(&self.settings, &process_name(pid)) {
+        if pid == self.pid || !self.settings.admits(&process_name(pid)) {
             return false;
         }
         let list = ffi::wid_array(wid);
@@ -665,15 +656,15 @@ mod tests {
     #[test]
     fn lists_filter_by_exact_name() {
         let mut s = BorderSettings::default();
-        assert!(app_allowed(&s, "Safari"));
+        assert!(s.admits("Safari"));
         s.blacklist = vec!["Safari".into()];
-        assert!(!app_allowed(&s, "Safari"));
-        assert!(app_allowed(&s, "safari"));
+        assert!(!s.admits("Safari"));
+        assert!(s.admits("safari"));
         s.whitelist = vec!["kitty".into()];
-        assert!(!app_allowed(&s, "Mail"));
-        assert!(app_allowed(&s, "kitty"));
+        assert!(!s.admits("Mail"));
+        assert!(s.admits("kitty"));
         s.blacklist = vec!["kitty".into()];
-        assert!(!app_allowed(&s, "kitty"));
+        assert!(!s.admits("kitty"));
     }
 
     #[test]
