@@ -1,5 +1,6 @@
 //! `--query` output — **WP-B** (`docs/spec/cli.md` §9, `docs/spec/bar.md` §9,
-//! `docs/spec/events.md` §3.4, `docs/spec/components.md` §9.4, `docs/EXTENSIONS.md`).
+//! `docs/spec/events.md` §3.4, `docs/spec/components.md` §9.4, `docs/EXTENSIONS.md`;
+//! `--query borders`: `docs/superpowers/specs/2026-10-09-borders-design.md` §1).
 //!
 //! Item, bar, popup and component fragments are implemented on the data model
 //! (`BarItem::to_json`, `BarProps::to_json`, …). This module dispatches the query targets
@@ -55,8 +56,8 @@ pub struct QueryCx<'a> {
 /// default item (`"name": "defaults"` or `(null)` after reset).
 ///
 /// The SketchyBar keywords shadow item names (only `--query item <name>` reaches such
-/// items). The extension keywords `stats` and `menus` do **not**: an existing item with
-/// that name is served as before, so plain SketchyBar configs behave unchanged.
+/// items). The extension keywords `stats`, `menus` and `borders` do **not**: an existing
+/// item with that name is served as before, so plain SketchyBar configs behave unchanged.
 pub fn query(target: &QueryTarget, cx: &QueryCx) -> String {
     let model = cx.model;
     let item_by_name = |name: &str| model.find(name).and_then(|id| model.item(id));
@@ -84,6 +85,10 @@ pub fn query(target: &QueryTarget, cx: &QueryCx) -> String {
                 Some(titles) => menus_json(titles),
                 None => MENUS_NO_PERMISSION.to_string(),
             },
+        },
+        QueryTarget::Borders => match item_by_name("borders") {
+            Some(item) => item_json(model, item),
+            None => model.borders.to_json(),
         },
     }
 }

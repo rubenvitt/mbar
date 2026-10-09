@@ -6,6 +6,7 @@
 //! `runtime.rs` (WP-C) and `group.rs`.
 
 use crate::bar::{BarProps, BarState};
+use crate::borders::BordersState;
 use crate::event::CustomEvents;
 use crate::item::{BarItem, ItemId, ItemType, Position};
 use crate::platform::{ImageInfo, Resources};
@@ -35,6 +36,9 @@ pub struct Model {
     pub might_need_clipping: bool,
     /// Window z-order must be refreshed.
     pub needs_ordering: bool,
+    /// Window-borders configuration (`--borders`, extension; `docs/spec/borders.md`).
+    /// Reset by `--reload` with the rest of the model.
+    pub borders: BordersState,
     next_id: u64,
     /// `ItemId` → index into `items` (PERF-8). `items` is a public `Vec` that the runtime
     /// reorders, inserts into and removes from directly, so the map is never trusted: every
@@ -74,6 +78,7 @@ impl Model {
             bar_needs_resize: false,
             might_need_clipping: false,
             needs_ordering: false,
+            borders: BordersState::default(),
             next_id: 1,
             index: RefCell::new(ItemIndex::default()),
         }

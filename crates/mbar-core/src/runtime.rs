@@ -23,6 +23,7 @@
 
 use crate::animation::{self, AnimStep, Animator};
 use crate::bar::{BarState, DISPLAY_MAIN};
+use crate::borders::{BordersState, UpdateMask};
 use crate::command::{
     self, AddCommand, Command, MenuBarAction, MonitorMode, Placement, QueryTarget, Selector,
     SetToken,
@@ -976,6 +977,10 @@ impl Runtime {
                 }
                 false
             }
+            Command::Borders { pairs, malformed } => {
+                self.exec_borders(&pairs, malformed.as_deref(), rsp, effects);
+                false
+            }
         }
     }
 
@@ -1210,6 +1215,32 @@ impl Runtime {
             );
         }
         refresh
+    }
+
+    /// `--borders` (extension, `docs/spec/borders.md` BR-IPC-07): applies the pairs to
+    /// `model.borders` and sends one `PlatformRequest::SetBorders` when the configuration
+    /// changed. A list that is only a malformed token applies nothing (so a typo does not
+    /// count as the first, drawing-enabling message).
+    fn exec_borders(
+        &mut self,
+        pairs: &[(String, String)],
+        malformed: Option<&str>,
+        rsp: &mut String,
+        effects: &mut Vec<Effect>,
+    ) {
+        if !(pairs.is_empty() && malformed.is_some()) {
+            if let Some(update) = self.model.borders.apply(pairs, rsp) {
+                effects.push(Effect::Platform(PlatformRequest::SetBorders(Box::new(
+                    update,
+                ))));
+            }
+        }
+        if let Some(t) = malformed {
+            let _ = write!(
+                rsp,
+                "[!] Borders: Expected <key>=<value> pair, but got: '{t}'\n"
+            );
+        }
     }
 
     /// Merges setter side effects into the model (and starts media events).
@@ -1741,8 +1772,9 @@ impl Runtime {
     }
 
     /// `--reload` / hotload (`cli.md` §11): mach helpers get `"k"`, animations dropped, model
-    /// re-initialised (events back to built-ins, listeners kept), bars recreated,
-    /// `Effect::RunConfig`.
+    /// re-initialised (events back to built-ins, listeners kept; borders configuration reset,
+    /// with `SetBorders { drawing: false, mask: RECREATE_ALL }` when they were drawing), bars
+    /// recreated, `Effect::RunConfig`.
     fn reload(&mut self, path: Option<String>, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
         self.send_mach_destroy(effects);
         for it in &self.model.items {
@@ -1758,6 +1790,12 @@ impl Runtime {
             }
         }
         self.animator.clear();
+        if self.model.borders.drawing {
+            // The config runs again from a reset borders configuration; remove the border
+            // windows until a `--borders` message turns them on again.
+            let off = BordersState::default().update(UpdateMask(UpdateMask::RECREATE_ALL));
+            effects.push(Effect::Platform(PlatformRequest::SetBorders(Box::new(off))));
+        }
         self.model = Model::new();
         self.anim = None;
         self.sleeps = false;

@@ -76,6 +76,9 @@ pub enum QueryTarget {
     Stats,
     /// Extension `--query menus` (an existing item named `menus` still wins).
     Menus,
+    /// Extension `--query borders`: the window-borders configuration (an existing item
+    /// named `borders` still wins).
+    Borders,
 }
 
 /// `--monitor [events|stats|all]` (extension).
@@ -197,6 +200,13 @@ pub enum Command {
     Menu(String),
     /// Extension `--menubar hide|show|toggle` (`None` = invalid argument).
     MenuBar(Option<MenuBarAction>),
+    /// Extension `--borders k=v …` (Mode A like `--bar`, JankyBorders keys,
+    /// `docs/spec/borders.md` §2.3); `malformed` →
+    /// `[!] Borders: Expected <key>=<value> pair, but got: '<tok>'\n`.
+    Borders {
+        pairs: Vec<(String, String)>,
+        malformed: Option<String>,
+    },
 }
 
 /// Cursor over the argv with SketchyBar's `get_token` semantics (`cli.md` §3.1): once the
@@ -276,7 +286,7 @@ impl<'a> Tokens<'a> {
     }
 }
 
-/// Mode A list of `--bar`/`--default`: stops (and reports) at the first token without `=`.
+/// Mode A list of `--bar`/`--default`/`--borders`: stops (and reports) at the first token without `=`.
 fn pair_list(t: &mut Tokens) -> (Vec<(String, String)>, Option<String>) {
     let mut pairs = Vec::new();
     let mut token = t.next_token();
@@ -337,6 +347,10 @@ pub fn parse(args: &[String]) -> Vec<Command> {
             "--bar" => {
                 let (pairs, malformed) = pair_list(&mut t);
                 Command::Bar { pairs, malformed }
+            }
+            "--borders" => {
+                let (pairs, malformed) = pair_list(&mut t);
+                Command::Borders { pairs, malformed }
             }
             "--animate" => {
                 let curve = Curve::from_token(t.next_token());
@@ -417,6 +431,7 @@ fn batch_command(command: &str, line: &[&str]) -> Command {
             "displays" => QueryTarget::Displays,
             "stats" => QueryTarget::Stats,
             "menus" => QueryTarget::Menus,
+            "borders" => QueryTarget::Borders,
             other => QueryTarget::Name(other.to_string()),
         }),
         "--reorder" => Command::Reorder(rest(0)),
