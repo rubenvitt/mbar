@@ -216,3 +216,95 @@ fn late_global_handler_gets_the_state_once() {
     assert!(cb[0].1.contains(&("MIC".to_string(), "com.a".to_string())));
     assert!(callbacks(&on(&mut h, 2)).is_empty(), "already registered");
 }
+
+fn x_of(h: &mut H, item: &str) -> f64 {
+    h.query(&["item", item])["bounding_rects"]["display-1"]["origin"][0]
+        .as_f64()
+        .unwrap()
+}
+
+fn clock_bar(h: &mut H) {
+    h.msg(&[
+        "--add",
+        "item",
+        "clock",
+        "right",
+        "--set",
+        "clock",
+        "label=12:00",
+    ]);
+    h.msg(&["--add", "item", "left", "left", "--set", "left", "label=L"]);
+}
+
+#[test]
+fn inset_moves_right_items_left_of_the_dot() {
+    let mut h = H::new();
+    clock_bar(&mut h);
+    let (x0, l0) = (x_of(&mut h, "clock"), x_of(&mut h, "left"));
+    h.msg(&["--bar", "privacy_indicator_inset=on"]);
+    feed(&mut h, sample(true, &[]));
+    // Display 1920 wide, dot at 1892: the right edge moves 28 pt left.
+    assert_eq!(x_of(&mut h, "clock"), x0 - 28.0);
+    assert_eq!(x_of(&mut h, "left"), l0, "left items stay");
+    // padding_right stays the gap to the dot.
+    h.msg(&["--bar", "padding_right=10"]);
+    let with_dot = x_of(&mut h, "clock");
+    feed(&mut h, sample(false, &[]));
+    assert_eq!(
+        x_of(&mut h, "clock"),
+        with_dot + 28.0,
+        "dot gone: back to the edge"
+    );
+}
+
+#[test]
+fn no_inset_when_off_or_not_overlapping() {
+    let mut h = H::new();
+    clock_bar(&mut h);
+    let x0 = x_of(&mut h, "clock");
+    // Detection started by a subscription; the property stays off. (`w` is added after
+    // `clock`, so it sits left of it and does not move it.)
+    add_watcher(&mut h, "w");
+    feed(&mut h, sample(true, &[]));
+    assert_eq!(x_of(&mut h, "clock"), x0, "property off");
+    // Property on, but the dot does not intersect the bar (another display).
+    h.msg(&["--bar", "privacy_indicator_inset=on"]);
+    feed(
+        &mut h,
+        Input::PrivacyIndicator(PrivacySample {
+            visible: true,
+            frames: vec![Rect::new(3000.0, 500.0, 28.0, 28.0)],
+            attributions: None,
+        }),
+    );
+    assert_eq!(x_of(&mut h, "clock"), x0, "no overlap");
+    // A bottom bar does not meet a dot at the top.
+    feed(&mut h, sample(true, &[]));
+    h.msg(&["--bar", "position=bottom"]);
+    let mut plain = H::new();
+    clock_bar(&mut plain);
+    plain.msg(&["--add", "item", "w", "right"]);
+    plain.msg(&["--bar", "position=bottom"]);
+    assert_eq!(
+        x_of(&mut h, "clock"),
+        x_of(&mut plain, "clock"),
+        "bottom bar"
+    );
+}
+
+#[test]
+fn inset_smaller_than_padding_does_not_panic() {
+    let mut h = H::new();
+    clock_bar(&mut h);
+    h.msg(&["--bar", "privacy_indicator_inset=on"]);
+    feed(
+        &mut h,
+        Input::PrivacyIndicator(PrivacySample {
+            visible: true,
+            frames: vec![Rect::new(5.0, 0.0, 28.0, 100.0)],
+            attributions: None,
+        }),
+    );
+    // Right items overflow; SketchyBar's rule puts them at the edge. No panic, finite x.
+    assert!(x_of(&mut h, "clock").is_finite());
+}
