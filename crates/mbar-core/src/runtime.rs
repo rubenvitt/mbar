@@ -250,8 +250,8 @@ pub struct Runtime {
     /// does not change an item's sample neither re-applies its label nor runs its script.
     aerospace_applied: HashMap<ItemId, Vec<(String, String)>>,
     /// Late subscribers to built-in events (`aerospace_*`, `privacy_indicator_change`) that
-    /// get the stored state as a synthetic event at the end of the current input (after layout, so `updates=when_shown`
-    /// gating sees the item's real visibility).
+    /// get the stored state as a synthetic event at the end of the current input (after
+    /// layout, so `updates=when_shown` gating sees the item's real visibility).
     initial_events: Vec<(Listener, &'static str)>,
     /// Item-less in-process handlers (`LuaRequest::On`): `(event, handler)` in
     /// registration order. Cleared by `--reload`.
@@ -885,7 +885,8 @@ impl Runtime {
             }
             Command::AddEvent { name, notification } => {
                 // The AeroSpace events and `privacy_indicator_change` are built in
-                // (delivered by the core, aerospace design §Events): the SketchyBar recipe's
+                // (delivered by the core, aerospace and privacy-indicator designs
+                // §Events): the SketchyBar recipe's
                 // `--add event aerospace_workspace_change [<notification>]` registers the
                 // name as before (same bit, `--trigger` keeps working) but never observes a
                 // notification.
@@ -3595,7 +3596,7 @@ impl Runtime {
         }
     }
 
-    /// Delivers the queued synthetic AeroSpace events, each to its subscriber only (item
+    /// Delivers the queued synthetic built-in events, each to its subscriber only (item
     /// gating as for a real event). Returns whether anything was queued.
     fn flush_initial(&mut self, effects: &mut Vec<Effect>) -> bool {
         if self.initial_events.is_empty() {

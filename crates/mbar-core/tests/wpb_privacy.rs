@@ -305,6 +305,10 @@ fn inset_smaller_than_padding_does_not_panic() {
             attributions: None,
         }),
     );
-    // Right items overflow; SketchyBar's rule puts them at the edge. No panic, finite x.
-    assert!(x_of(&mut h, "clock").is_finite());
+    // The dot starts 5 pt from the left edge, so the right limit (5 pt) is smaller than the
+    // item (44 pt). SketchyBar's overflow rule (`place_cursor`: the wrapped candidate loses
+    // against `limit - len`, negative -> 0) leaves the cursor at 0 and the item hugs the
+    // right display edge (1920 - 44) instead of the 1856 it has with its default
+    // padding. No panic, no negative position.
+    assert_eq!(x_of(&mut h, "clock"), 1876.0);
 }

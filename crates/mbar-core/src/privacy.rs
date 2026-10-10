@@ -104,20 +104,44 @@ pub fn parse_log_message(msg: &str) -> Option<Attributions> {
         } else {
             part
         };
-        let (kind, rest) = entry.split_once(']')?;
-        let open = rest.rfind('(')?;
-        let bundle = rest[open + 1..].strip_suffix(')')?;
+        let (kind, bundle) = parse_sorted_entry(entry)?;
         out.push(kind, bundle);
     }
     Some(out.normalized())
+}
+
+/// One `Sorted` entry without its leading `[`: `<kind>] <name> (<bundle>)`. The bundle id
+/// is anchored at the end and must match `[A-Za-z0-9._-]+`; the name may contain
+/// balanced parentheses only, so a crafted name cannot fake further entries.
+fn parse_sorted_entry(entry: &str) -> Option<(&str, &str)> {
+    let (kind, rest) = entry.split_once(']')?;
+    if kind.is_empty() || !kind.bytes().all(|b| b.is_ascii_alphabetic()) {
+        return None;
+    }
+    let rest = rest.strip_prefix(' ')?.strip_suffix(')')?;
+    let open = rest.rfind('(')?;
+    let bundle = &rest[open + 1..];
+    let strict = !bundle.is_empty()
+        && bundle
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    let name = rest[..open].strip_suffix(' ')?;
+    let mut depth = 0u32;
+    for b in name.bytes() {
+        match b {
+            b'(' => depth += 1,
+            b')' => depth = depth.checked_sub(1)?,
+            _ => {}
+        }
+    }
+    (strict && depth == 0).then_some((kind, bundle))
 }
 
 /// One line of `log stream` / `log show` with `--style ndjson`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamLine {
     Attributions(Attributions),
-    /// The message starts with one of the two prefixes but the rest does not parse:
-    /// the format changed.
+    /// The `changed to` message does not parse: the format changed.
     Unparsed,
     /// Anything else (the leading `Filtering the log data using …` line, …).
     Other,
@@ -132,9 +156,9 @@ pub fn classify_stream_line(line: &str) -> StreamLine {
     };
     match parse_log_message(msg) {
         Some(a) => StreamLine::Attributions(a),
-        None if msg.starts_with(CHANGED_PREFIX) || msg.starts_with(SORTED_PREFIX) => {
-            StreamLine::Unparsed
-        }
+        // Only the JSON line signals format drift; a `Sorted` line that does not parse
+        // strictly (odd display names) is ignored.
+        None if msg.starts_with(CHANGED_PREFIX) => StreamLine::Unparsed,
         None => StreamLine::Other,
     }
 }
@@ -300,6 +324,9 @@ pub struct Tracker {
     line_parsed: bool,
     last_line_at: Option<Instant>,
     attributions: Attributions,
+    /// A line or the history of the current spawn was seen at least once. Never reset
+    /// (a restart keeps the last known attributions): until then they are unknown.
+    attributions_known: bool,
     /// The format check failed; cleared by the next parsed line.
     drift: bool,
     /// At least one window check ran.
@@ -326,6 +353,7 @@ impl Tracker {
             line_parsed: false,
             last_line_at: None,
             attributions: Attributions::default(),
+            attributions_known: false,
             drift: false,
             checked: false,
             last_check_at: None,
@@ -362,13 +390,19 @@ impl Tracker {
                 self.backoff = (self.backoff * 2).min(BACKOFF_MAX);
             }
             TrackerInput::Line(a) => {
+                // An unchanged line (the `Sorted` twin of a `changed to` line) moves
+                // nothing: no burst, unless it is the first of this stream.
+                let burst = !self.line_parsed || a != self.attributions;
                 self.attributions = a;
                 self.line_parsed = true;
+                self.attributions_known = true;
                 self.last_line_at = Some(now);
                 self.drift = false;
                 self.backoff = BACKOFF_MIN;
-                for d in BURST {
-                    self.schedule(now + d);
+                if burst {
+                    for d in BURST {
+                        self.schedule(now + d);
+                    }
                 }
             }
             TrackerInput::Unparsed => {
@@ -377,13 +411,18 @@ impl Tracker {
                 }
                 self.schedule(now);
             }
-            TrackerInput::History(spawn, Some(a)) if spawn == self.spawns && !self.line_parsed => {
-                self.attributions = a;
-                self.line_parsed = true;
-                // Counts as a parsed line for the format check (the window may have
-                // turned on before `log stream` subscribed).
-                self.last_line_at = Some(now);
-                self.drift = false;
+            TrackerInput::History(spawn, history) if spawn == self.spawns => {
+                // "Nothing in the window" is a real answer too, and keeps the previous
+                // attributions (the window only covers the time since the last stream).
+                self.attributions_known = true;
+                if let (Some(a), false) = (history, self.line_parsed) {
+                    self.attributions = a;
+                    self.line_parsed = true;
+                    // Counts as a parsed line for the format check (the window may have
+                    // turned on before `log stream` subscribed).
+                    self.last_line_at = Some(now);
+                    self.drift = false;
+                }
             }
             TrackerInput::History(_, _) => {}
             TrackerInput::Windows(frames) => self.windows(normalize(frames), now),
@@ -452,7 +491,8 @@ impl Tracker {
         PrivacySample {
             visible: self.visible,
             frames: self.frames.clone(),
-            attributions: (self.stream_running && !self.drift).then(|| self.attributions.clone()),
+            attributions: (self.stream_running && !self.drift && self.attributions_known)
+                .then(|| self.attributions.clone()),
         }
     }
 }
@@ -566,6 +606,29 @@ mod tests {
             parse_log_message("Dependent controller changed: sensor indicators"),
             None
         );
+    }
+
+    #[test]
+    fn sorted_lines_with_odd_names_are_not_format_drift() {
+        let pre = "Sorted active attributions from SystemStatus update: ";
+        // A display name containing ", [" cannot be told apart from an entry boundary.
+        let line = format!("{pre}[[mic] Odd, [Name (com.example.odd)]");
+        assert_eq!(parse_log_message(&line), None);
+        let json = serde_json::json!({ "eventMessage": line }).to_string();
+        assert_eq!(classify_stream_line(&json), StreamLine::Other);
+        // A name that opens a parenthesis and fakes the next entry.
+        let line = format!("{pre}[[mic] X (a), [cam] Fake (com.apple.FaceTime (real.app)]");
+        assert_eq!(parse_log_message(&line), None);
+        // Bundles outside the strict charset are rejected.
+        let line = format!("{pre}[[cam] Fake (com apple)]");
+        assert_eq!(parse_log_message(&line), None);
+        let line = format!("{pre}[[cam] Fake ()]");
+        assert_eq!(parse_log_message(&line), None);
+        // The change line stays the drift signal.
+        let json =
+            serde_json::json!({ "eventMessage": "Active activity attributions changed to {}" })
+                .to_string();
+        assert_eq!(classify_stream_line(&json), StreamLine::Unparsed);
     }
 
     #[test]
@@ -746,6 +809,7 @@ mod tests {
         let t = Instant::now();
         let mut tr = started(t);
         tr.handle(TrackerInput::Windows(vec![f(2025.0)]), t);
+        tr.handle(TrackerInput::History(1, None), ms(t, 500));
         tr.handle(TrackerInput::Windows(vec![f(2025.0)]), ms(t, 10_000));
         tr.handle(TrackerInput::Windows(vec![f(2025.0)]), ms(t, 20_000));
         assert!(tr.sample().attributions.is_some());
@@ -910,6 +974,67 @@ mod tests {
         // The history of spawn 2 applies: no live line has come yet.
         tr.handle(TrackerInput::History(2, Some(h2.clone())), ms(t, 3_500));
         assert_eq!(tr.sample().attributions, Some(h2));
+    }
+
+    #[test]
+    fn attribution_waits_for_history_or_line() {
+        let t = Instant::now();
+        let mut tr = started(t);
+        tr.handle(TrackerInput::Windows(vec![]), t);
+        assert_eq!(tr.sample().attributions, None);
+        tr.handle(TrackerInput::History(1, None), ms(t, 5_000));
+        assert_eq!(tr.sample().attributions, Some(Attributions::default()));
+        // A history of another spawn does not count.
+        let mut tr = started(t);
+        tr.handle(TrackerInput::Windows(vec![]), t);
+        tr.handle(TrackerInput::History(7, None), ms(t, 5_000));
+        assert_eq!(tr.sample().attributions, None);
+        // A live line does.
+        tr.handle(TrackerInput::Line(Attributions::default()), ms(t, 6_000));
+        assert_eq!(tr.sample().attributions, Some(Attributions::default()));
+    }
+
+    #[test]
+    fn restart_keeps_attributions_known() {
+        let t = Instant::now();
+        let mut tr = started(t);
+        tr.handle(TrackerInput::Windows(vec![]), t);
+        tr.handle(TrackerInput::History(1, None), ms(t, 1_000));
+        tr.handle(TrackerInput::StreamExited, ms(t, 2_000));
+        assert_eq!(tr.sample().attributions, None, "stream down");
+        tr.handle(TrackerInput::StreamStarted, ms(t, 3_000));
+        assert_eq!(tr.sample().attributions, Some(Attributions::default()));
+    }
+
+    #[test]
+    fn history_none_keeps_previous_attributions() {
+        let t = Instant::now();
+        let m = a(&["m"], &[], &[], &[], &[]);
+        let mut tr = started(t);
+        tr.handle(TrackerInput::Line(m.clone()), ms(t, 1_000));
+        tr.handle(TrackerInput::StreamExited, ms(t, 2_000));
+        tr.handle(TrackerInput::StreamStarted, ms(t, 3_000));
+        // Nothing logged in the gap: the previous state still holds.
+        tr.handle(TrackerInput::History(2, None), ms(t, 3_500));
+        assert_eq!(tr.sample().attributions, Some(m));
+    }
+
+    #[test]
+    fn unchanged_line_skips_the_burst() {
+        let t = Instant::now();
+        let m = a(&["m"], &[], &[], &[], &[]);
+        let mut tr = started(t);
+        tr.handle(TrackerInput::Windows(vec![]), t);
+        tr.handle(TrackerInput::Line(m.clone()), ms(t, 1_000));
+        for at in [1_000, 1_300, 2_000, 3_000] {
+            tr.handle(TrackerInput::Windows(vec![]), ms(t, at));
+        }
+        // The same attributions again (a Sorted line after the Change line).
+        tr.handle(TrackerInput::Line(m.clone()), ms(t, 4_000));
+        assert_eq!(tr.next_check(), Some(ms(t, 13_000)), "only the safety poll");
+        // A change brings the burst back.
+        tr.handle(TrackerInput::Line(Attributions::default()), ms(t, 5_000));
+        assert_eq!(tr.next_check(), Some(ms(t, 5_000)));
     }
 
     #[test]
