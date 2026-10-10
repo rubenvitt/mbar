@@ -7,6 +7,7 @@ use crate::geometry::Rect;
 use crate::value::format_bool;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+use std::time::{Duration, Instant};
 
 /// The built-in event.
 pub const EVENT_NAME: &str = "privacy_indicator_change";
@@ -245,6 +246,203 @@ impl PrivacyState {
     }
 }
 
+// ----------------------------------------------------------------------------------
+// Tracker (design §mbar-core: `Tracker`)
+// ----------------------------------------------------------------------------------
+
+/// Window checks after a parsed line: the window fades in and out (about 0.8 s).
+pub const BURST: [Duration; 4] = [
+    Duration::from_millis(0),
+    Duration::from_millis(300),
+    Duration::from_millis(1_000),
+    Duration::from_millis(2_000),
+];
+/// Re-check after frames changed, and the safety poll while the stream is down.
+pub const POLL: Duration = Duration::from_secs(2);
+/// Safety poll while the stream runs (bounds a stale frame, notices a dot that
+/// Control Center stopped logging).
+pub const POLL_SLOW: Duration = Duration::from_secs(10);
+/// A hidden→visible change needs a parsed line within this distance (format check).
+pub const LINE_WINDOW: Duration = Duration::from_secs(3);
+pub const BACKOFF_MIN: Duration = Duration::from_secs(1);
+pub const BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// What the platform tells the [`Tracker`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrackerInput {
+    /// `log stream` was spawned.
+    StreamStarted,
+    /// `log stream` exited or could not be spawned.
+    StreamExited,
+    /// A parsed line from `log stream`.
+    Line(Attributions),
+    /// A line with a known prefix that did not parse.
+    Unparsed,
+    /// The newest parsed line of the `log show` run after a spawn (`None`: none found).
+    History(Option<Attributions>),
+    /// The indicator windows found by a window check.
+    Windows(Vec<Rect>),
+    /// Display reconfiguration or wake: check the windows now.
+    Nudge,
+}
+
+/// The detection's rules, driven with explicit times so they are testable anywhere.
+/// The platform spawns `log stream` at [`Tracker::restart_at`], looks at the windows at
+/// [`Tracker::next_check`] and posts [`Tracker::sample`] when it changed.
+#[derive(Debug, Clone)]
+pub struct Tracker {
+    stream_running: bool,
+    restart_at: Option<Instant>,
+    backoff: Duration,
+    /// A stream line (or the history) parsed since the stream (re)started.
+    line_parsed: bool,
+    last_line_at: Option<Instant>,
+    attributions: Attributions,
+    /// The format check failed; cleared by the next parsed line.
+    drift: bool,
+    /// At least one window check ran.
+    checked: bool,
+    last_check_at: Option<Instant>,
+    visible: bool,
+    frames: Vec<Rect>,
+    /// Pending window checks.
+    checks: Vec<Instant>,
+    /// Hidden→visible seen: `(earliest acceptable line, evaluate at)`.
+    pending_format_check: Option<(Instant, Instant)>,
+}
+
+impl Tracker {
+    pub fn new(now: Instant) -> Tracker {
+        Tracker {
+            stream_running: false,
+            restart_at: Some(now),
+            backoff: BACKOFF_MIN,
+            line_parsed: false,
+            last_line_at: None,
+            attributions: Attributions::default(),
+            drift: false,
+            checked: false,
+            last_check_at: None,
+            visible: false,
+            frames: Vec::new(),
+            checks: vec![now],
+            pending_format_check: None,
+        }
+    }
+
+    pub fn handle(&mut self, input: TrackerInput, now: Instant) {
+        match input {
+            TrackerInput::StreamStarted => {
+                self.stream_running = true;
+                self.restart_at = None;
+                self.line_parsed = false;
+                self.drift = false;
+            }
+            TrackerInput::StreamExited => {
+                self.stream_running = false;
+                self.pending_format_check = None;
+                self.restart_at = Some(now + self.backoff);
+                self.backoff = (self.backoff * 2).min(BACKOFF_MAX);
+            }
+            TrackerInput::Line(a) => {
+                self.attributions = a;
+                self.line_parsed = true;
+                self.last_line_at = Some(now);
+                self.drift = false;
+                self.backoff = BACKOFF_MIN;
+                for d in BURST {
+                    self.schedule(now + d);
+                }
+            }
+            TrackerInput::Unparsed => {
+                if self.stream_running {
+                    self.drift = true;
+                }
+                self.schedule(now);
+            }
+            TrackerInput::History(Some(a)) if !self.line_parsed => {
+                self.attributions = a;
+                self.line_parsed = true;
+            }
+            TrackerInput::History(_) => {}
+            TrackerInput::Windows(frames) => self.windows(normalize(frames), now),
+            TrackerInput::Nudge => self.schedule(now),
+        }
+    }
+
+    fn schedule(&mut self, at: Instant) {
+        if !self.checks.contains(&at) {
+            self.checks.push(at);
+        }
+    }
+
+    fn windows(&mut self, frames: Vec<Rect>, now: Instant) {
+        self.checks.retain(|t| *t > now);
+        let visible = !frames.is_empty();
+        if !visible {
+            self.pending_format_check = None;
+        } else if !self.visible && self.checked && self.stream_running {
+            let prev = self.last_check_at.unwrap_or(now);
+            let since = prev.checked_sub(LINE_WINDOW).unwrap_or(prev);
+            let at = now + LINE_WINDOW;
+            self.pending_format_check = Some((since, at));
+            self.schedule(at);
+        }
+        if let Some((since, at)) = self.pending_format_check {
+            if now >= at {
+                self.pending_format_check = None;
+                if self.stream_running && !self.last_line_at.is_some_and(|l| l >= since) {
+                    self.drift = true;
+                }
+            }
+        }
+        if self.checked && frames != self.frames {
+            self.schedule(now + POLL);
+        }
+        self.visible = visible;
+        self.frames = frames;
+        self.checked = true;
+        self.last_check_at = Some(now);
+    }
+
+    /// When to spawn `log stream` (again).
+    pub fn restart_at(&self) -> Option<Instant> {
+        self.restart_at
+    }
+
+    /// When to look at the windows next.
+    pub fn next_check(&self) -> Option<Instant> {
+        let interval = if self.stream_running { POLL_SLOW } else { POLL };
+        let poll = self.last_check_at.map(|t| t + interval);
+        self.checks.iter().copied().chain(poll).min()
+    }
+
+    /// A window check ran (before that, [`Tracker::sample`] knows nothing).
+    pub fn ready(&self) -> bool {
+        self.checked
+    }
+
+    pub fn sample(&self) -> PrivacySample {
+        PrivacySample {
+            visible: self.visible,
+            frames: self.frames.clone(),
+            attributions: (self.stream_running && !self.drift).then(|| self.attributions.clone()),
+        }
+    }
+}
+
+/// Non-empty frames, sorted, without duplicates.
+fn normalize(mut frames: Vec<Rect>) -> Vec<Rect> {
+    frames.retain(|f| !f.is_empty());
+    frames.sort_by(|a, b| {
+        (a.x, a.y, a.width, a.height)
+            .partial_cmp(&(b.x, b.y, b.width, b.height))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    frames.dedup();
+    frames
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,5 +639,196 @@ mod tests {
         let q: serde_json::Value = serde_json::from_str(&q).unwrap();
         assert_eq!(q["inset"], "on");
         assert_eq!(q["visible"], "off");
+    }
+
+    fn ms(t: Instant, ms: u64) -> Instant {
+        t + Duration::from_millis(ms)
+    }
+    fn f(x: f32) -> Rect {
+        Rect::new(x, 3.0, 28.0, 28.0)
+    }
+    fn started(t: Instant) -> Tracker {
+        let mut tr = Tracker::new(t);
+        tr.handle(TrackerInput::StreamStarted, t);
+        tr
+    }
+
+    #[test]
+    fn starts_by_spawning_and_checking() {
+        let t = Instant::now();
+        let tr = Tracker::new(t);
+        assert_eq!(tr.restart_at(), Some(t));
+        assert_eq!(tr.next_check(), Some(t));
+        assert!(!tr.ready());
+    }
+
+    #[test]
+    fn history_after_live_line_is_ignored() {
+        let t = Instant::now();
+        let new = a(&["new"], &[], &[], &[], &[]);
+        let old = a(&["old"], &[], &[], &[], &[]);
+        let mut tr = started(t);
+        tr.handle(TrackerInput::Line(new.clone()), t);
+        tr.handle(TrackerInput::History(Some(old.clone())), ms(t, 500));
+        tr.handle(TrackerInput::Windows(vec![]), ms(t, 600));
+        assert_eq!(tr.sample().attributions, Some(new));
+        // Before any live line the history applies.
+        let mut tr = started(t);
+        tr.handle(TrackerInput::History(Some(old.clone())), t);
+        tr.handle(TrackerInput::Windows(vec![]), t);
+        assert_eq!(tr.sample().attributions, Some(old));
+    }
+
+    #[test]
+    fn line_schedules_a_burst_of_checks() {
+        let t = Instant::now();
+        let mut tr = started(t);
+        tr.handle(TrackerInput::Windows(vec![]), t);
+        tr.handle(TrackerInput::Line(Attributions::default()), ms(t, 5_000));
+        for at in [5_000, 5_300, 6_000, 7_000] {
+            assert_eq!(tr.next_check(), Some(ms(t, at)));
+            tr.handle(TrackerInput::Windows(vec![]), ms(t, at));
+        }
+        // Then only the safety poll, 10 s after the last check.
+        assert_eq!(tr.next_check(), Some(ms(t, 17_000)));
+    }
+
+    #[test]
+    fn moving_frame_settles() {
+        let t = Instant::now();
+        let mut tr = started(t);
+        tr.handle(TrackerInput::Windows(vec![f(2025.0)]), t);
+        tr.handle(TrackerInput::Line(Attributions::default()), ms(t, 1_000));
+        tr.handle(TrackerInput::Windows(vec![f(2025.0)]), ms(t, 1_000));
+        tr.handle(TrackerInput::Windows(vec![f(2029.0)]), ms(t, 1_300));
+        // Changed: checked again 2 s later (and the burst continues).
+        tr.handle(TrackerInput::Windows(vec![f(2029.0)]), ms(t, 2_000));
+        tr.handle(TrackerInput::Windows(vec![f(2029.0)]), ms(t, 3_000));
+        tr.handle(TrackerInput::Windows(vec![f(2029.0)]), ms(t, 3_300));
+        assert_eq!(tr.next_check(), Some(ms(t, 13_300)), "stable: safety poll");
+        tr.handle(TrackerInput::Windows(vec![f(2025.0)]), ms(t, 13_300));
+        assert_eq!(tr.sample().frames, vec![f(2025.0)]);
+        assert_eq!(
+            tr.next_check(),
+            Some(ms(t, 15_300)),
+            "changed again: re-check in 2 s"
+        );
+    }
+
+    #[test]
+    fn visible_at_startup_does_not_trip_format_check() {
+        let t = Instant::now();
+        let mut tr = started(t);
+        tr.handle(TrackerInput::Windows(vec![f(2025.0)]), t);
+        tr.handle(TrackerInput::Windows(vec![f(2025.0)]), ms(t, 10_000));
+        tr.handle(TrackerInput::Windows(vec![f(2025.0)]), ms(t, 20_000));
+        assert!(tr.sample().attributions.is_some());
+    }
+
+    #[test]
+    fn renamed_message_trips_format_check() {
+        let t = Instant::now();
+        let mut tr = started(t);
+        tr.handle(TrackerInput::Windows(vec![]), t);
+        // The safety poll finds the dot; no line came.
+        tr.handle(TrackerInput::Windows(vec![f(2025.0)]), ms(t, 10_000));
+        assert_eq!(
+            tr.next_check(),
+            Some(ms(t, 12_000)),
+            "frames changed: re-check"
+        );
+        tr.handle(TrackerInput::Windows(vec![f(2025.0)]), ms(t, 12_000));
+        assert_eq!(
+            tr.next_check(),
+            Some(ms(t, 13_000)),
+            "format check 3 s after"
+        );
+        tr.handle(TrackerInput::Windows(vec![f(2025.0)]), ms(t, 13_000));
+        assert_eq!(tr.sample().attributions, None);
+        // The next parsed line turns it back on.
+        tr.handle(TrackerInput::Line(Attributions::default()), ms(t, 20_000));
+        assert!(tr.sample().attributions.is_some());
+    }
+
+    #[test]
+    fn working_stream_does_not_trip_format_check() {
+        let t = Instant::now();
+        let mut tr = started(t);
+        tr.handle(TrackerInput::Windows(vec![]), t);
+        // The change line comes first, the window right after.
+        tr.handle(
+            TrackerInput::Line(a(&[], &["cam"], &[], &[], &[])),
+            ms(t, 9_500),
+        );
+        tr.handle(TrackerInput::Windows(vec![f(2025.0)]), ms(t, 9_500));
+        tr.handle(TrackerInput::Windows(vec![f(2025.0)]), ms(t, 12_500));
+        assert!(tr.sample().attributions.is_some());
+        // A line seen shortly before the previous (hidden) check counts too.
+        let mut tr = started(t);
+        tr.handle(TrackerInput::Windows(vec![]), t);
+        tr.handle(TrackerInput::Line(Attributions::default()), ms(t, 8_000));
+        tr.handle(TrackerInput::Windows(vec![]), ms(t, 10_000));
+        tr.handle(TrackerInput::Windows(vec![f(2025.0)]), ms(t, 20_000));
+        tr.handle(TrackerInput::Windows(vec![f(2025.0)]), ms(t, 23_000));
+        assert!(tr.sample().attributions.is_some());
+    }
+
+    #[test]
+    fn unparsed_line_trips_at_once() {
+        let t = Instant::now();
+        let mut tr = started(t);
+        tr.handle(TrackerInput::Windows(vec![]), t);
+        tr.handle(TrackerInput::Unparsed, ms(t, 1_000));
+        assert_eq!(tr.sample().attributions, None);
+        assert_eq!(
+            tr.next_check(),
+            Some(ms(t, 1_000)),
+            "and the window is checked"
+        );
+    }
+
+    #[test]
+    fn stream_exits_back_off_and_poll_fast() {
+        let t = Instant::now();
+        let mut tr = Tracker::new(t);
+        tr.handle(TrackerInput::StreamExited, t);
+        tr.handle(TrackerInput::Windows(vec![f(2025.0)]), t);
+        assert_eq!(tr.sample().attributions, None);
+        assert_eq!(
+            tr.next_check(),
+            Some(ms(t, 2_000)),
+            "2 s while the stream is down"
+        );
+        let mut expected = [1u64, 2, 4, 8, 16, 30, 30].into_iter();
+        let mut now = t;
+        assert_eq!(
+            tr.restart_at(),
+            Some(ms(now, 1_000 * expected.next().unwrap()))
+        );
+        for delay in expected {
+            now = tr.restart_at().unwrap();
+            tr.handle(TrackerInput::StreamStarted, now);
+            tr.handle(TrackerInput::StreamExited, now);
+            assert_eq!(tr.restart_at(), Some(ms(now, 1_000 * delay)));
+        }
+        // A parsed line resets the backoff.
+        tr.handle(TrackerInput::StreamStarted, now);
+        tr.handle(TrackerInput::Line(Attributions::default()), now);
+        tr.handle(TrackerInput::StreamExited, now);
+        assert_eq!(tr.restart_at(), Some(ms(now, 1_000)));
+    }
+
+    #[test]
+    fn nudge_checks_now_and_frames_are_normalized() {
+        let t = Instant::now();
+        let mut tr = started(t);
+        tr.handle(
+            TrackerInput::Windows(vec![f(2025.0), f(2025.0), Rect::ZERO]),
+            t,
+        );
+        assert_eq!(tr.sample().frames, vec![f(2025.0)]);
+        assert!(tr.ready() && tr.sample().visible);
+        tr.handle(TrackerInput::Nudge, ms(t, 4_000));
+        assert_eq!(tr.next_check(), Some(ms(t, 4_000)));
     }
 }
