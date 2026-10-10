@@ -4,7 +4,10 @@
 //! Covers the SketchyBar take-over (`docs/MIGRATING.md`) and the JankyBorders one
 //! (`docs/superpowers/specs/2026-10-09-borders-design.md` §5): the Homebrew `borders`
 //! formula and service, `borders` binaries and links, `bordersrc` (read in place,
-//! `docs/spec/borders.md` §4) and window-manager lines that launch `borders`.
+//! `docs/spec/borders.md` §4) and window-manager lines that launch `borders`. For
+//! AeroSpace (`docs/superpowers/specs/2026-10-09-aerospace-design.md`) it finds
+//! `exec-on-workspace-change` / `on-*-changed` settings that run SketchyBar triggers
+//! for the `aerospace_*` events mbar now delivers itself.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -636,6 +639,554 @@ fn has_arguments(words: &[String]) -> bool {
         }
     }
     false
+}
+
+// ---------------------------------------------------------------------------
+// AeroSpace (`docs/superpowers/specs/2026-10-09-aerospace-design.md`, "mbar.app")
+// ---------------------------------------------------------------------------
+/// AeroSpace's config files: `~/.aerospace.toml`, `$XDG_CONFIG_HOME/aerospace/aerospace.toml`
+/// (`xdg` is `$XDG_CONFIG_HOME`; empty or relative means unset) and
+/// `~/.config/aerospace/aerospace.toml`. The default location stays in the list when
+/// `XDG_CONFIG_HOME` is set: mbar.app and AeroSpace.app may see different environments.
+pub fn aerospace_configs(home: &Path, xdg: &str) -> Vec<PathBuf> {
+    let mut out = vec![home.join(".aerospace.toml")];
+    if Path::new(xdg).is_absolute() {
+        out.push(Path::new(xdg).join("aerospace/aerospace.toml"));
+    }
+    let default = home.join(".config/aerospace/aerospace.toml");
+    if !out.contains(&default) {
+        out.push(default);
+    }
+    out
+}
+
+/// Whether AeroSpace looks installed: one of its configs exists, or `AeroSpace.app`
+/// does. mbar.app asks the daemon for `--query aerospace` only then.
+pub fn aerospace_installed(home: &Path, xdg: &str) -> bool {
+    aerospace_configs(home, xdg).iter().any(|p| p.is_file())
+        || Path::new("/Applications/AeroSpace.app").exists()
+        || home.join("Applications/AeroSpace.app").exists()
+}
+
+/// Shown after the trigger lines and their advice.
+pub const AEROSPACE_TRIGGER_DOCS: &str = "See docs/MIGRATING.md#using-aerospace.";
+
+/// The AeroSpace settings mbar replaces, and whether their array elements are separate
+/// commands (AeroSpace commands such as `exec-and-forget …`) rather than one argv
+/// (`exec-on-workspace-change`).
+const AEROSPACE_SETTINGS: [(&str, bool); 4] = [
+    ("exec-on-workspace-change", false),
+    ("on-focus-changed", true),
+    ("on-focused-monitor-changed", true),
+    ("on-mode-changed", true),
+];
+
+/// mbar's built-in AeroSpace events and the variables mbar sets for them (besides
+/// `NAME`, `SENDER` and `INFO`); design doc, "Events".
+const AEROSPACE_EVENTS: [(&str, &[&str]); 6] = [
+    (
+        "aerospace_workspace_change",
+        &[
+            "FOCUSED_WORKSPACE",
+            "PREV_WORKSPACE",
+            "AEROSPACE_FOCUSED_WORKSPACE",
+            "AEROSPACE_PREV_WORKSPACE",
+        ],
+    ),
+    (
+        "aerospace_focus_change",
+        &["FOCUSED_WORKSPACE", "WINDOW_ID"],
+    ),
+    (
+        "aerospace_monitor_change",
+        &["FOCUSED_WORKSPACE", "MONITOR_ID"],
+    ),
+    ("aerospace_mode_change", &["MODE"]),
+    (
+        "aerospace_window_detected",
+        &["WINDOW_ID", "WORKSPACE", "APP_BUNDLE_ID", "APP_NAME"],
+    ),
+    ("aerospace_binding_triggered", &["MODE", "BINDING"]),
+];
+
+/// The variables mbar sets for `event`, when it is one of its AeroSpace events.
+fn aerospace_event_vars(event: &str) -> Option<&'static [&'static str]> {
+    AEROSPACE_EVENTS
+        .iter()
+        .find(|(e, _)| *e == event)
+        .map(|(_, vars)| *vars)
+}
+
+/// A `sketchybar --trigger aerospace_…` (or `mbar --trigger …`) in one of the AeroSpace
+/// settings whose events mbar now receives itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AerospaceTrigger {
+    pub file: PathBuf,
+    /// 1-based line with the event name.
+    pub line: usize,
+    /// The setting's first line (the key) and last line (a TOML array may span lines).
+    pub first_line: usize,
+    pub last_line: usize,
+    /// The trigger line as written, trimmed.
+    pub text: String,
+    /// The setting's key, e.g. `exec-on-workspace-change`.
+    pub setting: String,
+    /// The triggered event, e.g. `aerospace_workspace_change`.
+    pub event: String,
+    /// Variables the trigger passes that mbar's own event does not set.
+    pub extra_vars: Vec<String>,
+    /// The setting runs nothing but triggers mbar replaces, so all of it can go; else
+    /// only the trigger command.
+    pub whole_setting: bool,
+}
+
+impl AerospaceTrigger {
+    /// Removing the trigger loses nothing: mbar's event carries all its variables.
+    pub fn removable(&self) -> bool {
+        self.extra_vars.is_empty()
+    }
+
+    /// The advice for the take-over step.
+    pub fn advice(&self) -> String {
+        if !self.removable() {
+            let sent = if self.event == "aerospace_workspace_change" {
+                "FOCUSED_WORKSPACE/PREV_WORKSPACE (and AEROSPACE_ aliases)".to_string()
+            } else {
+                aerospace_event_vars(&self.event)
+                    .unwrap_or_default()
+                    .join("/")
+            };
+            return format!(
+                "mbar sends this event itself, but only with {sent}; your scripts also use \
+                 {} — keep the line or change the scripts.",
+                self.extra_vars.join(", ")
+            );
+        }
+        let what = if !self.whole_setting {
+            format!(
+                "remove only the `--trigger {}` command and keep the rest of this setting \
+                 (it runs other commands too)",
+                self.event
+            )
+        } else if self.first_line == self.last_line {
+            "remove this line".to_string()
+        } else {
+            format!(
+                "remove this setting (lines {}–{})",
+                self.first_line, self.last_line
+            )
+        };
+        let older = match self.event.as_str() {
+            "aerospace_mode_change" => "an older mode",
+            "aerospace_window_detected" | "aerospace_binding_triggered" => "older values",
+            _ => "an older workspace",
+        };
+        format!(
+            "mbar sends {} itself; {what}. The forked trigger arrives 10–50 ms after mbar's \
+             own event and can overwrite it with {older}.",
+            self.event
+        )
+    }
+}
+
+/// The SketchyBar triggers for mbar's AeroSpace events in the AeroSpace configs that
+/// exist under `home` (and `xdg`, see [`aerospace_configs`]).
+pub fn aerospace_triggers(home: &Path, xdg: &str) -> Vec<AerospaceTrigger> {
+    let mut out = Vec::new();
+    for file in aerospace_configs(home, xdg) {
+        if let Ok(content) = std::fs::read_to_string(&file) {
+            out.extend(aerospace_triggers_in(&file, &content));
+        }
+    }
+    out
+}
+
+/// The triggers of one `aerospace.toml` (`file` is only copied into the result):
+/// `sketchybar --trigger <event>` or `mbar --trigger <event>` for one of mbar's six
+/// AeroSpace events, run from `exec-on-workspace-change`, `on-focus-changed`,
+/// `on-focused-monitor-changed` or `on-mode-changed`, directly, through `sh -c` or
+/// `exec-and-forget`. The value may span several lines; comments and other keys do not
+/// count.
+pub fn aerospace_triggers_in(file: &Path, content: &str) -> Vec<AerospaceTrigger> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let Some((setting, elements, value)) = aerospace_setting(lines[i]) else {
+            i += 1;
+            continue;
+        };
+        let (tokens, last) = value_tokens(&lines, i, value);
+        let mut found = Vec::new();
+        let mut other = false;
+        for cmd in split_commands(&tokens, elements) {
+            let (triggers, runs_more) = parse_trigger_command(&cmd);
+            found.extend(triggers);
+            other |= runs_more;
+        }
+        let whole_setting = !other && found.iter().all(|t| t.extra_vars.is_empty());
+        for t in found {
+            out.push(AerospaceTrigger {
+                file: file.to_path_buf(),
+                line: t.line + 1,
+                first_line: i + 1,
+                last_line: last + 1,
+                text: lines[t.line].trim().to_string(),
+                setting: setting.to_string(),
+                event: t.event,
+                extra_vars: t.extra_vars,
+                whole_setting,
+            });
+        }
+        i = last + 1;
+    }
+    out
+}
+
+/// The setting `line` starts (the key may be quoted): its key, whether its array
+/// elements are separate commands, and the rest of the line after `=`.
+fn aerospace_setting(line: &str) -> Option<(&'static str, bool, &str)> {
+    let t = line.trim_start();
+    AEROSPACE_SETTINGS.iter().find_map(|&(key, elements)| {
+        let rest = [key.to_string(), format!("\"{key}\""), format!("'{key}'")]
+            .iter()
+            .find_map(|k| t.strip_prefix(k.as_str()))?;
+        Some((key, elements, rest.trim_start().strip_prefix('=')?))
+    })
+}
+
+/// One trigger found in a command.
+struct FoundTrigger {
+    /// 0-based line of the event name.
+    line: usize,
+    event: String,
+    extra_vars: Vec<String>,
+}
+
+/// `NAME` of a `NAME=value` word.
+fn assignment_name(word: &str) -> Option<&str> {
+    let (name, _) = word.split_once('=')?;
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    ((first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_'))
+    .then_some(name)
+}
+
+/// The command words after wrappers that only start it: `exec-and-forget`, `exec`,
+/// `nohup`, `env` and shells with their options (`/bin/bash -c`), and leading
+/// `NAME=value` assignments.
+fn strip_wrappers(cmd: &[(String, usize)]) -> &[(String, usize)] {
+    let mut i = 0;
+    let mut options = false;
+    while let Some((w, _)) = cmd.get(i) {
+        match w.rsplit('/').next().unwrap_or("") {
+            "exec-and-forget" | "exec" | "nohup" => options = false,
+            "env" | "sh" | "bash" | "zsh" | "dash" | "ksh" | "fish" => options = true,
+            _ if options && w.starts_with('-') => {}
+            _ if assignment_name(w).is_some() => {}
+            _ => break,
+        }
+        i += 1;
+    }
+    &cmd[i..]
+}
+
+/// The AeroSpace triggers of one command, and whether the command does anything else
+/// (another program, another `sketchybar` command such as `--set`, another event).
+fn parse_trigger_command(cmd: &[(String, usize)]) -> (Vec<FoundTrigger>, bool) {
+    let cmd = strip_wrappers(cmd);
+    let Some((first, _)) = cmd.first() else {
+        return (Vec::new(), false);
+    };
+    let program = first.rsplit('/').next().unwrap_or("");
+    if !matches!(program, "sketchybar" | "mbar") {
+        return (Vec::new(), true);
+    }
+    let mut found = Vec::new();
+    // `sketchybar` alone starts the bar; words before the first `--` flag are not a
+    // trigger either.
+    let mut other = cmd.len() == 1 || !cmd[1].0.starts_with("--");
+    let mut i = 1;
+    while i < cmd.len() {
+        let event_vars = (cmd[i].0 == "--trigger")
+            .then(|| cmd.get(i + 1))
+            .flatten()
+            .and_then(|(e, line)| Some((e, *line, aerospace_event_vars(e)?)));
+        let Some((event, line, sent)) = event_vars else {
+            other |= cmd[i].0.starts_with("--");
+            i += 1;
+            continue;
+        };
+        let mut extra_vars: Vec<String> = Vec::new();
+        i += 2;
+        while let Some((w, _)) = cmd.get(i).filter(|(w, _)| !w.starts_with("--")) {
+            if let Some(name) = assignment_name(w) {
+                if !sent.contains(&name) && !extra_vars.iter().any(|v| v == name) {
+                    extra_vars.push(name.to_string());
+                }
+            }
+            i += 1;
+        }
+        found.push(FoundTrigger {
+            line,
+            event: event.clone(),
+            extra_vars,
+        });
+    }
+    (found, other)
+}
+
+/// The commands of a setting's value: words split at shell separators, and at array
+/// elements when `elements` (AeroSpace command lists). Empty commands are dropped.
+fn split_commands(tokens: &[Tok], elements: bool) -> Vec<Vec<(String, usize)>> {
+    let mut out = vec![Vec::new()];
+    for t in tokens {
+        match t {
+            Tok::Word(w, line) => out.last_mut().unwrap().push((w.clone(), *line)),
+            Tok::Sep => out.push(Vec::new()),
+            Tok::Elem if elements => out.push(Vec::new()),
+            Tok::Elem => {}
+        }
+    }
+    out.retain(|c| !c.is_empty());
+    out
+}
+
+/// A token of a TOML value scanned as shell text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Tok {
+    /// A shell word and its 0-based line.
+    Word(String, usize),
+    /// Between two shell commands: `;`, `&`, `|`, `(`, `)` or a line break.
+    Sep,
+    /// The end of a string that is an array element.
+    Elem,
+}
+
+/// Inside a string: a shell construct whose text stays in the current word.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Keep {
+    None,
+    /// `$(…)` with its open parentheses.
+    Subst(usize),
+    /// `` `…` ``.
+    Backtick,
+    /// A quoted value after `NAME=` (`FOCUSED_WORKSPACE="$X"`), up to this quote.
+    Quote(char),
+}
+
+/// Splits the text of TOML strings into shell words and separators.
+struct ShellWords {
+    tokens: Vec<Tok>,
+    word: String,
+    line: usize,
+    keep: Keep,
+    prev: Option<char>,
+}
+
+impl ShellWords {
+    fn flush(&mut self) {
+        if !self.word.is_empty() {
+            self.tokens
+                .push(Tok::Word(std::mem::take(&mut self.word), self.line));
+        }
+    }
+
+    fn sep(&mut self) {
+        self.flush();
+        self.tokens.push(Tok::Sep);
+    }
+
+    /// A string starts or ends: quotes and substitutions do not cross it.
+    fn reset(&mut self) {
+        self.flush();
+        self.keep = Keep::None;
+        self.prev = None;
+    }
+
+    /// One character of shell text; `next` is the one after it, if known.
+    fn push(&mut self, c: char, next: Option<char>) {
+        let prev = self.prev.replace(c);
+        match self.keep {
+            Keep::Subst(depth) => {
+                self.word.push(c);
+                self.keep = match c {
+                    '(' => Keep::Subst(depth + 1),
+                    ')' if depth <= 1 => Keep::None,
+                    ')' => Keep::Subst(depth - 1),
+                    _ => Keep::Subst(depth),
+                };
+                return;
+            }
+            Keep::Backtick => {
+                self.word.push(c);
+                if c == '`' {
+                    self.keep = Keep::None;
+                }
+                return;
+            }
+            Keep::Quote(q) => {
+                if c == q {
+                    self.keep = Keep::None;
+                } else {
+                    self.word.push(c);
+                }
+                return;
+            }
+            Keep::None => {}
+        }
+        match c {
+            '$' if next == Some('(') => {
+                self.word.push(c);
+                self.keep = Keep::Subst(0);
+            }
+            '`' => {
+                self.word.push(c);
+                self.keep = Keep::Backtick;
+            }
+            '"' | '\'' if self.word.ends_with('=') => self.keep = Keep::Quote(c),
+            // `sh -c "…"`: the quoted script is scanned as words.
+            '"' | '\'' => self.flush(),
+            // A redirection (`2>&1`, `&>/dev/null`), not a background `&`.
+            '&' if matches!(prev, Some('<' | '>')) || next == Some('>') => self.word.push(c),
+            ';' | '&' | '|' | '(' | ')' | '\n' => self.sep(),
+            c if c.is_whitespace() => self.flush(),
+            _ => self.word.push(c),
+        }
+    }
+}
+
+/// The tokens of a TOML value that starts with `value` on line `start` (0-based), and
+/// the value's last line. Strings are split into shell words (`'sh -c "sketchybar
+/// --trigger x; y"'` gives `sh`, `-c`, `sketchybar`, `--trigger`, `x`, a separator and
+/// `y`); the end of a string inside an array is an element boundary.
+fn value_tokens(lines: &[&str], start: usize, value: &str) -> (Vec<Tok>, usize) {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Str {
+        Basic,
+        Literal,
+        MultiBasic,
+        MultiLiteral,
+    }
+    let mut sh = ShellWords {
+        tokens: Vec::new(),
+        word: String::new(),
+        line: start,
+        keep: Keep::None,
+        prev: None,
+    };
+    let mut depth = 0usize;
+    let mut string: Option<Str> = None;
+    let mut idx = start;
+    let mut text = value;
+    loop {
+        sh.line = idx;
+        let chars: Vec<char> = text.chars().collect();
+        let mut j = 0;
+        let mut done = false;
+        // A backslash ends the line inside a multi-line string: no line break.
+        let mut continued = false;
+        while j < chars.len() {
+            let c = chars[j];
+            let next = chars.get(j + 1).copied();
+            let triple = |q: char| {
+                chars
+                    .get(j..j + 3)
+                    .is_some_and(|s| s.iter().all(|&x| x == q))
+            };
+            let Some(kind) = string else {
+                match c {
+                    '#' => break,
+                    '[' => depth += 1,
+                    ']' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            done = true;
+                            break;
+                        }
+                    }
+                    '"' | '\'' => {
+                        let multi = triple(c);
+                        string = Some(match (c, multi) {
+                            ('"', false) => Str::Basic,
+                            ('"', true) => Str::MultiBasic,
+                            (_, false) => Str::Literal,
+                            (_, true) => Str::MultiLiteral,
+                        });
+                        sh.reset();
+                        j += if multi { 3 } else { 1 };
+                        continue;
+                    }
+                    c if c.is_whitespace() || c == ',' => {}
+                    _ if depth == 0 => {
+                        // Not an array or a string: nothing to scan.
+                        done = true;
+                        break;
+                    }
+                    _ => {}
+                }
+                j += 1;
+                continue;
+            };
+            let (quote, multi) = match kind {
+                Str::Basic => ('"', false),
+                Str::Literal => ('\'', false),
+                Str::MultiBasic => ('"', true),
+                Str::MultiLiteral => ('\'', true),
+            };
+            if c == '\\' && multi && chars[j + 1..].iter().all(|c| c.is_whitespace()) {
+                // TOML's line-ending backslash, or the shell's line continuation.
+                continued = true;
+                break;
+            }
+            if c == '\\' && matches!(kind, Str::Basic | Str::MultiBasic) {
+                // A TOML escape: the escaped character is shell text (`\"` a quote).
+                let e = match next {
+                    Some('n') => '\n',
+                    Some('t') => '\t',
+                    Some(e) => e,
+                    None => ' ',
+                };
+                sh.push(e, chars.get(j + 2).copied());
+                j += 2;
+                continue;
+            }
+            if c == quote && (!multi || triple(quote)) {
+                sh.reset();
+                string = None;
+                j += if multi { 3 } else { 1 };
+                if depth == 0 {
+                    done = true;
+                    break;
+                }
+                sh.tokens.push(Tok::Elem);
+                continue;
+            }
+            sh.push(c, next);
+            j += 1;
+        }
+        match string {
+            // A single-line string ends with its line.
+            Some(Str::Basic | Str::Literal) => {
+                sh.reset();
+                string = None;
+                if depth == 0 {
+                    done = true;
+                }
+            }
+            Some(Str::MultiBasic | Str::MultiLiteral) if !continued => sh.push('\n', None),
+            _ => {}
+        }
+        if done || (depth == 0 && string.is_none()) || idx + 1 >= lines.len() {
+            sh.flush();
+            return (sh.tokens, idx);
+        }
+        // A word does not continue on the next line (a continued line ends with `\`).
+        sh.flush();
+        idx += 1;
+        text = lines[idx];
+    }
 }
 
 /// Checks the result of `command -v <name>` in a new login shell: it must resolve into
@@ -1850,5 +2401,343 @@ my-borders-wrapper width=4
         assert!(!failure_tolerated(&v("/bin/launchctl kickstart -k x")));
         assert!(!failure_tolerated(&v("/bin/rm bootout")));
         assert!(!failure_tolerated(&[]));
+    }
+
+    fn triggers(content: &str) -> Vec<(usize, usize, usize, String)> {
+        aerospace_triggers_in(Path::new("a.toml"), content)
+            .into_iter()
+            .map(|t| (t.line, t.first_line, t.last_line, t.text))
+            .collect()
+    }
+
+    fn one_trigger(content: &str) -> AerospaceTrigger {
+        let mut got = aerospace_triggers_in(Path::new("a.toml"), content);
+        assert_eq!(got.len(), 1, "{content}: {got:?}");
+        got.remove(0)
+    }
+
+    const WHY: &str = "The forked trigger arrives 10–50 ms after mbar's own event and can \
+                       overwrite it with an older workspace.";
+
+    #[test]
+    fn aerospace_trigger_goodies_recipe() {
+        // AeroSpace `docs/goodies.adoc`: the array spans two lines.
+        let toml = "start-at-login = true
+
+# Notify Sketchybar about workspace change
+exec-on-workspace-change = ['/bin/bash', '-c',
+    'sketchybar --trigger aerospace_workspace_change FOCUSED_WORKSPACE=$AEROSPACE_FOCUSED_WORKSPACE'
+]
+
+[mode.main.binding]
+alt-1 = 'workspace 1'
+";
+        assert_eq!(
+            triggers(toml),
+            vec![(
+                5,
+                4,
+                6,
+                "'sketchybar --trigger aerospace_workspace_change FOCUSED_WORKSPACE=$AEROSPACE_FOCUSED_WORKSPACE'"
+                    .to_string()
+            )]
+        );
+        let t = one_trigger(toml);
+        assert_eq!(t.setting, "exec-on-workspace-change");
+        assert_eq!(t.event, "aerospace_workspace_change");
+        assert!(t.removable() && t.whole_setting);
+        assert_eq!(
+            t.advice(),
+            format!(
+                "mbar sends aerospace_workspace_change itself; remove this setting (lines \
+                 4–6). {WHY}"
+            )
+        );
+    }
+
+    #[test]
+    fn aerospace_trigger_on_one_line() {
+        let toml = "exec-on-workspace-change = [\"/bin/bash\", \"-c\", \"sketchybar --trigger aerospace_workspace_change FOCUSED_WORKSPACE=\\\"$AEROSPACE_FOCUSED_WORKSPACE\\\"\"] # bar\n";
+        let got = aerospace_triggers_in(Path::new("/h/.aerospace.toml"), toml);
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            (got[0].line, got[0].first_line, got[0].last_line),
+            (1, 1, 1)
+        );
+        assert_eq!(got[0].file, PathBuf::from("/h/.aerospace.toml"));
+        assert_eq!(
+            got[0].advice(),
+            format!("mbar sends aerospace_workspace_change itself; remove this line. {WHY}")
+        );
+        // mbar's own CLI, a full path, separate array elements, a quoted key, all four
+        // variables mbar sets, quoted values, redirections and backgrounding.
+        for toml in [
+            "exec-on-workspace-change = ['/bin/sh', '-c', 'mbar --trigger aerospace_workspace_change']",
+            "exec-on-workspace-change = ['/opt/homebrew/bin/sketchybar', '--trigger', 'aerospace_workspace_change']",
+            "\"exec-on-workspace-change\" = ['/bin/zsh', '-lc', 'sketchybar --trigger aerospace_workspace_change &']",
+            "  exec-on-workspace-change=['/bin/bash','-c','sketchybar --trigger aerospace_workspace_change']",
+            "exec-on-workspace-change = ['/bin/bash', '-c', 'sketchybar --trigger aerospace_workspace_change FOCUSED_WORKSPACE=\"$AEROSPACE_FOCUSED_WORKSPACE\" PREV_WORKSPACE=$AEROSPACE_PREV_WORKSPACE AEROSPACE_FOCUSED_WORKSPACE=$AEROSPACE_FOCUSED_WORKSPACE AEROSPACE_PREV_WORKSPACE=$AEROSPACE_PREV_WORKSPACE >/dev/null 2>&1']",
+            "exec-on-workspace-change = ['/bin/bash', '-c', 'exec /opt/homebrew/bin/sketchybar --trigger aerospace_workspace_change FOCUSED_WORKSPACE=$(aerospace list-workspaces --focused)']",
+        ] {
+            let t = one_trigger(toml);
+            assert!(t.removable() && t.whole_setting, "{toml}: {t:?}");
+            assert!(t.advice().contains("remove this line."), "{toml}");
+        }
+    }
+
+    #[test]
+    fn aerospace_trigger_with_other_variables_stays() {
+        let t = one_trigger(
+            "exec-on-workspace-change = ['/bin/bash', '-c', 'sketchybar --trigger aerospace_workspace_change FOCUSED_WORKSPACE=$AEROSPACE_FOCUSED_WORKSPACE MONITOR=\"$(aerospace list-monitors --focused)\" COUNT=3']",
+        );
+        assert!(!t.removable() && !t.whole_setting);
+        assert_eq!(t.extra_vars, vec!["MONITOR", "COUNT"]);
+        assert_eq!(
+            t.advice(),
+            "mbar sends this event itself, but only with FOCUSED_WORKSPACE/PREV_WORKSPACE \
+             (and AEROSPACE_ aliases); your scripts also use MONITOR, COUNT — keep the line \
+             or change the scripts."
+        );
+        // Another event: its own variables.
+        let t = one_trigger(
+            "on-mode-changed = ['exec-and-forget sketchybar --trigger aerospace_mode_change MODE=$(aerospace list-modes --current) COLOR=red']",
+        );
+        assert_eq!(t.extra_vars, vec!["COLOR"]);
+        assert_eq!(
+            t.advice(),
+            "mbar sends this event itself, but only with MODE; your scripts also use COLOR — \
+             keep the line or change the scripts."
+        );
+        // A setting with one removable trigger and one that stays: remove only the
+        // first one's command.
+        let toml = "exec-on-workspace-change = ['/bin/bash', '-c', 'sketchybar --trigger aerospace_workspace_change; sketchybar --trigger aerospace_focus_change X=1']";
+        let got = aerospace_triggers_in(Path::new("a.toml"), toml);
+        assert_eq!(got.len(), 2);
+        assert!(got[0].removable() && !got[0].whole_setting);
+        assert!(!got[1].removable());
+        assert_eq!(got[1].event, "aerospace_focus_change");
+    }
+
+    #[test]
+    fn aerospace_trigger_among_other_commands() {
+        for toml in [
+            "exec-on-workspace-change = ['/bin/bash', '-c', 'sketchybar --trigger aerospace_workspace_change; other-cmd']",
+            "exec-on-workspace-change = ['/bin/zsh', '-c', 'echo; sketchybar --trigger aerospace_workspace_change &']",
+            "exec-on-workspace-change = ['/bin/bash', '-c', 'sketchybar --trigger aerospace_workspace_change && afplay x.aiff']",
+            "exec-on-workspace-change = ['/bin/bash', '-c', 'sketchybar --trigger aerospace_workspace_change | tee log']",
+            // A chained sketchybar command, another event.
+            "exec-on-workspace-change = ['/bin/bash', '-c', 'sketchybar --trigger aerospace_workspace_change --set clock label=x']",
+            "exec-on-workspace-change = ['/bin/bash', '-c', 'sketchybar --trigger aerospace_workspace_change --trigger space_change']",
+            // Several array elements of an AeroSpace command list.
+            "on-focus-changed = ['move-mouse window-lazy-center', 'exec-and-forget sketchybar --trigger aerospace_focus_change']",
+            "on-focused-monitor-changed = ['exec-and-forget sketchybar --trigger aerospace_monitor_change', 'move-mouse monitor-lazy-center']",
+        ] {
+            let t = one_trigger(toml);
+            assert!(t.removable() && !t.whole_setting, "{toml}: {t:?}");
+            assert_eq!(
+                t.advice(),
+                format!(
+                    "mbar sends {} itself; remove only the `--trigger {}` command and keep the \
+                     rest of this setting (it runs other commands too). The forked trigger \
+                     arrives 10–50 ms after mbar's own event and can overwrite it with an \
+                     older workspace.",
+                    t.event, t.event
+                ),
+                "{toml}"
+            );
+        }
+    }
+
+    #[test]
+    fn aerospace_trigger_all_events_and_settings() {
+        for (setting, element) in [
+            (
+                "exec-on-workspace-change",
+                "'/bin/bash', '-c', 'sketchybar --trigger EV'",
+            ),
+            (
+                "on-focus-changed",
+                "'exec-and-forget sketchybar --trigger EV'",
+            ),
+            (
+                "on-focused-monitor-changed",
+                "'exec-and-forget mbar --trigger EV'",
+            ),
+            (
+                "on-mode-changed",
+                "'exec-and-forget /opt/homebrew/bin/sketchybar --trigger EV'",
+            ),
+        ] {
+            for (event, _) in AEROSPACE_EVENTS {
+                let toml = format!("{setting} = [{}]\n", element.replace("EV", event));
+                let t = one_trigger(&toml);
+                assert_eq!((t.setting.as_str(), t.event.as_str()), (setting, event));
+                assert!(t.removable() && t.whole_setting, "{toml}");
+            }
+        }
+        // Every event's own variables count as sent.
+        for toml in [
+            "on-focus-changed = ['exec-and-forget sketchybar --trigger aerospace_focus_change FOCUSED_WORKSPACE=1 WINDOW_ID=2']",
+            "on-focused-monitor-changed = ['exec-and-forget sketchybar --trigger aerospace_monitor_change MONITOR_ID=1']",
+            "on-mode-changed = ['exec-and-forget sketchybar --trigger aerospace_mode_change MODE=main']",
+            "on-mode-changed = ['exec-and-forget sketchybar --trigger aerospace_binding_triggered MODE=main BINDING=alt-1']",
+            "on-focus-changed = ['exec-and-forget sketchybar --trigger aerospace_window_detected WINDOW_ID=1 WORKSPACE=2 APP_BUNDLE_ID=x APP_NAME=y']",
+        ] {
+            assert!(one_trigger(toml).whole_setting, "{toml}");
+        }
+        // PREV_WORKSPACE is only sent with the workspace change.
+        let t = one_trigger(
+            "on-focus-changed = ['exec-and-forget sketchybar --trigger aerospace_focus_change PREV_WORKSPACE=1']",
+        );
+        assert_eq!(t.extra_vars, vec!["PREV_WORKSPACE"]);
+        assert!(t
+            .advice()
+            .contains("only with FOCUSED_WORKSPACE/WINDOW_ID;"));
+        let t = one_trigger(
+            "on-mode-changed = ['exec-and-forget sketchybar --trigger aerospace_mode_change']",
+        );
+        assert!(
+            t.advice().ends_with("with an older mode."),
+            "{}",
+            t.advice()
+        );
+    }
+
+    #[test]
+    fn aerospace_trigger_reports_the_trigger_line() {
+        let toml = "exec-on-workspace-change = [
+  '/bin/bash',
+  '-c',
+  '''
+  echo changed
+  sketchybar --trigger aerospace_workspace_change \\
+    FOCUSED_WORKSPACE=$AEROSPACE_FOCUSED_WORKSPACE OTHER=$X
+  ''',
+]
+after-startup-command = []
+";
+        assert_eq!(
+            triggers(toml),
+            vec![(
+                6,
+                1,
+                9,
+                "sketchybar --trigger aerospace_workspace_change \\".to_string()
+            )]
+        );
+        // The continued line still belongs to the trigger; `echo` is another command.
+        let t = one_trigger(toml);
+        assert_eq!(t.extra_vars, vec!["OTHER"]);
+        assert!(!t.whole_setting);
+        // Without `echo` and OTHER, the whole setting can go.
+        let t = one_trigger(
+            &toml
+                .replace("  echo changed\n", "")
+                .replace(" OTHER=$X", ""),
+        );
+        assert!(t.removable() && t.whole_setting, "{t:?}");
+        assert!(t.advice().contains("remove this setting (lines 1–8)"));
+        // A TOML basic multi-line string with a line-ending backslash.
+        let toml = "exec-on-workspace-change = ['/bin/bash', '-c', \"\"\"\nsketchybar --trigger aerospace_workspace_change \\\n  FOCUSED_WORKSPACE=$AEROSPACE_FOCUSED_WORKSPACE\n\"\"\"]\n";
+        let t = one_trigger(toml);
+        assert_eq!((t.line, t.first_line, t.last_line), (2, 1, 4));
+        assert!(t.whole_setting, "{t:?}");
+    }
+
+    #[test]
+    fn aerospace_trigger_ignores_other_settings() {
+        for toml in [
+            // Commented out, the whole setting or the element.
+            "# exec-on-workspace-change = ['/bin/bash', '-c', 'sketchybar --trigger aerospace_workspace_change']",
+            "exec-on-workspace-change = ['/bin/bash', '-c',\n  # 'sketchybar --trigger aerospace_workspace_change'\n  'true']",
+            // Another key, another event, no trigger.
+            "after-startup-command = ['exec-and-forget sketchybar --trigger aerospace_workspace_change']",
+            "exec-on-workspace-change = ['/bin/bash', '-c', 'sketchybar --trigger front_app_switched']",
+            "exec-on-workspace-change = ['/bin/bash', '-c', 'sketchybar --trigger aerospace_workspace_changed']",
+            "exec-on-workspace-change = ['/bin/bash', '-c', 'sketchybar --set space label=aerospace_workspace_change']",
+            "exec-on-workspace-change = ['/bin/bash', '-c', 'echo sketchybar --trigger aerospace_workspace_change']",
+            "exec-on-workspace-change = ['/bin/bash', '-c', 'notify-send x']",
+            "exec-on-workspace-change-x = ['/bin/bash', '-c', 'sketchybar --trigger aerospace_workspace_change']",
+            "on-focus-changed-x = ['exec-and-forget sketchybar --trigger aerospace_focus_change']",
+            "",
+        ] {
+            assert!(triggers(toml).is_empty(), "{toml}");
+        }
+        // The scan stops at the end of the setting.
+        let toml = "exec-on-workspace-change = ['/bin/bash', '-c', 'true']
+[mode.main.binding]
+alt-1 = ['/bin/bash', '-c', 'sketchybar --trigger aerospace_workspace_change']
+";
+        assert!(triggers(toml).is_empty());
+        // `#` and `]` inside strings do not end the value.
+        let toml = "on-focus-changed = ['exec-and-forget [ -x a ] # x',
+  'exec-and-forget sketchybar --trigger aerospace_focus_change']
+";
+        let t = one_trigger(toml);
+        assert_eq!((t.line, t.last_line), (2, 2));
+        assert!(!t.whole_setting);
+    }
+
+    #[test]
+    fn aerospace_configs_with_xdg() {
+        let home = Path::new("/h");
+        assert_eq!(
+            aerospace_configs(home, ""),
+            vec![
+                PathBuf::from("/h/.aerospace.toml"),
+                PathBuf::from("/h/.config/aerospace/aerospace.toml"),
+            ]
+        );
+        assert_eq!(
+            aerospace_configs(home, "/x/conf"),
+            vec![
+                PathBuf::from("/h/.aerospace.toml"),
+                PathBuf::from("/x/conf/aerospace/aerospace.toml"),
+                PathBuf::from("/h/.config/aerospace/aerospace.toml"),
+            ]
+        );
+        // The default location once, a relative XDG_CONFIG_HOME is ignored.
+        assert_eq!(aerospace_configs(home, "/h/.config/").len(), 2);
+        assert_eq!(aerospace_configs(home, "conf").len(), 2);
+    }
+
+    #[test]
+    fn aerospace_triggers_scan_all_configs() {
+        let home = tmp("aerospace");
+        let xdg = home.join("xdg");
+        let xdg_s = xdg.to_string_lossy().to_string();
+        let app = Path::new("/Applications/AeroSpace.app").exists();
+        assert!(aerospace_triggers(&home, &xdg_s).is_empty());
+        assert!(!aerospace_installed(&home, &xdg_s) || app);
+        let recipe = "exec-on-workspace-change = ['/bin/bash', '-c', 'sketchybar --trigger aerospace_workspace_change']\n";
+        // The XDG config alone makes AeroSpace look installed.
+        std::fs::create_dir_all(xdg.join("aerospace")).unwrap();
+        std::fs::write(
+            xdg.join("aerospace/aerospace.toml"),
+            format!("# x\n\n{recipe}"),
+        )
+        .unwrap();
+        assert!(aerospace_installed(&home, &xdg_s));
+        assert!(!aerospace_installed(&home, "") || app);
+        std::fs::write(home.join(".aerospace.toml"), recipe).unwrap();
+        std::fs::create_dir_all(home.join(".config/aerospace")).unwrap();
+        std::fs::write(
+            home.join(".config/aerospace/aerospace.toml"),
+            format!("start-at-login = true\n{recipe}"),
+        )
+        .unwrap();
+        assert!(aerospace_installed(&home, ""));
+        let found: Vec<_> = aerospace_triggers(&home, &xdg_s)
+            .into_iter()
+            .map(|t| (t.file, t.line))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                (home.join(".aerospace.toml"), 1),
+                (xdg.join("aerospace/aerospace.toml"), 3),
+                (home.join(".config/aerospace/aerospace.toml"), 2),
+            ]
+        );
     }
 }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use mbar_lua::{parse_script, Host, LuaEngine};
+use mbar_lua::{parse_script, AerospaceResult, Host, LuaEngine};
 
 /// Records every message; answers `--query` from a table.
 #[derive(Default)]
@@ -10,6 +10,8 @@ struct Mock {
     queries: HashMap<String, String>,
     spawned: Vec<(String, Option<u64>)>,
     scheduled: Vec<(Duration, u64)>,
+    aerospace: Vec<(Vec<String>, Option<u64>)>,
+    on: Vec<(Vec<String>, u64)>,
 }
 
 impl Host for Mock {
@@ -32,6 +34,14 @@ impl Host for Mock {
 
     fn schedule(&mut self, delay: Duration, callback: u64) {
         self.scheduled.push((delay, callback));
+    }
+
+    fn aerospace(&mut self, args: Vec<String>, callback: Option<u64>) {
+        self.aerospace.push((args, callback));
+    }
+
+    fn on_events(&mut self, events: Vec<String>, handler: u64) {
+        self.on.push((events, handler));
     }
 }
 
@@ -851,4 +861,236 @@ fn parse_script_values() {
     assert_eq!(parse_script("lua:42"), Some(42));
     assert_eq!(parse_script("lua:x"), None);
     assert_eq!(parse_script("~/plugins/clock.sh"), None);
+}
+
+fn aero(exit_code: i32, stdout: &str, stderr: &str) -> AerospaceResult {
+    AerospaceResult {
+        exit_code,
+        stdout: stdout.into(),
+        stderr: stderr.into(),
+    }
+}
+
+/// `mbar.aerospace.run` / `query` hand the command to the host (numbers converted, no
+/// daemon message), and their callbacks get the documented values.
+#[test]
+fn aerospace_run_and_query() {
+    let (mut engine, mut host) = run(r#"
+        mbar.aerospace.run({ "workspace", 3 })
+        mbar.aerospace.run({ "list-workspaces", "--all" }, function(r)
+            mbar.set("r", { label = r.exit_code .. "|" .. r.stdout .. "|" .. r.stderr })
+        end)
+        mbar.aerospace.query({ "list-windows", "--json" }, function(v, err)
+            if err then
+                mbar.set("q", { label = "err:" .. err })
+            else
+                mbar.set("q", { label = v[1]["app-name"] .. #v })
+            end
+        end)
+    "#);
+    assert!(host.messages.is_empty(), "{:?}", host.messages);
+    assert_eq!(
+        host.aerospace,
+        vec![
+            (argv(&["workspace", "3"]), None),
+            (argv(&["list-workspaces", "--all"]), Some(1)),
+            (argv(&["list-windows", "--json"]), Some(2)),
+        ]
+    );
+
+    engine
+        .aerospace_finished(1, aero(0, "1\n2\n", ""), &mut host)
+        .unwrap();
+    engine
+        .aerospace_finished(2, aero(0, r#"[{"app-name":"Finder"}]"#, ""), &mut host)
+        .unwrap();
+    // One-shot: a second completion is ignored.
+    engine
+        .aerospace_finished(2, aero(0, "[]", ""), &mut host)
+        .unwrap();
+    engine
+        .aerospace_finished(99, aero(0, "", ""), &mut host)
+        .unwrap();
+    assert_eq!(
+        host.messages,
+        vec![
+            argv(&["--set", "r", "label=0|1\n2\n|"]),
+            argv(&["--set", "q", "label=Finder1"]),
+        ]
+    );
+}
+
+#[test]
+fn aerospace_query_errors() {
+    let (mut engine, mut host) = run(r#"
+        for i = 1, 4 do
+            mbar.aerospace.query({ "list-windows", "--json" }, function(v, err)
+                assert(v == nil)
+                mbar.set("q" .. i, { label = err })
+            end)
+        end
+        mbar.aerospace.run({ "x" }, function(r)
+            mbar.set("r", { label = r.exit_code .. ":" .. r.stderr })
+        end)
+    "#);
+    engine
+        .aerospace_finished(1, aero(2, "", "No window is focused\n"), &mut host)
+        .unwrap();
+    engine
+        .aerospace_finished(2, aero(0, "not json", ""), &mut host)
+        .unwrap();
+    engine
+        .aerospace_finished(3, aero(1, "", ""), &mut host)
+        .unwrap();
+    engine
+        .aerospace_finished(
+            4,
+            aero(-1, "", "AeroSpace is not running: no socket"),
+            &mut host,
+        )
+        .unwrap();
+    engine
+        .aerospace_finished(5, aero(-1, "", "AeroSpace is not running"), &mut host)
+        .unwrap();
+    let labels: Vec<&str> = host
+        .messages
+        .iter()
+        .map(|m| m[2].strip_prefix("label=").unwrap())
+        .collect();
+    assert_eq!(labels[0], "No window is focused");
+    assert!(
+        labels[1].starts_with("aerospace output is not JSON"),
+        "{labels:?}"
+    );
+    assert_eq!(labels[2], "aerospace exited with code 1");
+    assert_eq!(labels[3], "AeroSpace is not running: no socket");
+    assert_eq!(labels[4], "-1:AeroSpace is not running");
+}
+
+#[test]
+fn aerospace_argument_validation() {
+    let mut engine = LuaEngine::new().unwrap();
+    let mut host = Mock::default();
+    for (bad, msg) in [
+        (r#"mbar.aerospace.run("workspace 3")"#, "non-empty list"),
+        (r#"mbar.aerospace.run({})"#, "non-empty list"),
+        (
+            r#"mbar.aerospace.run({ "a", true })"#,
+            "element 2 is a boolean",
+        ),
+        (r#"mbar.aerospace.run({ "a", x = "b" })"#, "non-empty list"),
+        (r#"mbar.aerospace.run({ "a", nil, "c" })"#, "non-empty list"),
+        (
+            r#"mbar.aerospace.run({ "a" }, "nope")"#,
+            "fn must be a function",
+        ),
+        (r#"mbar.aerospace.query({ "a" })"#, "fn must be a function"),
+        (
+            r#"mbar.aerospace.query(nil, function() end)"#,
+            "non-empty list",
+        ),
+        (
+            r#"mbar.aerospace.on("space_change", function() end)"#,
+            "unknown event 'space_change'",
+        ),
+        (
+            r#"mbar.aerospace.on("aerospace_nope", function() end)"#,
+            "unknown event",
+        ),
+        (
+            r#"mbar.aerospace.on(1, function() end)"#,
+            "event must be a string",
+        ),
+        (
+            r#"mbar.aerospace.on("mode_change")"#,
+            "fn must be a function",
+        ),
+    ] {
+        let e = engine.load_string(bad, "=bad", &mut host).unwrap_err();
+        assert!(e.to_string().contains(msg), "{bad}: {e}");
+    }
+    assert!(host.messages.is_empty(), "{:?}", host.messages);
+    assert!(host.aerospace.is_empty(), "{:?}", host.aerospace);
+}
+
+/// `mbar.aerospace.on`: no item and no command; every call registers its own item-less
+/// handler with the host, which calls it with the event's env (dispatch on `SENDER`).
+#[test]
+fn aerospace_on_registers_item_less_handlers() {
+    let (mut engine, mut host) = run(r#"
+        mbar.aerospace.on("workspace_change", function(env)
+            mbar.set("a", { label = env.FOCUSED_WORKSPACE .. "/" .. env.info.prev_workspace })
+        end)
+        mbar.aerospace.on("aerospace_workspace_change", function(env)
+            mbar.set("b", { label = tostring(env.NAME) })
+        end)
+        mbar.aerospace.on("mode_change", function(env)
+            mbar.set("m", { label = env.MODE })
+        end)
+    "#);
+    assert!(host.messages.is_empty(), "{:?}", host.messages);
+    assert!(host.aerospace.is_empty());
+    let ids: Vec<u64> = host.on.iter().map(|(_, id)| *id).collect();
+    assert_eq!(
+        host.on,
+        vec![
+            (argv(&["aerospace_workspace_change"]), ids[0]),
+            (argv(&["aerospace_workspace_change"]), ids[1]),
+            (argv(&["aerospace_mode_change"]), ids[2]),
+        ]
+    );
+    assert!(ids[0] != ids[1] && ids[1] != ids[2] && ids[0] != ids[2]);
+
+    let ws = env(&[
+        ("SENDER", "aerospace_workspace_change"),
+        ("INFO", r#"{"focused_workspace":"2","prev_workspace":"1"}"#),
+        ("FOCUSED_WORKSPACE", "2"),
+        ("PREV_WORKSPACE", "1"),
+    ]);
+    engine.run_handler(ids[0], &ws, &mut host).unwrap();
+    engine.run_handler(ids[1], &ws, &mut host).unwrap();
+    engine
+        .run_handler(
+            ids[2],
+            &env(&[("SENDER", "aerospace_mode_change"), ("MODE", "service")]),
+            &mut host,
+        )
+        .unwrap();
+    // Another sender reaches no handler.
+    engine
+        .run_handler(ids[2], &env(&[("SENDER", "forced")]), &mut host)
+        .unwrap();
+    assert_eq!(
+        host.messages,
+        vec![
+            argv(&["--set", "a", "label=2/1"]),
+            argv(&["--set", "b", "label=nil"]),
+            argv(&["--set", "m", "label=service"]),
+        ]
+    );
+}
+
+/// A failing `on` handler does not stop the others (each is its own handler).
+#[test]
+fn aerospace_on_handler_errors() {
+    let (mut engine, mut host) = run(r#"
+        mbar.aerospace.on("focus_change", function() error("first fails") end)
+        mbar.aerospace.on("focus_change", function(env) mbar.set("x", { label = env.WINDOW_ID }) end)
+    "#);
+    let focus = env(&[("SENDER", "aerospace_focus_change"), ("WINDOW_ID", "7")]);
+    let e = engine
+        .run_handler(host.on[0].1, &focus, &mut host)
+        .unwrap_err();
+    assert!(e.to_string().contains("first fails"), "{e}");
+    let second = host.on[1].1;
+    engine.run_handler(second, &focus, &mut host).unwrap();
+    assert_eq!(host.messages, vec![argv(&["--set", "x", "label=7"])]);
+}
+
+#[test]
+fn aerospace_events_match_the_core() {
+    assert_eq!(
+        mbar_lua::AEROSPACE_EVENTS,
+        mbar_core::aerospace::EVENT_NAMES
+    );
 }

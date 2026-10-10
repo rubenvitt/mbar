@@ -4,15 +4,18 @@
 //!
 //! | property | |
 //! |---|---|
-//! | `provider=<name>` | `clock`, `cpu`, `memory`, `battery`, `volume`, `wifi`, `network`, `disk`, `front_app`, `media`; `none` disables |
+//! | `provider=<name>` | `clock`, `cpu`, `memory`, `battery`, `volume`, `wifi`, `network`, `disk`, `front_app`, `media`, `aerospace`; `none` disables |
 //! | `provider.format=<template>` | label template with `{key}` placeholders, e.g. `"{percent}%"`; default per provider |
 //! | `provider.icon_format=<template>` | optional icon template |
 //! | `provider.freq=<seconds>` | sampling interval (float); event-driven providers (`volume`, `wifi`, `front_app`, `media`, `battery`) ignore it |
-//! | `provider.args=<string>` | provider specific: strftime format for `clock` (default `%H:%M`), interface for `network`, mount point for `disk` |
+//! | `provider.args=<string>` | provider specific: strftime format for `clock` (default `%H:%M`), interface for `network`, mount point for `disk`, `workspace` (default) / `mode` / `monitor` for `aerospace` |
 //!
 //! Sampling is the platform's job (`PlatformRequest::StartProvider` →
-//! `Input::ProviderSample`). The core formats the templates into `label`/`icon` and also
-//! runs the item's `script` with `SENDER=provider` and the sample as JSON in `INFO`.
+//! `Input::ProviderSample`), except for core providers ([`ProviderKind::is_core`]):
+//! `aerospace` is fed by the runtime from its AeroSpace state ([`aerospace_sample`], when
+//! the provider is configured and after a state change that changes the item's sample)
+//! and never reaches the platform. The core formats the templates into `label`/`icon` and also runs the item's
+//! `script` with `SENDER=provider` and the sample as JSON in `INFO`.
 //!
 //! Keys per provider:
 //!
@@ -28,6 +31,7 @@
 //! | `disk` | `percent`, `free_gb`, `total_gb` |
 //! | `front_app` | `name`, `bundle_id` |
 //! | `media` | `title`, `artist`, `album`, `app`, `state` |
+//! | `aerospace` | `value` (selected by `provider.args`), `workspace`, `prev_workspace`, `mode`, `monitor` |
 //!
 //! [`ProviderConfig::set_prop`] (property layer), templates ([`format_template`],
 //! [`apply_sample`], [`sample_info_json`]), defaults ([`ProviderKind::default_format`],
@@ -49,10 +53,12 @@ pub enum ProviderKind {
     Disk,
     FrontApp,
     Media,
+    /// AeroSpace state (core provider, `docs/superpowers/specs/2026-10-09-aerospace-design.md`).
+    Aerospace,
 }
 
 impl ProviderKind {
-    pub const ALL: [ProviderKind; 10] = [
+    pub const ALL: [ProviderKind; 11] = [
         ProviderKind::Clock,
         ProviderKind::Cpu,
         ProviderKind::Memory,
@@ -63,6 +69,7 @@ impl ProviderKind {
         ProviderKind::Disk,
         ProviderKind::FrontApp,
         ProviderKind::Media,
+        ProviderKind::Aerospace,
     ];
 
     pub fn name(self) -> &'static str {
@@ -77,6 +84,7 @@ impl ProviderKind {
             ProviderKind::Disk => "disk",
             ProviderKind::FrontApp => "front_app",
             ProviderKind::Media => "media",
+            ProviderKind::Aerospace => "aerospace",
         }
     }
 
@@ -93,7 +101,14 @@ impl ProviderKind {
                 | ProviderKind::FrontApp
                 | ProviderKind::Media
                 | ProviderKind::Battery
+                | ProviderKind::Aerospace
         )
+    }
+
+    /// Core providers are fed by the runtime itself: no `PlatformRequest::StartProvider` /
+    /// `StopProvider` is sent for them.
+    pub fn is_core(self) -> bool {
+        matches!(self, ProviderKind::Aerospace)
     }
 
     /// Default label template (`docs/EXTENSIONS.md` "Default templates").
@@ -109,6 +124,7 @@ impl ProviderKind {
             ProviderKind::Disk => "{percent}%",
             ProviderKind::FrontApp => "{name}",
             ProviderKind::Media => "{title}",
+            ProviderKind::Aerospace => "{value}",
         }
     }
 
@@ -126,7 +142,8 @@ impl ProviderKind {
             | ProviderKind::Volume
             | ProviderKind::Wifi
             | ProviderKind::FrontApp
-            | ProviderKind::Media => 0.0,
+            | ProviderKind::Media
+            | ProviderKind::Aerospace => 0.0,
         }
     }
 
@@ -312,6 +329,35 @@ pub fn apply_sample(cfg: &ProviderConfig, values: &[(String, String)]) -> Provid
         icon: cfg.icon_format.as_deref().and_then(fmt),
         info,
     }
+}
+
+/// The `aerospace` sample for `args` (`provider.args`): `value` is the focused workspace
+/// (args unset, empty, `workspace` or unknown), the binding mode (`mode`) or the focused
+/// monitor id (`monitor`, empty while unknown); the other keys are always present.
+pub fn aerospace_sample(
+    state: &crate::aerospace::AerospaceState,
+    args: Option<&str>,
+) -> Vec<(String, String)> {
+    let monitor = if state.monitor == 0 {
+        String::new()
+    } else {
+        state.monitor.to_string()
+    };
+    let value = match args.unwrap_or("") {
+        "mode" => state.mode.clone(),
+        "monitor" => monitor.clone(),
+        _ => state.focused_workspace.clone(),
+    };
+    [
+        ("value", value),
+        ("workspace", state.focused_workspace.clone()),
+        ("prev_workspace", state.prev_workspace.clone()),
+        ("mode", state.mode.clone()),
+        ("monitor", monitor),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect()
 }
 
 /// Default `clock` format (`provider.args` unset or empty).

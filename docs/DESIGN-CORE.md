@@ -45,6 +45,9 @@ query.rs       JSON for --query
 borders/       window borders (JankyBorders take-over, extension): BorderSettings,
                BordersState (`--borders`, `--query borders`, held in Model), parse.rs
                (JankyBorders argument grammar), pure helpers the platform uses
+aerospace.rs   AeroSpace (extension): AerospaceEvent (JSON parsing, event names, env,
+               INFO), AerospaceStatus, AerospaceState (held in Model; `--query aerospace`,
+               `provider=aerospace`)
 event.rs       EventKind, EventMask, CustomEvents, EventInfo
 script.rs      ScriptEnv building
 provider.rs    native providers: names, templates
@@ -133,6 +136,26 @@ configuration survives `--reload` and hotload (carried over into the new model, 
 `SetBorders`; the re-run config applies its keys on top). The core never sees windows:
 the platform tracks them and draws the border windows itself
 (`docs/superpowers/specs/2026-10-09-borders-design.md`).
+
+AeroSpace (`docs/superpowers/specs/2026-10-09-aerospace-design.md`): the binary owns the
+connection and feeds `Input::Aerospace(AerospaceEvent)` / `Input::AerospaceStatus`. The
+runtime triggers the event's `aerospace_*` name like any other event (`INFO` + the
+event's variables), keeps `Model::aerospace` (state + status, carried over on `--reload`)
+and re-applies `provider=aerospace` labels whose sample changed (a core provider: no
+`StartProvider`). Item-less handlers (`LuaRequest::On`, Lua `mbar.aerospace.on`) are kept
+in the runtime and get `Effect::LuaCallback` from `trigger_event` for every trigger of
+their event (event variables + `SENDER`, no `NAME`); `--reload` clears them. A new
+`aerospace_*` subscriber (item or `On` handler) gets the stored state as a synthetic event
+at the end of the input (after layout, so item gating applies as usual). A manual
+`--trigger aerospace_workspace_change FOCUSED_WORKSPACE=…` updates the stored workspace
+only while `status.connected` is false. The six
+names are built in: `--subscribe` registers them on first use (custom-event bits, so the
+SketchyBar recipe `--add event aerospace_workspace_change` + `--trigger` behaves as
+before; a notification name given there is ignored). `PlatformRequest::StartAerospace` is
+emitted once per runtime lifetime on the first `aerospace_*` subscription,
+`provider=aerospace`, `LuaRequest::On` for an `aerospace_*` event or
+`Runtime::request_aerospace()` (Lua `mbar.aerospace.run/query`); `--query aerospace`
+never emits it (its `active` key says whether it was emitted).
 
 `FrameOutput { windows: Vec<WindowUpdate>, closed: Vec<WindowKey> }` where
 `WindowUpdate { key, frame: Rect (screen points), level: WindowLevel, scene: Scene,

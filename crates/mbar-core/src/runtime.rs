@@ -21,6 +21,7 @@
 //! Helper methods are grouped by spec area below; each group lists the functions it calls
 //! from other work packages (see `docs/IMPLEMENTATION-PLAN.md` "Cross-package contracts").
 
+use crate::aerospace::{self, AerospaceEvent};
 use crate::animation::{self, AnimStep, Animator};
 use crate::bar::{BarState, DISPLAY_MAIN};
 use crate::command::{
@@ -41,7 +42,7 @@ use crate::platform::{
 use crate::props::{
     AnimSpec, AnimTarget, HiddenRequest, PropCx, PropEffects, PropRequest, PropResult,
 };
-use crate::provider;
+use crate::provider::{self, ProviderKind};
 use crate::query::{self, QueryCx, Stats};
 use crate::script::{self, EnvVars, Sender, MACH_HELPER_DESTROY};
 use crate::value;
@@ -239,6 +240,28 @@ pub struct Runtime {
     lua_total_us: u64,
     /// `--exit` was executed: ignore the rest of the message.
     exiting: bool,
+    /// `provider=aerospace` items whose label must be re-applied from
+    /// `model.aerospace` at the end of the current input (coalesces repeated
+    /// `ProviderChanged` requests of one message). `true`: apply even when the sample did
+    /// not change (the provider was (re)configured).
+    aerospace_pending: Vec<(ItemId, bool)>,
+    /// The last `aerospace` sample applied to each `provider=aerospace` item: an event that
+    /// does not change an item's sample neither re-applies its label nor runs its script.
+    aerospace_applied: HashMap<ItemId, Vec<(String, String)>>,
+    /// Late subscribers to `aerospace_*` events that get the stored state as a synthetic
+    /// event at the end of the current input (after layout, so `updates=when_shown`
+    /// gating sees the item's real visibility).
+    aerospace_initial: Vec<(Listener, &'static str)>,
+    /// Item-less in-process handlers (`LuaRequest::On`): `(event, handler)` in
+    /// registration order. Cleared by `--reload`.
+    global_handlers: Vec<(String, u64)>,
+}
+
+/// Who gets a synthetic AeroSpace event (`Runtime::aerospace_initial`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Listener {
+    Item(ItemId),
+    Global(u64),
 }
 
 /// `lua:<id>` script values (`docs/LUA.md`).
@@ -345,6 +368,10 @@ impl Runtime {
             monitor_req: None,
             lua_total_us: 0,
             exiting: false,
+            aerospace_pending: Vec::new(),
+            aerospace_applied: HashMap::new(),
+            aerospace_initial: Vec::new(),
+            global_handlers: Vec::new(),
         }
     }
 
@@ -408,9 +435,31 @@ impl Runtime {
             Input::DisplaysChanged => self.displays_changed(&mut effects, res),
             Input::Lua(req) => self.handle_lua(req, &mut effects, res),
             Input::MenuTitles { app, titles } => self.menu_titles(app, titles, &mut effects),
+            Input::Aerospace(ev) => self.aerospace_event(ev, &mut effects),
+            Input::AerospaceStatus(status) => self.model.aerospace.status = status,
         }
+        self.flush_aerospace_providers(&mut effects, res);
         self.refresh(false, res);
+        if self.flush_aerospace_initial(&mut effects) {
+            self.refresh(false, res);
+        }
         effects
+    }
+
+    /// Requests the AeroSpace connection from outside a message (Lua `mbar.aerospace.*`
+    /// in the binary): `Some(Effect::Platform(PlatformRequest::StartAerospace))` the first
+    /// time it is needed in this runtime's lifetime (subscriptions to `aerospace_*`
+    /// events and `provider=aerospace` request it too; `--query aerospace` does not),
+    /// `None` once it was requested. The caller handles the returned effect like any other effect.
+    pub fn request_aerospace(&mut self) -> Option<Effect> {
+        let mut effects = Vec::new();
+        self.start_aerospace(&mut effects);
+        effects.pop()
+    }
+
+    /// Whether `PlatformRequest::StartAerospace` has been emitted.
+    pub fn aerospace_started(&self) -> bool {
+        self.model.aerospace.active
     }
 
     /// Steps animations (`Animator::step` + [`Runtime::apply_anim_steps`]), lays out
@@ -779,6 +828,9 @@ impl Runtime {
             let is_query = matches!(cmd, Command::Query(_));
             let before = rsp.len();
             refresh |= self.exec(cmd, &mut rsp, effects, res);
+            // `provider=aerospace` labels are applied per command, so a later `--query` of
+            // the same message sees them.
+            self.flush_aerospace_providers(effects, res);
             if !is_query && rsp.len() > before {
                 effects.push(Effect::Log(rsp[before..].to_string()));
             }
@@ -830,6 +882,11 @@ impl Runtime {
                 false
             }
             Command::AddEvent { name, notification } => {
+                // The AeroSpace events are built in (delivered by the core, aerospace
+                // design §Events): the SketchyBar recipe's `--add event
+                // aerospace_workspace_change [<notification>]` registers the name as before
+                // (same bit, `--trigger` keeps working) but never observes a notification.
+                let notification = notification.filter(|_| !aerospace::is_event_name(&name));
                 match self.model.events.append(&name, notification.as_deref()) {
                     AppendResult::Added(_) => {
                         if let Some(n) = notification {
@@ -1573,7 +1630,7 @@ impl Runtime {
             return;
         };
         let item = self.model.items.remove(idx);
-        if item.provider.kind.is_some() {
+        if item.provider.kind.is_some_and(|k| !k.is_core()) {
             effects.push(Effect::Platform(PlatformRequest::StopProvider { item: id }));
         }
         if item.has_alias() {
@@ -1724,7 +1781,8 @@ impl Runtime {
         }
     }
 
-    /// `--query` (calls `query::query` with a `QueryCx`).
+    /// `--query` (calls `query::query` with a `QueryCx`). `--query aerospace` only reports:
+    /// it never starts the AeroSpace connection (mbar.app polls it).
     fn exec_query(&mut self, target: &QueryTarget, rsp: &mut String, res: &mut dyn Resources) {
         if matches!(target, QueryTarget::Stats) {
             self.fill_stats();
@@ -1774,11 +1832,13 @@ impl Runtime {
     /// re-initialised (events back to built-ins, listeners kept; the borders configuration is
     /// carried over, as JankyBorders was a separate process unaffected by bar reloads, so the
     /// borders a window manager's launch line set survive; the re-run config applies its
-    /// `--borders` keys on top), bars recreated, `Effect::RunConfig`.
+    /// `--borders` keys on top; the AeroSpace state and status are carried over as the
+    /// connection survives and AeroSpace does not resend its initial state), bars recreated,
+    /// `Effect::RunConfig`.
     fn reload(&mut self, path: Option<String>, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
         self.send_mach_destroy(effects);
         for it in &self.model.items {
-            if it.provider.kind.is_some() {
+            if it.provider.kind.is_some_and(|k| !k.is_core()) {
                 effects.push(Effect::Platform(PlatformRequest::StopProvider {
                     item: it.id,
                 }));
@@ -1791,8 +1851,15 @@ impl Runtime {
         }
         self.animator.clear();
         let borders = std::mem::take(&mut self.model.borders);
+        let aerospace = std::mem::take(&mut self.model.aerospace);
         self.model = Model::new();
         self.model.borders = borders;
+        self.model.aerospace = aerospace;
+        self.aerospace_pending.clear();
+        self.aerospace_applied.clear();
+        self.aerospace_initial.clear();
+        // The re-run (Lua) config registers its item-less handlers again.
+        self.global_handlers.clear();
         self.anim = None;
         self.sleeps = false;
         self.force_refresh = false;
@@ -2079,6 +2146,7 @@ impl Runtime {
                 }
             }
         }
+        self.run_global_handlers(&ev.name, ev.env.as_ref(), effects);
         if self.monitor_events {
             let info = ev.env.as_ref().and_then(|e| e.get("INFO"));
             let line = self.monitor_event(&ev.name, &ev.name, info, &ran);
@@ -2106,6 +2174,15 @@ impl Runtime {
             return;
         };
         for ev in events {
+            let aerospace_event = aerospace::EVENT_NAMES.iter().find(|n| **n == ev.as_str());
+            if aerospace_event.is_some() {
+                // Built-in AeroSpace events: registered on first use (same registry entry
+                // as `--add event`), and the connection is started.
+                if self.model.events.flag(ev).is_none() {
+                    self.model.events.append(ev, None);
+                }
+                self.start_aerospace(effects);
+            }
             let Some(flag) = self.model.events.flag(ev) else {
                 let _ = write!(rsp, "[?] Event: '{ev}' not found\n");
                 continue;
@@ -2130,7 +2207,13 @@ impl Runtime {
                 _ => {}
             }
             if let Some(it) = self.model.item_mut(id) {
+                let new = !it.update_mask.contains(flag);
                 it.update_mask.insert(flag);
+                if let Some(name) = aerospace_event.filter(|_| new) {
+                    // AeroSpace sent its state once per connection, maybe before this
+                    // item existed (shell loops, `--reload`): deliver what is known.
+                    self.queue_aerospace_initial(Listener::Item(id), name);
+                }
             }
         }
     }
@@ -2146,6 +2229,9 @@ impl Runtime {
     ) {
         if !event::is_forced_trigger(event) {
             let env = event::trigger_env(args);
+            if event == aerospace::EVENT_NAMES[0] {
+                self.manual_aerospace_trigger(&env);
+            }
             self.trigger_event(EventInfo::new(event, Some(env)), effects);
             return;
         }
@@ -3193,6 +3279,14 @@ impl Runtime {
         };
         let cfg = &item.provider;
         let req = match cfg.kind {
+            Some(k) if k.is_core() => {
+                // Core provider: stop a platform provider the item may have had, start the
+                // connection and apply the stored state at the end of the input.
+                effects.push(Effect::Platform(PlatformRequest::StopProvider { item: id }));
+                self.queue_aerospace_provider(id, true);
+                self.start_aerospace(effects);
+                return;
+            }
             None => PlatformRequest::StopProvider { item: id },
             Some(k) => PlatformRequest::StartProvider {
                 item: id,
@@ -3208,7 +3302,8 @@ impl Runtime {
     }
 
     /// `Input::ProviderSample`: label/icon update (as `--set`) + script run with
-    /// `SENDER=provider`, `INFO=<json>`.
+    /// `SENDER=provider`, `INFO=<json>`. Samples for items without a provider or with a core
+    /// provider (a late sample of a replaced platform provider) are dropped.
     fn provider_sample(
         &mut self,
         id: ItemId,
@@ -3219,9 +3314,25 @@ impl Runtime {
         let Some(item) = self.model.item(id) else {
             return;
         };
-        if item.provider.kind.is_none() {
-            return;
+        match item.provider.kind {
+            Some(k) if !k.is_core() => {}
+            _ => return,
         }
+        self.apply_provider_sample(id, values, effects, res);
+    }
+
+    /// Applies one sample to an item with a provider: label/icon from the templates (as
+    /// `--set`, no animation), then the item's script with `SENDER=provider`.
+    fn apply_provider_sample(
+        &mut self,
+        id: ItemId,
+        values: Vec<(String, String)>,
+        effects: &mut Vec<Effect>,
+        res: &mut dyn Resources,
+    ) {
+        let Some(item) = self.model.item(id) else {
+            return;
+        };
         let out = provider::apply_sample(&item.provider, &values);
         self.anim = None;
         for (key, v) in [("label", out.label), ("icon", out.icon)] {
@@ -3325,6 +3436,223 @@ impl Runtime {
                 if !rsp.is_empty() {
                     effects.push(Effect::Log(rsp));
                 }
+            }
+            LuaRequest::On { events, handler } => {
+                self.register_global_handler(events, handler, effects)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------------------
+    // AeroSpace (extension, `docs/superpowers/specs/2026-10-09-aerospace-design.md` §Core).
+    // ------------------------------------------------------------------------------
+
+    /// Emits `PlatformRequest::StartAerospace` the first time AeroSpace is used.
+    fn start_aerospace(&mut self, effects: &mut Vec<Effect>) {
+        if !self.model.aerospace.active {
+            self.model.aerospace.active = true;
+            effects.push(Effect::Platform(PlatformRequest::StartAerospace));
+        }
+    }
+
+    /// The script variables of an AeroSpace event: `INFO` + [`AerospaceEvent::env`].
+    fn aerospace_env(ev: &AerospaceEvent) -> EnvVars {
+        let mut env = EnvVars::new();
+        env.set("INFO", ev.info_json());
+        for (k, v) in ev.env() {
+            env.set(k, v);
+        }
+        env
+    }
+
+    /// `Input::Aerospace`: updates `model.aerospace`, triggers the event for its
+    /// subscribers (`INFO` + the event's variables, like every other event) and queues the
+    /// `provider=aerospace` items when the state changed.
+    fn aerospace_event(&mut self, ev: AerospaceEvent, effects: &mut Vec<Effect>) {
+        let state = self.model.aerospace.apply(&ev);
+        let env = Self::aerospace_env(&ev);
+        self.trigger_event(EventInfo::new(ev.event_name(), Some(env)), effects);
+        if state {
+            self.queue_all_aerospace_providers();
+        }
+    }
+
+    /// A manual `--trigger aerospace_workspace_change FOCUSED_WORKSPACE=…` (old AeroSpace
+    /// without `subscribe`, driven by `exec-on-workspace-change`): updates the stored
+    /// workspace while there is no connection, so `provider=aerospace` and
+    /// `--query aerospace` keep working in that setup.
+    fn manual_aerospace_trigger(&mut self, env: &EnvVars) {
+        let var = |k: &str, alias: &str| env.get(k).or_else(|| env.get(alias)).map(str::to_string);
+        let focused = var("FOCUSED_WORKSPACE", aerospace::ALIAS_FOCUSED_WORKSPACE);
+        let prev = var("PREV_WORKSPACE", aerospace::ALIAS_PREV_WORKSPACE);
+        if self
+            .model
+            .aerospace
+            .apply_manual_trigger(focused.as_deref(), prev.as_deref())
+        {
+            self.queue_all_aerospace_providers();
+        }
+    }
+
+    /// Queues `id` for [`Runtime::flush_aerospace_providers`]; `force` applies the sample
+    /// even when it did not change since the last one applied to the item.
+    fn queue_aerospace_provider(&mut self, id: ItemId, force: bool) {
+        match self.aerospace_pending.iter_mut().find(|(p, _)| *p == id) {
+            Some((_, f)) => *f |= force,
+            None => self.aerospace_pending.push((id, force)),
+        }
+    }
+
+    /// Queues every `provider=aerospace` item (the state changed).
+    fn queue_all_aerospace_providers(&mut self) {
+        let ids: Vec<ItemId> = self
+            .model
+            .items
+            .iter()
+            .filter(|it| it.provider.kind == Some(ProviderKind::Aerospace))
+            .map(|it| it.id)
+            .collect();
+        for id in ids {
+            self.queue_aerospace_provider(id, false);
+        }
+    }
+
+    /// Applies the AeroSpace state to the queued `provider=aerospace` items (a provider
+    /// sample: label/icon templates + script with `SENDER=provider`). Nothing is applied
+    /// before the first state-carrying event arrived, and an item whose sample equals the
+    /// last one applied to it is skipped unless its provider was (re)configured.
+    fn flush_aerospace_providers(&mut self, effects: &mut Vec<Effect>, res: &mut dyn Resources) {
+        if self.aerospace_pending.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.aerospace_pending);
+        if !self.model.aerospace.known {
+            return;
+        }
+        // Provider labels never animate; keep the message's `--animate` for later commands.
+        let anim = self.anim.take();
+        for (id, force) in pending {
+            let Some(item) = self.model.item(id) else {
+                self.aerospace_applied.remove(&id);
+                continue;
+            };
+            if item.provider.kind != Some(ProviderKind::Aerospace) {
+                self.aerospace_applied.remove(&id);
+                continue;
+            }
+            let values =
+                provider::aerospace_sample(&self.model.aerospace, item.provider.args.as_deref());
+            if !force && self.aerospace_applied.get(&id) == Some(&values) {
+                continue;
+            }
+            self.aerospace_applied.insert(id, values.clone());
+            self.apply_provider_sample(id, values, effects, res);
+        }
+        self.anim = anim;
+    }
+
+    /// Queues the synthetic event `name` for `who` (a late subscriber), if the state for it
+    /// is known (delivered by [`Runtime::flush_aerospace_initial`]).
+    fn queue_aerospace_initial(&mut self, who: Listener, name: &'static str) {
+        if self.model.aerospace.synthetic_event(name).is_some()
+            && !self.aerospace_initial.contains(&(who, name))
+        {
+            self.aerospace_initial.push((who, name));
+        }
+    }
+
+    /// Delivers the queued synthetic AeroSpace events, each to its subscriber only (item
+    /// gating as for a real event). Returns whether anything was queued.
+    fn flush_aerospace_initial(&mut self, effects: &mut Vec<Effect>) -> bool {
+        if self.aerospace_initial.is_empty() {
+            return false;
+        }
+        for (who, name) in std::mem::take(&mut self.aerospace_initial) {
+            let Some(ev) = self.model.aerospace.synthetic_event(name) else {
+                continue;
+            };
+            let env = Self::aerospace_env(&ev);
+            match who {
+                Listener::Item(id) => {
+                    let subscribed = self
+                        .model
+                        .events
+                        .flag(name)
+                        .zip(self.model.item(id))
+                        .is_some_and(|(flag, it)| it.update_mask.contains(flag));
+                    if subscribed {
+                        self.update_item(
+                            id,
+                            Some(Sender::Event(name.to_string())),
+                            false,
+                            Some(&env),
+                            effects,
+                        );
+                    }
+                }
+                Listener::Global(handler) => {
+                    let registered = self
+                        .global_handlers
+                        .iter()
+                        .any(|(e, h)| e == name && *h == handler);
+                    if registered {
+                        effects.push(Effect::LuaCallback {
+                            handler,
+                            env: Self::global_env(name, Some(&env)),
+                        });
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// The env of an item-less handler: the event's variables plus `SENDER` (no `NAME`).
+    fn global_env(name: &str, env: Option<&EnvVars>) -> Vec<(String, String)> {
+        let mut env = env.cloned().unwrap_or_default();
+        env.set("SENDER", name);
+        env.into_vec()
+    }
+
+    /// Calls every item-less handler of `name` (`LuaRequest::On`), in registration order.
+    fn run_global_handlers(
+        &mut self,
+        name: &str,
+        env: Option<&EnvVars>,
+        effects: &mut Vec<Effect>,
+    ) {
+        if !self.global_handlers.iter().any(|(e, _)| e == name) {
+            return;
+        }
+        let env = Self::global_env(name, env);
+        for (_, handler) in self.global_handlers.iter().filter(|(e, _)| e == name) {
+            effects.push(Effect::LuaCallback {
+                handler: *handler,
+                env: env.clone(),
+            });
+        }
+    }
+
+    /// `LuaRequest::On`: registers an item-less handler for `events`.
+    fn register_global_handler(
+        &mut self,
+        events: Vec<String>,
+        handler: u64,
+        effects: &mut Vec<Effect>,
+    ) {
+        for ev in events {
+            if self
+                .global_handlers
+                .iter()
+                .any(|(e, h)| *e == ev && *h == handler)
+            {
+                continue;
+            }
+            let aerospace_event = aerospace::EVENT_NAMES.iter().find(|n| **n == ev.as_str());
+            self.global_handlers.push((ev, handler));
+            if let Some(name) = aerospace_event {
+                self.start_aerospace(effects);
+                self.queue_aerospace_initial(Listener::Global(handler), name);
             }
         }
     }

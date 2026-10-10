@@ -357,6 +357,8 @@ impl Services {
             PlatformRequest::SetHotload(on) => self.sync_hotload(on),
             PlatformRequest::MachSend { service, payload } => self.mach_send(service, payload),
             PlatformRequest::SetBorders(update) => borders::configure(*update),
+            // The binary owns the AeroSpace connection (it is platform independent).
+            PlatformRequest::StartAerospace => {}
         }
     }
 

@@ -169,11 +169,22 @@ version = "0.4.0"
 dependencies = [
  "libc",
  "log",
+ "mbar-aerospace",
  "mbar-app",
  "mbar-core",
  "mbar-ipc",
  "mbar-lua",
  "mbar-macos",
+ "serde_json",
+]
+
+[[package]]
+name = "mbar-aerospace"
+version = "0.3.3"
+dependencies = [
+ "libc",
+ "log",
+ "mbar-core",
  "serde_json",
 ]
 

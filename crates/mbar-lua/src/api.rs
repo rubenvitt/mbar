@@ -15,6 +15,8 @@ use crate::SCRIPT_PREFIX;
 pub(crate) const KEY_HOST_COMMAND: &str = "mbar.host.command";
 pub(crate) const KEY_HOST_SPAWN: &str = "mbar.host.spawn";
 pub(crate) const KEY_HOST_SCHEDULE: &str = "mbar.host.schedule";
+pub(crate) const KEY_HOST_AEROSPACE: &str = "mbar.host.aerospace";
+pub(crate) const KEY_HOST_ON: &str = "mbar.host.on";
 pub(crate) const KEY_HANDLERS: &str = "mbar.handlers";
 pub(crate) const KEY_CALLBACKS: &str = "mbar.callbacks";
 const KEY_ITEM_MT: &str = "mbar.item_mt";
@@ -42,6 +44,8 @@ pub(crate) struct State {
     /// IPC bar name exported to blocking `io.popen` / `os.execute` commands
     /// (see `crate::shell`).
     pub(crate) shell_marker: Option<String>,
+    /// `mbar.aerospace` state (see `crate::aerospace`).
+    pub(crate) aerospace: crate::aerospace::LuaState,
 }
 
 pub(crate) struct AnimFrame {
@@ -84,7 +88,7 @@ pub(crate) fn host_command(lua: &Lua, argv: Vec<String>) -> Result<String> {
     }
 }
 
-fn host_fn(lua: &Lua, key: &str) -> Result<Function> {
+pub(crate) fn host_fn(lua: &Lua, key: &str) -> Result<Function> {
     match lua.named_registry_value::<Option<Function>>(key)? {
         Some(f) => Ok(f),
         None => err("mbar: no daemon connection outside of an engine call"),
@@ -112,14 +116,14 @@ pub(crate) fn flush(lua: &Lua, st: &Shared) -> Result<String> {
 // Handlers
 // ---------------------------------------------------------------------------
 
-fn new_id(st: &Shared) -> u64 {
+pub(crate) fn new_id(st: &Shared) -> u64 {
     let mut s = st.borrow_mut();
     s.next_id += 1;
     s.next_id
 }
 
 /// Registry entry `{ events = { [event] = fn }, any = fn? }` for handler `id`.
-fn handler_entry(lua: &Lua, id: u64) -> Result<Table> {
+pub(crate) fn handler_entry(lua: &Lua, id: u64) -> Result<Table> {
     let handlers: Table = lua.named_registry_value(KEY_HANDLERS)?;
     if let Some(t) = handlers.raw_get::<Option<Table>>(id)? {
         return Ok(t);
@@ -466,7 +470,7 @@ fn add(lua: &Lua, st: &Shared, args: Variadic<Value>) -> Result<Value> {
     Ok(Value::Table(make_item(lua, &name)?))
 }
 
-fn subscribe(
+pub(crate) fn subscribe(
     lua: &Lua,
     st: &Shared,
     name: &Value,

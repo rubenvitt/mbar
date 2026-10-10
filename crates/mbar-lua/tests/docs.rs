@@ -1,18 +1,22 @@
-//! Keeps `docs/LUA.md` and `lua/mbar.d.lua` honest: the documented stock config
-//! must run and behave like the stock SketchyBar config, and the LuaLS
-//! definitions must be valid Lua.
+//! Keeps `docs/LUA.md`, `docs/MIGRATING.md` and `lua/mbar.d.lua` honest: the
+//! documented stock config must run and behave like the stock SketchyBar config,
+//! the marked examples must run against the real API, and the LuaLS definitions
+//! must be valid Lua.
 
 use std::time::Duration;
 
-use mbar_lua::{parse_script, Host, LuaEngine};
+use mbar_lua::{parse_script, AerospaceResult, Host, LuaEngine};
 
 const LUA_MD: &str = include_str!("../../../docs/LUA.md");
+const MIGRATING_MD: &str = include_str!("../../../docs/MIGRATING.md");
 const DEFS: &str = include_str!("../../../lua/mbar.d.lua");
 
 #[derive(Default)]
 struct Mock {
     messages: Vec<Vec<String>>,
     spawned: Vec<(String, Option<u64>)>,
+    aerospace: Vec<(Vec<String>, Option<u64>)>,
+    on: Vec<(Vec<String>, u64)>,
 }
 
 impl Host for Mock {
@@ -24,6 +28,12 @@ impl Host for Mock {
         self.spawned.push((cmd, callback));
     }
     fn schedule(&mut self, _delay: Duration, _callback: u64) {}
+    fn aerospace(&mut self, args: Vec<String>, callback: Option<u64>) {
+        self.aerospace.push((args, callback));
+    }
+    fn on_events(&mut self, events: Vec<String>, handler: u64) {
+        self.on.push((events, handler));
+    }
 }
 
 fn stock_example() -> &'static str {
@@ -32,10 +42,15 @@ fn stock_example() -> &'static str {
 
 /// The code block after `<!-- example: <name> -->` in `docs/LUA.md`.
 fn example(name: &str) -> &'static str {
-    let start = LUA_MD
+    example_in(LUA_MD, name)
+}
+
+/// The code block after `<!-- example: <name> -->` in `doc`.
+fn example_in(doc: &'static str, name: &str) -> &'static str {
+    let start = doc
         .find(&format!("<!-- example: {name} -->"))
         .expect("example marker");
-    let rest = &LUA_MD[start..];
+    let rest = &doc[start..];
     let code = rest.find("```lua\n").expect("code block") + "```lua\n".len();
     let end = rest[code..].find("\n```").expect("end of code block");
     &rest[code..code + end]
@@ -50,12 +65,18 @@ fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 
 /// Handler id from `script=lua:<id>` in the `--set <item>` of a message.
 fn script_id(msg: &[String], item: &str) -> u64 {
+    prop_id(msg, item, "script=")
+}
+
+/// Handler id from `<key>lua:<id>` (`key` is e.g. `"click_script="`) in the
+/// `--set <item>` of a message.
+fn prop_id(msg: &[String], item: &str, key: &str) -> u64 {
     let mut i = 0;
     while i + 1 < msg.len() {
         if msg[i] == "--set" && msg[i + 1] == item {
             let mut j = i + 2;
             while j < msg.len() && !msg[j].starts_with("--") {
-                if let Some(v) = msg[j].strip_prefix("script=") {
+                if let Some(v) = msg[j].strip_prefix(key) {
                     return parse_script(v).expect("lua script");
                 }
                 j += 1;
@@ -63,7 +84,7 @@ fn script_id(msg: &[String], item: &str) -> u64 {
         }
         i += 1;
     }
-    panic!("no lua script for {item}");
+    panic!("no lua {key} for {item}");
 }
 
 fn has_seq(msg: &[String], seq: &[&str]) -> bool {
@@ -283,5 +304,119 @@ fn stock_config_example() {
     assert_eq!(
         host.messages,
         vec![vec!["--set", "battery", "icon=\u{f241}", "label=75%"]]
+    );
+}
+
+fn aero(exit_code: i32, stdout: &str) -> AerospaceResult {
+    AerospaceResult {
+        exit_code,
+        stdout: stdout.into(),
+        stderr: String::new(),
+    }
+}
+
+/// The workspace example of `docs/LUA.md` and its copy in `docs/MIGRATING.md`: items
+/// from `list-workspaces`, highlight on `aerospace_workspace_change`, click runs
+/// `aerospace workspace <sid>`.
+#[test]
+fn aerospace_workspace_examples() {
+    for (doc, src) in [
+        ("LUA.md", example("aerospace-spaces")),
+        (
+            "MIGRATING.md",
+            example_in(MIGRATING_MD, "aerospace-migrate"),
+        ),
+    ] {
+        let mut engine = LuaEngine::new().unwrap();
+        let mut host = Mock::default();
+        engine
+            .load_string(src, "=init.lua", &mut host)
+            .unwrap_or_else(|e| panic!("{doc}: {e}"));
+        assert_eq!(host.aerospace.len(), 1, "{doc}");
+        let (args, id) = host.aerospace[0].clone();
+        assert_eq!(args, ["list-workspaces", "--all"], "{doc}");
+        // An item-less handler: no item, no subscription message.
+        assert!(host.messages.is_empty(), "{doc}: {:?}", host.messages);
+        assert_eq!(host.on.len(), 1, "{doc}");
+        let (events, handler) = host.on[0].clone();
+        assert_eq!(events, ["aerospace_workspace_change"], "{doc}");
+
+        engine
+            .aerospace_finished(id.expect("callback"), aero(0, "1\n2\n"), &mut host)
+            .unwrap();
+        let added = host.messages.concat();
+        for sid in ["1", "2"] {
+            let name = format!("space.{sid}");
+            assert!(
+                has_seq(&added, &["--add", "item", &name, "left"]),
+                "{doc}: {added:?}"
+            );
+        }
+        assert!(
+            host.messages.iter().any(|m| m == &["--query", "aerospace"]),
+            "{doc}: the state is queried after adding the items"
+        );
+        let click = prop_id(&added, "space.2", "click_script=");
+        host.messages.clear();
+
+        engine
+            .run_handler(
+                handler,
+                &env(&[
+                    ("SENDER", "aerospace_workspace_change"),
+                    ("FOCUSED_WORKSPACE", "2"),
+                    ("PREV_WORKSPACE", "1"),
+                ]),
+                &mut host,
+            )
+            .unwrap();
+        let set = host.messages.concat();
+        assert!(
+            has_seq(&set, &["--set", "space.1", "background.drawing=off"]),
+            "{doc}: {set:?}"
+        );
+        assert!(
+            has_seq(&set, &["--set", "space.2", "background.drawing=on"]),
+            "{doc}: {set:?}"
+        );
+
+        engine
+            .run_handler(click, &env(&[("NAME", "space.2")]), &mut host)
+            .unwrap();
+        assert_eq!(
+            host.aerospace.last(),
+            Some(&(vec!["workspace".to_string(), "2".to_string()], None)),
+            "{doc}"
+        );
+    }
+}
+
+/// The `mbar.aerospace.query` example of `docs/LUA.md`.
+#[test]
+fn aerospace_windows_example() {
+    let mut engine = LuaEngine::new().unwrap();
+    let mut host = Mock::default();
+    engine
+        .load_string(example("aerospace-windows"), "=init.lua", &mut host)
+        .unwrap();
+    let (args, id) = host.aerospace[0].clone();
+    assert_eq!(args, ["list-windows", "--workspace", "focused", "--json"]);
+    engine
+        .aerospace_finished(
+            id.unwrap(),
+            aero(
+                0,
+                r#"[{"app-name":"Finder","window-id":1},{"app-name":"Mail","window-id":2}]"#,
+            ),
+            &mut host,
+        )
+        .unwrap();
+    assert_eq!(
+        host.messages,
+        vec![vec![
+            "--set".to_string(),
+            "windows".to_string(),
+            "label=Finder Mail".to_string()
+        ]]
     );
 }

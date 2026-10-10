@@ -15,7 +15,7 @@ the tests use.
      Downloads,
    - removing Homebrew SketchyBar, Homebrew JankyBorders (`borders`) and older mbar installs (it lists everything first),
    - using your existing `~/.config/sketchybar` config (a SbarLua `sketchybarrc` gets an `init.lua`)
-     and your `bordersrc` in place,
+     and your `bordersrc` in place (it also lists AeroSpace lines that run the SketchyBar trigger),
    - installing the `mbar`, `sketchybar` and `borders` commands (`/etc/paths.d/mbar`, one admin prompt),
    - starting mbar at login (System Settings → General → Login Items shows "mbar"),
    - Accessibility and Screen Recording.
@@ -35,7 +35,10 @@ The app needs macOS 13 or later. More about it:
   (for example a script of your own in `~/.local/bin`) is reported, never
   removed. Window-manager lines that start `borders` (in `aerospace.toml` or
   `yabairc`) are listed, not changed (see
-  [`MIGRATING.md`](MIGRATING.md#migrating-from-jankyborders)). Helpers
+  [`MIGRATING.md`](MIGRATING.md#migrating-from-jankyborders)). So are
+  AeroSpace `exec-on-workspace-change` settings that run
+  `sketchybar --trigger aerospace_workspace_change`: mbar receives that event
+  itself (see [`MIGRATING.md`](MIGRATING.md#using-aerospace)). Helpers
   that talk to SketchyBar's mach port (`git.felix.*`) are reported with a hint
   (see [`MIGRATING.md`](MIGRATING.md)).
 - The System page reopens the setup at any time. If you move or rename the

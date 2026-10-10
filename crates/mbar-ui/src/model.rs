@@ -888,6 +888,104 @@ pub fn borders_drawing_args(on: bool) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
+// AeroSpace
+// ---------------------------------------------------------------------------
+
+/// `--query aerospace` (mbar extension; design doc
+/// `docs/superpowers/specs/2026-10-09-aerospace-design.md`): the connection to AeroSpace
+/// and the state its events reported. Missing fields read as empty/zero.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AerospaceInfo {
+    pub connected: bool,
+    /// Whether mbar uses the integration at all (an `aerospace_*` subscription,
+    /// `provider=aerospace` or Lua `mbar.aerospace`). Daemons that predate the `active`
+    /// key read as on.
+    pub active: bool,
+    /// `socket`, `cli` or `none`.
+    pub transport: String,
+    /// AeroSpace's `serverVersionAndHash`, when known.
+    pub server_version: String,
+    /// Why the last connection attempt failed (while disconnected).
+    pub error: String,
+    pub focused_workspace: String,
+    pub prev_workspace: String,
+    pub mode: String,
+    /// Focused monitor id (1-based); 0 while unknown.
+    pub monitor: i64,
+}
+
+impl AerospaceInfo {
+    pub fn parse(text: &str) -> Result<AerospaceInfo, String> {
+        let v = parse_json_lenient(text)?;
+        AerospaceInfo::from_json(&v)
+    }
+
+    pub fn from_json(v: &Value) -> Result<AerospaceInfo, String> {
+        if !v.is_object() {
+            return Err("aerospace query did not return an object".into());
+        }
+        if v.get("connected").is_none() || v.get("transport").is_none() {
+            // An item named `aerospace` wins over the AeroSpace query (like `borders`).
+            return Err(if v.get("name").is_some() || v.get("type").is_some() {
+                "an item named 'aerospace' answers `--query aerospace`".into()
+            } else {
+                "not an AeroSpace status".into()
+            });
+        }
+        let s = |key: &str| match v.get(key) {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Number(n)) => n.to_string(),
+            _ => String::new(),
+        };
+        Ok(AerospaceInfo {
+            connected: on_off(v.get("connected")),
+            active: v.get("active").is_none_or(|a| on_off(Some(a))),
+            transport: s("transport"),
+            server_version: s("server_version"),
+            error: s("error"),
+            focused_workspace: s("focused_workspace"),
+            prev_workspace: s("prev_workspace"),
+            mode: s("mode"),
+            monitor: match v.get("monitor") {
+                Some(Value::Number(n)) => n.as_i64().unwrap_or(0),
+                Some(Value::String(s)) => s.trim().parse().unwrap_or(0),
+                _ => 0,
+            },
+        })
+    }
+
+    /// One status line for the System page.
+    pub fn summary(&self) -> String {
+        if !self.active {
+            // The daemon does not connect then: no connection error to report.
+            return "Not in use (no aerospace_* subscription or provider=aerospace)".to_string();
+        }
+        if !self.connected {
+            return if self.error.is_empty() {
+                "AeroSpace not running".to_string()
+            } else {
+                format!("Not connected: {}", self.error)
+            };
+        }
+        let via = match self.transport.as_str() {
+            "cli" => "CLI",
+            other => other,
+        };
+        let mut out = format!("Connected via {via}");
+        if !self.server_version.is_empty() {
+            out.push_str(&format!(" · AeroSpace {}", self.server_version));
+        }
+        if !self.focused_workspace.is_empty() {
+            out.push_str(&format!(" · workspace {}", self.focused_workspace));
+        }
+        if !self.mode.is_empty() {
+            out.push_str(&format!(" · mode {}", self.mode));
+        }
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Stats
 // ---------------------------------------------------------------------------
 
@@ -1790,6 +1888,93 @@ mod tests {
             vec!["--borders".to_string(), "drawing=on".to_string()]
         );
         assert_eq!(borders_drawing_args(false)[1], "drawing=off");
+    }
+
+    /// The `--query aerospace` layout from the design doc.
+    const AEROSPACE_QUERY: &str = "{\n\t\"connected\": \"on\",\n\t\"active\": \"on\",\n\t\"transport\": \"socket\",\n\t\"server_version\": \"0.20.0-Beta 33fa0643\",\n\t\"error\": \"\",\n\t\"focused_workspace\": \"2\",\n\t\"prev_workspace\": \"1\",\n\t\"mode\": \"main\",\n\t\"monitor\": 1\n}\n";
+
+    #[test]
+    fn aerospace_query_parsed() {
+        let a = AerospaceInfo::parse(AEROSPACE_QUERY).unwrap();
+        assert_eq!(
+            a,
+            AerospaceInfo {
+                connected: true,
+                active: true,
+                transport: "socket".into(),
+                server_version: "0.20.0-Beta 33fa0643".into(),
+                error: String::new(),
+                focused_workspace: "2".into(),
+                prev_workspace: "1".into(),
+                mode: "main".into(),
+                monitor: 1,
+            }
+        );
+        assert_eq!(
+            a.summary(),
+            "Connected via socket · AeroSpace 0.20.0-Beta 33fa0643 · workspace 2 · mode main"
+        );
+        let cli = AerospaceInfo {
+            transport: "cli".into(),
+            server_version: String::new(),
+            mode: String::new(),
+            ..a
+        };
+        assert_eq!(cli.summary(), "Connected via CLI · workspace 2");
+    }
+
+    #[test]
+    fn aerospace_query_disconnected() {
+        let text = "{\n\t\"connected\": \"off\",\n\t\"transport\": \"none\",\n\t\"server_version\": \"\",\n\t\"error\": \"connection refused\",\n\t\"focused_workspace\": \"\",\n\t\"prev_workspace\": \"\",\n\t\"mode\": \"\",\n\t\"monitor\": 0\n}\n";
+        let a = AerospaceInfo::parse(text).unwrap();
+        assert!(!a.connected);
+        assert_eq!(a.transport, "none");
+        assert_eq!(a.monitor, 0);
+        assert_eq!(a.summary(), "Not connected: connection refused");
+        let quiet = AerospaceInfo {
+            error: String::new(),
+            ..a
+        };
+        assert_eq!(quiet.summary(), "AeroSpace not running");
+    }
+
+    #[test]
+    fn aerospace_query_active() {
+        // Not in use: no connection error, whatever the daemon reports.
+        let off = "{\n\t\"connected\": \"off\",\n\t\"active\": \"off\",\n\t\"transport\": \"none\",\n\t\"server_version\": \"\",\n\t\"error\": \"connection refused\",\n\t\"focused_workspace\": \"\",\n\t\"prev_workspace\": \"\",\n\t\"mode\": \"\",\n\t\"monitor\": 0\n}\n";
+        let a = AerospaceInfo::parse(off).unwrap();
+        assert!(!a.active);
+        assert_eq!(
+            a.summary(),
+            "Not in use (no aerospace_* subscription or provider=aerospace)"
+        );
+        // In use but not connected: the error again.
+        let on = off.replace("\"active\": \"off\"", "\"active\": \"on\"");
+        let a = AerospaceInfo::parse(&on).unwrap();
+        assert!(a.active);
+        assert_eq!(a.summary(), "Not connected: connection refused");
+        // A daemon without the key (older mbar): in use.
+        let old = AEROSPACE_QUERY.replace("\t\"active\": \"on\",\n", "");
+        assert!(!old.contains("active"));
+        let a = AerospaceInfo::parse(&old).unwrap();
+        assert!(a.active);
+        assert!(
+            a.summary().starts_with("Connected via socket"),
+            "{}",
+            a.summary()
+        );
+    }
+
+    #[test]
+    fn aerospace_query_errors() {
+        // An item named `aerospace` answers the query instead.
+        let err = AerospaceInfo::parse(ITEM_FOO).unwrap_err();
+        assert!(err.contains("item named 'aerospace'"), "{err}");
+        assert!(AerospaceInfo::parse("[]").is_err());
+        assert!(AerospaceInfo::parse("{ \"x\": 1 }").is_err());
+        assert!(AerospaceInfo::parse("").is_err());
+        // The borders query is no AeroSpace status either.
+        assert!(AerospaceInfo::parse(BORDERS_QUERY).is_err());
     }
 
     #[test]

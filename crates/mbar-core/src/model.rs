@@ -5,6 +5,7 @@
 //! involve several items (popup membership, brackets, removal, ordering) live in
 //! `runtime.rs` (WP-C) and `group.rs`.
 
+use crate::aerospace::AerospaceState;
 use crate::bar::{BarProps, BarState};
 use crate::borders::BordersState;
 use crate::event::CustomEvents;
@@ -39,6 +40,10 @@ pub struct Model {
     /// Window-borders configuration (`--borders`, extension; `docs/spec/borders.md`).
     /// Survives `--reload` / hotload (carried over by `Runtime::reload`).
     pub borders: BordersState,
+    /// AeroSpace state and connection status (`Input::Aerospace` /
+    /// `Input::AerospaceStatus`, `--query aerospace`, `provider=aerospace`). Survives
+    /// `--reload` / hotload like `borders` (the connection does too).
+    pub aerospace: AerospaceState,
     next_id: u64,
     /// `ItemId` → index into `items` (PERF-8). `items` is a public `Vec` that the runtime
     /// reorders, inserts into and removes from directly, so the map is never trusted: every
@@ -79,6 +84,7 @@ impl Model {
             might_need_clipping: false,
             needs_ordering: false,
             borders: BordersState::default(),
+            aerospace: AerospaceState::default(),
             next_id: 1,
             index: RefCell::new(ItemIndex::default()),
         }

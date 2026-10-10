@@ -52,13 +52,19 @@
 ---| "media_change"
 ---| "space_windows_change"
 ---| "menus_change"
+---| "aerospace_workspace_change"
+---| "aerospace_focus_change"
+---| "aerospace_monitor_change"
+---| "aerospace_mode_change"
+---| "aerospace_window_detected"
+---| "aerospace_binding_triggered"
 ---| "routine"  # update_freq tick (handler-side only, never sent to --subscribe)
 ---| "forced"   # --update (handler-side only)
 ---| "*"        # catch-all
 ---| string
 
 ---Native data providers (docs/EXTENSIONS.md).
----@alias mbar.ProviderName "clock"|"cpu"|"memory"|"battery"|"volume"|"wifi"|"network"|"disk"|"front_app"|"media"|"none"
+---@alias mbar.ProviderName "clock"|"cpu"|"memory"|"battery"|"volume"|"wifi"|"network"|"disk"|"front_app"|"media"|"aerospace"|"none"
 
 ------------------------------------------------------------------------------
 -- Property tables
@@ -166,7 +172,7 @@
 ---@field format? string Label template with `{key}` placeholders
 ---@field icon_format? string Icon template
 ---@field freq? number Sampling interval in seconds
----@field args? string Provider specific (strftime format, interface, mount point)
+---@field args? string Provider specific (strftime format, interface, mount point, aerospace "workspace"/"mode"/"monitor")
 
 ---@class mbar.AppMenuProps
 ---@field font? string|mbar.FontProps
@@ -191,6 +197,17 @@
 ---@field SID? string Space items: Mission Control index
 ---@field DID? string Display index
 ---@field PERCENTAGE? string Slider items
+---@field FOCUSED_WORKSPACE? string AeroSpace workspace, focus and monitor events
+---@field PREV_WORKSPACE? string aerospace_workspace_change
+---@field AEROSPACE_FOCUSED_WORKSPACE? string Alias of FOCUSED_WORKSPACE (AeroSpace's own name)
+---@field AEROSPACE_PREV_WORKSPACE? string Alias of PREV_WORKSPACE
+---@field WINDOW_ID? string aerospace_focus_change (empty on an empty workspace), aerospace_window_detected
+---@field MONITOR_ID? string aerospace_monitor_change (1-based)
+---@field MODE? string aerospace_mode_change, aerospace_binding_triggered
+---@field WORKSPACE? string aerospace_window_detected
+---@field APP_BUNDLE_ID? string aerospace_window_detected
+---@field APP_NAME? string aerospace_window_detected
+---@field BINDING? string aerospace_binding_triggered
 ---@field [string] string Custom `mbar.trigger` variables
 
 ---@alias mbar.Handler fun(env: mbar.Env)
@@ -450,5 +467,57 @@ function mbar.json.decode(s) end
 ---@param v any
 ---@return string
 function mbar.json.encode(v) end
+
+------------------------------------------------------------------------------
+-- AeroSpace (docs/LUA.md "AeroSpace", docs/EXTENSIONS.md)
+------------------------------------------------------------------------------
+
+---AeroSpace events for `mbar.aerospace.on`, with or without the `aerospace_` prefix.
+---@alias mbar.AerospaceEvent
+---| "workspace_change"
+---| "focus_change"
+---| "monitor_change"
+---| "mode_change"
+---| "window_detected"
+---| "binding_triggered"
+---| "aerospace_workspace_change"
+---| "aerospace_focus_change"
+---| "aerospace_monitor_change"
+---| "aerospace_mode_change"
+---| "aerospace_window_detected"
+---| "aerospace_binding_triggered"
+
+---Result of `mbar.aerospace.run`.
+---@class mbar.AerospaceResult
+---@field exit_code integer The command's exit code; -1 when it could not run (AeroSpace not running, …)
+---@field stdout string
+---@field stderr string The command's error output, or why it could not run
+
+---Talks to a running AeroSpace directly (its socket; the `aerospace` CLI as fallback).
+---Commands run on a worker thread, callbacks on the daemon's Lua thread. The first
+---call connects mbar to AeroSpace.
+mbar.aerospace = {}
+
+---Runs one AeroSpace command, e.g. `mbar.aerospace.run({ "workspace", "3" })`.
+---Without `fn` it is fire and forget.
+---@param args (string|number)[] The `aerospace` arguments
+---@param fn? fun(result: mbar.AerospaceResult)
+function mbar.aerospace.run(args, fn) end
+
+---Runs one AeroSpace command and decodes its stdout as JSON, e.g.
+---`mbar.aerospace.query({ "list-windows", "--all", "--json" }, fn)`. `value` is nil and
+---`err` set when the command failed or its output is not JSON.
+---@param args (string|number)[]
+---@param fn fun(value: any, err: string?)
+function mbar.aerospace.query(args, fn) end
+
+---Registers an item-less, in-process handler for an AeroSpace event: item settings
+---(`updates`, `drawing`, the default item) do not affect it, `env.SENDER` is the event
+---and there is no `env.NAME`. Several handlers per event all run, in registration
+---order. When mbar already knows the state for the event, the handler is called once
+---right away with it.
+---@param event mbar.AerospaceEvent
+---@param fn mbar.Handler
+function mbar.aerospace.on(event, fn) end
 
 return mbar

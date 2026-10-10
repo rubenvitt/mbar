@@ -45,6 +45,14 @@ borders.
   lines keep working through a `borders -> mbar` symlink, so no separate
   `borders` process runs. Configure them with `mbar --borders …` or `mbar.borders{…}`
   in Lua. Off until configured.
+- **AeroSpace integration.** mbar receives
+  [AeroSpace](https://github.com/nikitabobko/AeroSpace)'s events itself, over its
+  socket: `aerospace_workspace_change` (with `FOCUSED_WORKSPACE`, as in the
+  SketchyBar recipe) and five more events are built in, so `exec-on-workspace-change`
+  and its shell chain are no longer needed. `provider=aerospace` shows the focused
+  workspace or the binding mode, and `mbar.aerospace.run/query/on` in Lua runs
+  AeroSpace commands and handles its events in-process. mbar connects only when a
+  config uses it.
 - **GPU (Metal) renderer.** One `CAMetalLayer` per bar and popup window.
   Instanced shape and text quads. Animations are paced to the display's refresh
   rate.
@@ -53,7 +61,8 @@ borders.
   separate from the bar. It has first-launch setup, a live
   item inspector with property editing, an event log, performance statistics
   (frame times, script spawns, slowest handlers), and a system page for
-  permissions, menu-bar auto-hide, launch at login, updates and config reload.
+  permissions, menu-bar auto-hide, window borders, the AeroSpace connection,
+  launch at login, updates and config reload.
 - **Signed app with auto-updates.** A notarized `mbar.app` in a DMG. The daemon
   checks for new versions once a day and the app installs them with
   [Sparkle](https://sparkle-project.org).
@@ -129,6 +138,11 @@ lines in `yabairc` or `aerospace.toml` when the `borders` symlink is on the
 window manager's `PATH`. See
 [Migrating from JankyBorders](docs/MIGRATING.md#migrating-from-jankyborders).
 
+Using AeroSpace: mbar receives its workspace changes itself, so remove the
+`exec-on-workspace-change` line from `aerospace.toml`. Your AeroSpace items and
+plugin scripts keep working. See
+[Using AeroSpace](docs/MIGRATING.md#using-aerospace).
+
 ## Performance design
 
 - **No work when idle.** A single deadline timer drives `update_freq`,
@@ -156,9 +170,9 @@ hardware.
 | Document | Contents |
 |---|---|
 | [`docs/INSTALL.md`](docs/INSTALL.md) | The app and its setup, updates, building from source, LaunchAgent, permissions, uninstalling |
-| [`docs/MIGRATING.md`](docs/MIGRATING.md) | Switching from SketchyBar / SbarLua / JankyBorders |
+| [`docs/MIGRATING.md`](docs/MIGRATING.md) | Switching from SketchyBar / SbarLua / JankyBorders, using AeroSpace |
 | [`docs/LUA.md`](docs/LUA.md) | Lua configuration API |
-| [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) | Commands, properties, providers, the `app_menu` item and window borders (`--borders`) that are new in mbar |
+| [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) | Commands, properties, providers, the `app_menu` item, window borders (`--borders`) and the AeroSpace events that are new in mbar |
 | [`docs/DEVIATIONS.md`](docs/DEVIATIONS.md) | Deliberate differences from SketchyBar and JankyBorders |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Crates, data flow, IPC, renderer |
 | [`docs/spec/`](docs/spec/) | Behavioural specification of SketchyBar that mbar implements |
