@@ -4,7 +4,7 @@
 
 mod wpc_common;
 use mbar_core::geometry::Rect;
-use mbar_core::platform::{Effect, Input, PlatformRequest};
+use mbar_core::platform::{Effect, Input, LuaRequest, PlatformRequest};
 use mbar_core::privacy::{Attributions, PrivacySample};
 use wpc_common::*;
 
@@ -178,4 +178,41 @@ fn add_event_with_a_notification_observes_nothing() {
     assert!(!platform(&fx)
         .iter()
         .any(|p| matches!(p, PlatformRequest::ObserveNotification(_))));
+}
+
+fn on(h: &mut H, handler: u64) -> Vec<Effect> {
+    h.input(Input::Lua(LuaRequest::On {
+        events: vec!["privacy_indicator_change".into()],
+        handler,
+    }))
+}
+
+fn callbacks(fx: &[Effect]) -> Vec<(u64, Vec<(String, String)>)> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::LuaCallback { handler, env } => Some((*handler, env.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn global_handler_starts_detection_once() {
+    let mut h = H::new();
+    assert_eq!(starts(&on(&mut h, 1)), 1);
+    assert_eq!(starts(&on(&mut h, 2)), 0);
+    assert_eq!(starts(&add_watcher(&mut h, "a")), 0, "started once");
+}
+
+#[test]
+fn late_global_handler_gets_the_state_once() {
+    let mut h = H::new();
+    assert!(callbacks(&on(&mut h, 1)).is_empty(), "no state yet");
+    feed(&mut h, sample(true, &["com.a"]));
+    let fx = on(&mut h, 2);
+    let cb = callbacks(&fx);
+    assert_eq!(cb.len(), 1, "{fx:?}");
+    assert_eq!(cb[0].0, 2);
+    assert!(cb[0].1.contains(&("MIC".to_string(), "com.a".to_string())));
+    assert!(callbacks(&on(&mut h, 2)).is_empty(), "already registered");
 }

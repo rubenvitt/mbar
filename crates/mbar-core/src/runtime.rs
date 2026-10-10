@@ -2181,22 +2181,14 @@ impl Runtime {
             return;
         };
         for ev in events {
-            let builtin: Option<&'static str> = aerospace::EVENT_NAMES
-                .iter()
-                .copied()
-                .find(|n| *n == ev.as_str())
-                .or_else(|| (ev == privacy::EVENT_NAME).then_some(privacy::EVENT_NAME));
+            let builtin = Self::builtin_event(ev);
             if let Some(name) = builtin {
                 // Built-in events: registered on first use (same registry entry as
                 // `--add event`), and their source is started.
                 if self.model.events.flag(ev).is_none() {
                     self.model.events.append(ev, None);
                 }
-                if name == privacy::EVENT_NAME {
-                    self.start_privacy(effects);
-                } else {
-                    self.start_aerospace(effects);
-                }
+                self.start_builtin(name, effects);
             }
             let Some(flag) = self.model.events.flag(ev) else {
                 let _ = write!(rsp, "[?] Event: '{ev}' not found\n");
@@ -3566,6 +3558,24 @@ impl Runtime {
         self.anim = anim;
     }
 
+    /// The `'static` name of a built-in event (`aerospace_*`, `privacy_indicator_change`).
+    fn builtin_event(name: &str) -> Option<&'static str> {
+        aerospace::EVENT_NAMES
+            .iter()
+            .copied()
+            .find(|n| *n == name)
+            .or_else(|| (name == privacy::EVENT_NAME).then_some(privacy::EVENT_NAME))
+    }
+
+    /// Starts the source of the built-in event `name` on first use.
+    fn start_builtin(&mut self, name: &str, effects: &mut Vec<Effect>) {
+        if name == privacy::EVENT_NAME {
+            self.start_privacy(effects);
+        } else {
+            self.start_aerospace(effects);
+        }
+    }
+
     /// The env of the synthetic event `name` for a late subscriber, if its state is known.
     fn initial_env(&self, name: &str) -> Option<EnvVars> {
         if name == privacy::EVENT_NAME {
@@ -3671,10 +3681,10 @@ impl Runtime {
             {
                 continue;
             }
-            let aerospace_event = aerospace::EVENT_NAMES.iter().find(|n| **n == ev.as_str());
+            let builtin = Self::builtin_event(&ev);
             self.global_handlers.push((ev, handler));
-            if let Some(name) = aerospace_event {
-                self.start_aerospace(effects);
+            if let Some(name) = builtin {
+                self.start_builtin(name, effects);
                 self.queue_initial(Listener::Global(handler), name);
             }
         }
