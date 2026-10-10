@@ -12,8 +12,10 @@ use serde_json::{json, Map, Value};
 pub const EVENT_NAME: &str = "privacy_indicator_change";
 
 /// `log stream` / `log show` predicate for Control Center's attribution lines
-/// (subsystem `com.apple.controlcenter`, category `sensor-indicators`).
-pub const LOG_PREDICATE: &str = "subsystem == \"com.apple.controlcenter\" AND category == \"sensor-indicators\" AND (eventMessage BEGINSWITH \"Active activity attributions changed to \" OR eventMessage BEGINSWITH \"Sorted active attributions from SystemStatus update: \")";
+/// (subsystem `com.apple.controlcenter`, category `sensor-indicators`). The image path
+/// rejects lines other processes log under Control Center's subsystem (os_log strings are
+/// not authenticated).
+pub const LOG_PREDICATE: &str = "subsystem == \"com.apple.controlcenter\" AND category == \"sensor-indicators\" AND processImagePath == \"/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter\" AND (eventMessage BEGINSWITH \"Active activity attributions changed to \" OR eventMessage BEGINSWITH \"Sorted active attributions from SystemStatus update: \")";
 
 /// Apps per sensor, each list sorted and without duplicates.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -389,6 +391,15 @@ mod tests {
         assert!(!st.attribution && st.attributions == Attributions::default());
         let c = st.apply(sample(false, &[], None));
         assert!(c.any && c.geometry);
+    }
+
+    #[test]
+    fn predicate_pins_control_center() {
+        assert!(LOG_PREDICATE.contains(
+            "processImagePath == \"/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter\""
+        ));
+        assert!(LOG_PREDICATE.contains(&format!("eventMessage BEGINSWITH \"{CHANGED_PREFIX}\"")));
+        assert!(LOG_PREDICATE.contains(&format!("eventMessage BEGINSWITH \"{SORTED_PREFIX}\"")));
     }
 
     #[test]

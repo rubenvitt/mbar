@@ -25,7 +25,7 @@ The workspace's `cargo test --workspace` compiles `mbar-macos` only on macOS. On
 - Script variables: `VISIBLE` (`on`/`off`), `MIC`, `CAMERA`, `SCREEN`, `AUDIO`, `LOCATION` (comma-separated, sorted bundle ids; empty when none).
 - `INFO` keys: `visible`, `frame` (`{x,y,w,h}` integers, omitted while hidden), `mic`, `camera`, `screen`, `audio`, `location` (arrays), `attribution` (`on`/`off`). `--query privacy_indicator` adds `active` and `inset`.
 - Log kinds → lists: `mic`→mic, `cam`→camera, `scr`→screen, `aud`→audio, `loc`→location; other kinds ignored.
-- Log predicate (exact): `subsystem == "com.apple.controlcenter" AND category == "sensor-indicators" AND (eventMessage BEGINSWITH "Active activity attributions changed to " OR eventMessage BEGINSWITH "Sorted active attributions from SystemStatus update: ")`.
+- Log predicate (exact): `subsystem == "com.apple.controlcenter" AND category == "sensor-indicators" AND processImagePath == "/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter" AND (eventMessage BEGINSWITH "Active activity attributions changed to " OR eventMessage BEGINSWITH "Sorted active attributions from SystemStatus update: ")`.
 - Indicator window: owner `Window Server`, layer `2147483630`, `0 < width, height <= 64` pt.
 - `--query bar` output must stay byte-identical to SketchyBar's (the `default_query` test in `bar.rs` pins it). The inset is **not** added there.
 - Nothing starts before the first `--subscribe` to the event or `privacy_indicator_inset=on`; `--query privacy_indicator` never starts it.
@@ -243,7 +243,7 @@ const SORTED_PREFIX: &str = "Sorted active attributions from SystemStatus update
 
 /// `log stream` / `log show` predicate for Control Center's attribution lines
 /// (subsystem `com.apple.controlcenter`, category `sensor-indicators`).
-pub const LOG_PREDICATE: &str = "subsystem == \"com.apple.controlcenter\" AND category == \"sensor-indicators\" AND (eventMessage BEGINSWITH \"Active activity attributions changed to \" OR eventMessage BEGINSWITH \"Sorted active attributions from SystemStatus update: \")";
+pub const LOG_PREDICATE: &str = "subsystem == \"com.apple.controlcenter\" AND category == \"sensor-indicators\" AND processImagePath == \"/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter\" AND (eventMessage BEGINSWITH \"Active activity attributions changed to \" OR eventMessage BEGINSWITH \"Sorted active attributions from SystemStatus update: \")";
 
 /// Apps per sensor, each list sorted and without duplicates.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

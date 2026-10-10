@@ -235,8 +235,13 @@ main thread.
 - **Log reader.** A child `/usr/bin/log stream --style ndjson --predicate
   '<predicate>'` (own process group), with the predicate
   `subsystem == "com.apple.controlcenter" AND category == "sensor-indicators" AND
+  processImagePath == "/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter" AND
   (eventMessage BEGINSWITH "Active activity attributions changed to " OR
   eventMessage BEGINSWITH "Sorted active attributions from SystemStatus update: ")`.
+  The `processImagePath` clause is required: os_log subsystem and category strings
+  are not authenticated, so any local process could log under
+  `com.apple.controlcenter` and inject fake attribution lines. Only Control Center's
+  SIP-protected binary matches.
   A reader thread classifies each line with `privacy::classify_stream_line`
   and forwards `Line`/`Unparsed` to the worker; end of output is `StreamExited`.
 - **Initial state.** After every successful spawn, one `log show --last 1h --style
