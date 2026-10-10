@@ -111,11 +111,10 @@ are dropped.
 - `frame` is the bounding box of all indicator windows, in global points with a
   top-left origin (the space of `--query displays` and the bar frames). It is
   omitted while `visible` is `off`.
-- `attribution` is `on` while the log stream runs. It is `off` while the stream
-  is not running (not available, restarting), and also once the dot has been
-  visible for 10 s without a single line having parsed since the stream started
-  (the line format changed). The five lists are then empty; `visible` and
-  `frame` are still correct.
+- `attribution` is `on` while the log stream runs and its lines parse. It is
+  `off` while the stream is not running (not available, restarting) and after
+  a format change was detected (see [Format check](#mbar-core-tracker)). The
+  five lists are then empty; `visible` and `frame` are still correct.
 - `LOCATION`/`location` is reported because Control Center reports it; whether it
   makes the dot visible is up to macOS (`visible` comes from the window, not from
   the lists).
@@ -140,12 +139,14 @@ instead of `w - padding_right` (`layout.rs`, `horizontal_pass`). The bar's exist
 displays, bottom bars and vertical bars are not affected (no intersection). The
 change is applied on the next frame, without animation.
 
-`--query bar` reports the property. Setting it to `on` starts the detection (see
-[Lifecycle](#lifecycle)).
+`--query bar` keeps SketchyBar's exact output, as for `hide_menubar`; the setting
+shows as `inset` in `--query privacy_indicator`. Setting it to `on` starts the
+detection.
 
 ## `--query privacy_indicator`
 
-The `INFO` object plus `"active": "on"|"off"` (whether the detection was started).
+The `INFO` object plus `"active": "on"|"off"` (whether the detection was started)
+and `"inset": "on"|"off"` (the bar property).
 The query never starts it. An item named `privacy_indicator` wins over this query, as
 with `--query borders`.
 
@@ -171,7 +172,43 @@ use the existing API. `lua/mbar.d.lua` gets the property, the event name and a
   match returns `None`.
 - `PrivacySample { visible, frames, attributions: Option<Attributions> }`: what the
   platform reports. `attributions: None` means "unknown" (stream down).
+- `classify_stream_line(&str) -> StreamLine`: one `log stream`/`log show` ndjson
+  line → `Attributions(a)`, `Unparsed` (the message starts with one of the two
+  prefixes but the rest does not parse) or `Other` (the leading
+  `Filtering the log data using …` line, anything else).
 - Event variables, `INFO` and the query JSON are built here.
+
+### mbar-core: `Tracker`
+
+The detection's timing and merging rules, pure and driven with explicit
+`Instant`s so they are unit tested on Linux. The macOS worker only feeds it and
+does what it asks (spawn the stream, look at the windows).
+
+- **Inputs:** `StreamStarted`, `StreamExited`, `Line(Attributions)`, `Unparsed`,
+  `History(Option<Attributions>)`, `Windows(Vec<Rect>)`, `Nudge`.
+- **Outputs:** `restart_at()` (when to spawn `log stream`), `next_check()` (when
+  to look at the windows), `ready()` and `sample()` (the `PrivacySample` to post).
+- **History vs. stream.** The stream is started first; the `log show` result
+  (`History`) is applied only if no stream line has parsed since the stream
+  (re)started, so an older historical line never overwrites a newer live one.
+- **When the window is checked.** At start; after every parsed line at 0, 0.3, 1
+  and 2 s (fade-in and fade-out); again 2 s after any check whose frames differ
+  from the previous one, until two consecutive checks agree; on `Nudge` (display
+  reconfiguration, wake). Besides that a safety poll: every 10 s while the
+  stream runs, every 2 s while it does not. The probe saw the window move by
+  4 pt for about 10 s after a new source appeared; the safety poll bounds such a
+  stale frame to 10 s, and it is what notices the dot at all if Control Center
+  stops logging the lines.
+- <a id="mbar-core-tracker"></a>**Format check.** `attribution` turns `off` when
+  (a) a line starts with a known prefix but does not parse (`Unparsed`), or
+  (b) the window turns from hidden to visible while the stream runs and no line
+  parsed between 3 s before the previous (hidden) check and 3 s after the
+  visible one. A change line arrives before the window appears, so (b) does not
+  fire for a working stream. The first check after start is not a transition, so
+  a dot that is already visible at launch never trips it. The next parsed line
+  turns `attribution` back `on`.
+- **Restart.** `StreamExited` schedules a restart with a backoff (1 s, doubling,
+  at most 30 s); the next parsed line resets it to 1 s.
 
 ### mbar-core: runtime and layout
 
@@ -182,45 +219,38 @@ use the existing API. `lua/mbar.d.lua` gets the property, the event name and a
   anything changed, `privacy_indicator_change` is triggered with the variables and
   `INFO` above; if `visible` or `frames` changed and the inset is on, the bars
   are laid out again.
-- Late subscribers get the stored state as a synthetic event (same mechanism as
-  `aerospace_initial`).
+- Late subscribers get the stored state as a synthetic event (the mechanism of
+  `aerospace_initial`, generalised to both kinds of built-in events).
 - `--reload` keeps the state and the running detection (like AeroSpace); the
   inset property comes back with the re-run config.
 - `layout::horizontal_pass` applies the inset described above.
 
 ### mbar-macos: `sys::privacy` (new module)
 
-One worker thread owns the detection and posts `Input::PrivacyIndicator` through
-the `Waker`; nothing runs on the main thread.
+One worker thread drives the `Tracker` and posts `SysEvent::PrivacyIndicator`
+through the `Sink` (mapped to `Input::PrivacyIndicator`); nothing runs on the
+main thread.
 
 - **Log reader.** A child `/usr/bin/log stream --style ndjson --predicate
   '<predicate>'` (own process group), with the predicate
   `subsystem == "com.apple.controlcenter" AND category == "sensor-indicators" AND
   (eventMessage BEGINSWITH "Active activity attributions changed to " OR
   eventMessage BEGINSWITH "Sorted active attributions from SystemStatus update: ")`.
-  A reader thread parses each line's `eventMessage` with
-  `privacy::parse_log_message` and forwards changes to the worker.
-- **Initial state.** At start, one `log show --last 1h --style ndjson` with the
-  same predicate; the newest parsed line is the starting list. If nothing is found
-  the lists start empty and fill with the next line (the sorted line repeats
-  several times a minute while a source is active).
+  A reader thread classifies each line with `privacy::classify_stream_line`
+  and forwards `Line`/`Unparsed` to the worker; end of output is `StreamExited`.
+- **Initial state.** After every successful spawn, one `log show --last 1h --style
+  ndjson` with the same predicate on its own thread; the newest parsed line is
+  sent as `History`. If nothing is found the lists stay empty and fill with the
+  next line (the sorted line repeats while a source is active).
 - **Window check.** `CGWindowListCopyWindowInfo(optionOnScreenOnly)`, keeping
   windows with owner `Window Server`, layer `2147483630` and at most 64×64 pt.
   Owner, layer and bounds are readable without the Screen Recording permission;
   the name `StatusIndicator` is not used for matching. The filter is a pure
   function over a list of window records, so it is unit tested.
-- **When the window is checked.** After every attribution change, at 0, 0.3, 1
-  and 2 s (fade-in and fade-out); immediately on display reconfiguration and wake
-  (the platform nudges the worker). While the log stream is not running, every
-  2 s.
-- **Format check.** The worker tracks whether any line parsed since the stream
-  started. When the window has been visible for 10 s and none has, it reports
-  `attributions: None` (with one warning) until a line parses.
-- **Restart.** If `log stream` exits or fails to start, the worker reports
-  `attributions: None`, falls back to the 2 s window check and restarts the child
-  with a backoff (1 s, doubling, at most 30 s).
-- **Shutdown.** The child's process group is terminated when mbar exits, like
-  running scripts.
+- **When.** Whenever the `Tracker` asks (`next_check()`, `restart_at()`); the
+  platform sends `Nudge` on display reconfiguration and wake.
+- **Shutdown.** The `log stream` child is killed when mbar exits (like the media
+  helper).
 
 The headless platform logs `StartPrivacyIndicator` and ignores it; tests inject
 `Input::PrivacyIndicator` directly.
@@ -228,9 +258,14 @@ The headless platform logs `StartPrivacyIndicator` and ignores it; tests inject
 ## Risks
 
 - **The log line is not an API.** Apple can change or drop it with any macOS
-  update. The stream then keeps running but nothing parses: the 10-second rule
-  in [the event](#event-privacy_indicator_change) turns `attribution` `off` and
-  logs one warning. The inset and `visible` keep working from the window.
+  update. A changed text after the prefix is caught at once (`Unparsed`); a
+  renamed message is caught by the hidden→visible rule of the
+  [format check](#mbar-core-tracker), with the safety poll noticing the window.
+  Either way `attribution` turns `off`, and the inset and `visible` keep working
+  from the window.
+- **App Nap.** The worker sleeps in `recv_timeout`; if macOS throttles mbar's
+  timers, window checks can come late. Lines from the pipe still wake the worker
+  at once. To be checked in the manual test.
 - **The window may change.** A different layer or owner name would make
   `visible` stay `off` (the bar then behaves as without the feature). The layer is
   a named constant next to the filter, with the measured values in a comment.
@@ -241,9 +276,15 @@ The headless platform logs `StartPrivacyIndicator` and ignores it; tests inject
 ## Testing
 
 - Core unit tests: both message forms (fixtures copied from the real log lines
-  above, including `[]` and a display name with parentheses), unknown kinds,
-  garbage; state merge and de-duplication; event variables and `INFO`; frame
-  omitted while hidden; query JSON with `active`.
+  above, including `[]`, a display name with parentheses, a duplicated entry and
+  the leading `Filtering the log data using …` line), unknown kinds, garbage;
+  state merge and de-duplication; event variables and `INFO`; frame omitted
+  while hidden; query JSON with `active` and `inset`.
+- `Tracker` tests: history after a live line is ignored; a frame that moves and
+  returns ends at the returned frame; a dot visible at startup does not trip the
+  format check; a renamed message (no lines) does; `Unparsed` does at once; a
+  stream that keeps exiting backs off to 30 s and reports no attributions while
+  the window check falls back to 2 s.
 - Layout tests: inset applied when the indicator intersects the bar; not applied
   for another display, a bottom bar, a vertical bar or with the property `off`;
   `padding_right` kept as the gap; non-`right` items unchanged.
