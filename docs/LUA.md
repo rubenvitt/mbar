@@ -530,6 +530,8 @@ apps behind it change. `env.info` holds `visible`, `frame` and one list of bundl
 ids per sensor (`mic`, `camera`, `screen`, `audio`, `location`); the same lists are
 in `env.MIC`, `env.CAMERA`, … as comma-separated strings. With
 `privacy_indicator_inset = true` the right-hand items move out of the dot's way.
+Subscribe with `item:subscribe("privacy_indicator_change", fn)`; there is no
+item-less global handler for this event. The first subscription starts the detection.
 Details in [`EXTENSIONS.md`](EXTENSIONS.md#privacy-indicator).
 
 <!-- example: privacy-indicator -->
@@ -598,8 +600,9 @@ per config load:
 * `on_events(events, handler)` (`mbar.aerospace.on`) registers an item-less
   handler: whenever one of `events` fires, call `run_handler(handler, env, host)`
   with the event's variables and `SENDER=<event>` (no `NAME`). Forget these
-  registrations on reload. A handler for `privacy_indicator_change` starts the
-  privacy detection and, like a late `--subscribe`, gets the stored state once.
+  registrations on reload. `mbar.aerospace.on` only accepts AeroSpace events, so
+  Lua configs have no item-less handler for `privacy_indicator_change`; they use
+  `item:subscribe`.
 * `Host::command` runs while the engine is borrowed: events that target Lua
   handlers, and `--reload`, produced by those commands must be queued and run
   after the engine call returns.

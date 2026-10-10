@@ -168,15 +168,18 @@ use the existing API. `lua/mbar.d.lua` gets the property, the event name and a
 - `parse_log_message(&str) -> Option<Attributions>`, pure: accepts both message
   forms above. Change lines: a JSON array of `"<kind>:<bundle id>"` strings. Sorted
   lines: entries `[<kind>] <display name> (<bundle id>)`, the bundle id being the
-  last parenthesised group of each entry (display names may contain parentheses,
-  e.g. `Audio Routing Kit (ARK)`). Unknown kinds are ignored; a line that does not
-  match returns `None`.
+  last parenthesised group of each entry and matching `[A-Za-z0-9._-]+`; the
+  display name may contain only balanced parentheses (e.g. `Audio Routing Kit
+  (ARK)`), so a crafted name cannot fake further entries. Unknown kinds are
+  ignored; a line that does not match this strictly (also a display name
+  containing `, [`) returns `None`.
 - `PrivacySample { visible, frames, attributions: Option<Attributions> }`: what the
   platform reports. `attributions: None` means "unknown" (stream down).
 - `classify_stream_line(&str) -> StreamLine`: one `log stream`/`log show` ndjson
-  line → `Attributions(a)`, `Unparsed` (the message starts with one of the two
-  prefixes but the rest does not parse) or `Other` (the leading
-  `Filtering the log data using …` line, anything else).
+  line → `Attributions(a)`, `Unparsed` (a `changed to` message whose rest does not
+  parse: the format changed) or `Other` (the leading
+  `Filtering the log data using …` line, a `Sorted` line that does not parse
+  strictly, anything else). Only the JSON `changed to` line signals format drift.
 - Event variables, `INFO` and the query JSON are built here.
 
 ### mbar-core: `Tracker`
@@ -196,8 +199,18 @@ does what it asks (spawn the stream, look at the windows).
   line has parsed since the stream (re)started, so an older historical line never
   overwrites a newer live one, and a late result of an earlier spawn is ignored.
   An applied history line counts as a parsed line for the format check.
-- **When the window is checked.** At start; after every parsed line at 0, 0.3, 1
-  and 2 s (fade-in and fade-out); again 2 s after any check whose frames differ
+- **Attribution is known** only after the first parsed line or the `History` of the
+  current spawn (`History(spawn, None)`, "nothing found", counts: it is a real empty
+  state). Until then `sample()` reports `attributions: None`, so the first event
+  does not claim "nothing active" while the history (about 5 s for `log show`) is
+  still running. The flag is never reset, a restart keeps it; `History(spawn, None)`
+  keeps the stored attributions (the gap-limited `log show` window found no change
+  since the previous stream). If `log show` cannot be spawned, the worker sends
+  `History(spawn, None)` anyway.
+- **When the window is checked.** At start; after the first parsed line of a
+  stream and every line that changes the attributions, at 0, 0.3, 1 and 2 s
+  (fade-in and fade-out; a repeated identical line, e.g. the `Sorted` twin of a
+  `changed to` line, schedules nothing); again 2 s after any check whose frames differ
   from the previous one, until two consecutive checks agree; on `Nudge` (display
   reconfiguration, wake). Besides that a safety poll: every 10 s while the
   stream runs, every 2 s while it does not. The probe saw the window move by
@@ -239,7 +252,7 @@ through the `Sink` (mapped to `Input::PrivacyIndicator`); nothing runs on the
 main thread.
 
 - **Log reader.** A child `/usr/bin/log stream --style ndjson --predicate
-  '<predicate>'` (own process group), with the predicate
+  '<predicate>'`, with the predicate
   `subsystem == "com.apple.controlcenter" AND category == "sensor-indicators" AND
   processImagePath == "/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter" AND
   (eventMessage BEGINSWITH "Active activity attributions changed to " OR
@@ -250,17 +263,23 @@ main thread.
   SIP-protected binary matches.
   A reader thread classifies each line with `privacy::classify_stream_line`
   and forwards `Line`/`Unparsed` to the worker; end of output is `StreamExited`.
-- **Initial state.** After every successful spawn, one `log show --last 1h --style
+  The child stays in mbar's process group (like the media helper): launchd stopping
+  the job reaps it too. A failed spawn (for example no `/usr/bin/log`) is logged once
+  per failure streak, not at every retry.
+- **Initial state.** After every successful spawn, one `log show --last <window> --style
   ndjson` with the same predicate on its own thread; the newest parsed line is
-  sent as `History` with the spawn number. If nothing is found the lists stay empty and fill with the
-  next line (the sorted line repeats while a source is active).
+  sent as `History` with the spawn number. `<window>` is `1h` for the first spawn and, for a restart,
+  the seconds since the previous stream exited plus 5, at most `3600s` (the full
+  hour on every restart costs about 2.8 s of CPU). If nothing is found the lists
+  stay as they are and change with the next line (the sorted line repeats while a source is active).
 - **Window check.** `CGWindowListCopyWindowInfo(optionOnScreenOnly)`, keeping
   windows with owner `Window Server`, layer `2147483630` and at most 64×64 pt.
   Owner, layer and bounds are readable without the Screen Recording permission;
   the name `StatusIndicator` is not used for matching. The filter is a pure
   function over a list of window records, so it is unit tested.
 - **When.** Whenever the `Tracker` asks (`next_check()`, `restart_at()`); the
-  platform sends `Nudge` on display reconfiguration and wake.
+  platform sends `Nudge` on display reconfiguration, wake and when the native
+  menu bar is shown or hidden (the dot window may move or appear).
 - **Shutdown.** The `log stream` child is killed when mbar exits (like the media
   helper).
 

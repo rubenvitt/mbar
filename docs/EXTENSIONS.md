@@ -457,9 +457,10 @@ It fires whenever the stored state changes; identical samples are dropped.
 * `frame` is the bounding box of all indicator windows, in global points with a
   top-left origin (the space of `--query displays` and the bar frames). It is omitted
   while `visible` is `off`.
-* `attribution` is `on` while the log stream runs and its lines parse. It is `off`
-  while the stream is not running (not available, restarting) and after a format
-  change was detected (see [Caveat](#caveat)). The five lists are then empty;
+* `attribution` is `on` while the log stream runs and its lines parse, once the first
+  line or the starting state (`log show`, about 5 s after the start) has arrived. It
+  is `off` before that, while the stream is not running (not available, restarting)
+  and after a format change was detected (see [Caveat](#caveat)). The five lists are then empty;
   `visible` and `frame` are still correct.
 * `location` is reported because Control Center reports it; whether it makes the dot
   visible is up to macOS (`visible` comes from the window, not from the lists).
@@ -507,8 +508,8 @@ Nothing runs until the first of:
 
 * a `--subscribe` to `privacy_indicator_change`,
 * `privacy_indicator_inset=on`,
-* an in-process handler for the event registered through `Host::on_events` (see
-  [`LUA.md`](LUA.md#for-daemon-integrators)); it also gets the stored state once.
+* `item:subscribe("privacy_indicator_change", fn)` in a Lua config (that is a
+  `--subscribe` too). Lua has no item-less global handler for this event.
 
 Without any of these mbar never looks, so nothing changes for users who do not need
 it. The detection and the stored state survive `--reload`; the inset property comes
@@ -526,12 +527,16 @@ back with the re-run config.
   authenticated, so without it any local process could log fake attribution lines.
   The kinds `mic`, `cam`, `scr`, `aud` and `loc` map to `mic`, `camera`, `screen`,
   `audio` and `location`; other kinds are ignored. After each start of the stream
-  one `log show --last 1h` reads the state from before.
+  one `log show` reads the state from before: the last hour for the first start, later
+  only the time since the previous stream exited (plus 5 s). Only `changed to` lines
+  count as format changes; a `Sorted` line whose display names do not parse strictly
+  is ignored.
 * **The window.** The dot is a `Window Server` window at layer `2147483630`, at most
   64 x 64 pt, found with `CGWindowListCopyWindowInfo`. Owner, layer and bounds are
   readable without the Screen Recording permission, so mbar asks for none. The
   window is checked after each log line (several times, to follow the fade-in and
-  fade-out), after display changes and wake, and by a safety poll: every 10 s while
+  fade-out), after display changes, wake and when the native menu bar is shown or hidden, and by a
+  safety poll: every 10 s while
   the log stream runs, every 2 s while it does not.
 * **Restart.** If `log stream` exits, mbar restarts it with a backoff of 1 s,
   doubling up to 30 s. A parsed line, or a stream that ran for at least 30 s, resets

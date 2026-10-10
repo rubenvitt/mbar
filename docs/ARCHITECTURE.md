@@ -196,8 +196,10 @@ The core owns the stored state, the lazy start and the inset; the detection live
 
 * The `Tracker` is pure (explicit `Instant`s) and tested on Linux; the worker only
   feeds it and does what it asks.
-* In-process global handlers (`Host::on_events`) for the event start the detection
-  and get the stored state once, like late subscribers.
+* The runtime also supports item-less in-process handlers (`LuaRequest::On`, a host
+  concern): one for the event starts the detection and gets the stored state once, like
+  a late subscriber. The Lua API has no way to register one for this event; Lua configs
+  use `item:subscribe`.
 * The headless platform logs `StartPrivacyIndicator` and ignores it.
 
 ### mbar-ipc
