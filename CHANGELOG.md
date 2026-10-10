@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/rubenvitt/mbar/compare/v0.3.3...v0.4.0) (2026-10-09)
+
+
+### Features
+
+* window borders (JankyBorders take-over) ([#20](https://github.com/rubenvitt/mbar/issues/20)) ([442e605](https://github.com/rubenvitt/mbar/commit/442e605b287e91c2d5826d0b30d88416b751bd63))
+
 ## [0.3.3](https://github.com/rubenvitt/mbar/compare/v0.3.2...v0.3.3) (2026-10-08)
 
 
