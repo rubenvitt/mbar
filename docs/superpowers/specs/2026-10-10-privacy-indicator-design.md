@@ -17,8 +17,9 @@ Measured with throwaway probes on the built-in display (2056 pt wide):
 - **The dot is a window.** `CGWindowListCopyWindowInfo` lists it while it is
   visible: owner `Window Server`, name `StatusIndicator`, layer `2147483630`,
   bounds `{x: 2025, y: 3, w: 28, h: 28}`. Two windows with identical bounds were
-  listed at once. The bounds move briefly (`{x: 2029, y: 1}` for about 10 s) when a
-  new source appears.
+  listed at once. Twice the bounds moved to `{x: 2029, y: 1}` for about 10 s; the
+  cause is unknown (possibly the menu bar being revealed on hover; adding Photo
+  Booth while ARK was active did not move it).
 - **No window without a source.** With no source active the window is gone
   (`optionAll` too). It appears together with the first source and disappears
   about 0.8 s after the last one ends (fade-out).
@@ -196,7 +197,7 @@ does what it asks (spawn the stream, look at the windows).
   from the previous one, until two consecutive checks agree; on `Nudge` (display
   reconfiguration, wake). Besides that a safety poll: every 10 s while the
   stream runs, every 2 s while it does not. The probe saw the window move by
-  4 pt for about 10 s after a new source appeared; the safety poll bounds such a
+  4 pt for about 10 s (cause unknown); the safety poll bounds such a
   stale frame to 10 s, and it is what notices the dot at all if Control Center
   stops logging the lines.
 - <a id="mbar-core-tracker"></a>**Format check.** `attribution` turns `off` when

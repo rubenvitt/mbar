@@ -40,7 +40,7 @@ Claude-Session: https://claude.ai/code/session_01TFbFwBojJj8T6Zp3UGdojW
 
 ## Review Focus
 
-1. **Indicator frame shifts after a new source** (probe: 2025 → 2029 for ~10 s → 2025): the stored frame must end at the returned value, not stay at 2029 → `Tracker` test `moving_frame_settles` (Task 2).
+1. **Indicator frame shifts for a while** (probe: 2025 → 2029 for ~10 s → 2025, cause unknown, possibly the menu bar revealed on hover): the stored frame must end at the returned value, not stay at 2029 → `Tracker` test `moving_frame_settles` (Task 2).
 2. **`log show` result arriving after a live `log stream` line** must not overwrite it → `Tracker` test `history_after_live_line_is_ignored` (Task 2).
 3. **Dot already visible at launch** (always-on ARK) must not flip `attribution` off → `Tracker` test `visible_at_startup_does_not_trip_format_check` (Task 2).
 4. **`log stream` missing or exiting repeatedly**: backoff to 30 s, `attribution` off, window check every 2 s so the inset keeps working → `Tracker` test `stream_exits_back_off_and_poll_fast` (Task 2).
@@ -1969,6 +1969,8 @@ Then stop the installed bar for the duration of the test (quit mbar.app's daemon
 4. `pgrep -fl "log stream --style ndjson"` shows exactly one child of the test daemon; it is gone after the daemon exits.
 5. With mbar idle for a minute, `ps -o %cpu -p <daemon pid>` stays near 0.
 
-Record the outcome (pass/fail per point) in the PR description. Restart the installed bar afterwards.
+6. **As actually launched:** restart the installed bar (login item / `launchctl kickstart -k gui/$(id -u)/dev.rubeen.mbar` after installing the new build, see `docs/INSTALL.md`) with a config that sets `privacy_indicator_inset=on`. Check that `pgrep -P <daemon pid> -fl "log stream"` finds exactly one child and that `mbar --query privacy_indicator` shows `visible: on` and `audio: ["com.rogueamoeba.arkaudiod"]` — this proves `log stream` and the window owner name work without the terminal's permissions.
+
+Record the outcome (pass/fail per point) in the PR description.
 
 - [ ] **Step 3: Commit any fixes** from the manual run (each with its own test where possible).
