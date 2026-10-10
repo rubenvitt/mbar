@@ -31,6 +31,7 @@ pub mod hotload;
 pub mod mach_server;
 pub mod menus;
 pub mod mouse;
+pub mod privacy;
 pub mod providers;
 pub mod script;
 pub mod spaces;
@@ -46,6 +47,8 @@ pub type Sink = Arc<dyn Fn(SysEvent) + Send + Sync>;
 /// is done by the integration layer; the comments name the target.
 #[derive(Debug)]
 pub enum SysEvent {
+    /// Privacy indicator sample from [`privacy`] (worker thread), de-duplicated.
+    PrivacyIndicator(mbar_core::privacy::PrivacySample),
     /// `NSWorkspaceDidActivateApplicationNotification` → `OsEvent::FrontAppSwitched`
     /// (`front_app_switched`, INFO = `name` when present).
     FrontAppSwitched {

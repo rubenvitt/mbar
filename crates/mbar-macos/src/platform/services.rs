@@ -22,10 +22,13 @@
 //! | `SetHotload(b)` | `HotloadWatcher::set_enabled(b)` (normally consumed by the driver) |
 //! | `MachSend{service, payload}` | `mach_server::send_to_service` on a worker thread |
 //! | `SetBorders(update)` | `borders::configure(update)` (main thread; window events then go straight from the SkyLight notify proc to `sys::borders`) |
+//! | `StartPrivacyIndicator` | `privacy::start` (worker thread: `log stream` + window checks; reply `SysEvent::PrivacyIndicator`) |
 //!
 //! Window borders also follow `DisplaysReconfigured` / `SystemWoke` (recreate),
 //! `SpaceChange` (consistency pass) and `FrontAppSwitched` (focus re-check) in
 //! [`Services::translate`]; [`Services::shutdown`] destroys every border window.
+//! The privacy worker is nudged on `DisplaysReconfigured` / `SystemWoke` /
+//! `MenuBarHidingChanged`; `shutdown` kills its `log stream`.
 
 use super::convert::{self, monitored_kind, sys_event_to_input, window_mouse_input};
 use super::resources::{core_rect, MacResources};
@@ -39,6 +42,7 @@ use crate::sys::hotload::HotloadWatcher;
 use crate::sys::mach_server::{self, MachServer};
 use crate::sys::menus::{self, MenuObserver};
 use crate::sys::mouse::{MonitorOptions, MouseKind as SysMouseKind, MouseMonitor};
+use crate::sys::privacy;
 use crate::sys::providers::Providers;
 use crate::sys::{MachReply, Sink, SysEvent};
 use mbar_core::geometry::Point;
@@ -177,18 +181,24 @@ impl Services {
                 res.refresh_displays();
                 wm.mark_displays_changed();
                 borders::on_displays_changed();
+                privacy::nudge();
             }
             SysEvent::SystemWoke { .. } => {
                 res.refresh_displays();
                 wm.mark_displays_changed();
                 borders::on_system_woke();
+                privacy::nudge();
             }
             SysEvent::DisplayChange { .. } => res.refresh_displays(),
             SysEvent::SpaceChange { .. } => {
                 res.refresh_displays();
                 borders::on_space_changed();
             }
-            SysEvent::MenuBarHidingChanged => res.refresh_menu_bar(),
+            SysEvent::MenuBarHidingChanged => {
+                res.refresh_menu_bar();
+                // The dot window may move or appear with the native menu bar.
+                privacy::nudge();
+            }
             SysEvent::WifiChange(ref s) => res.last_ssid = Some(s.clone()),
             SysEvent::FrontAppSwitched { .. } => {
                 self.ensure_menu_observer();
@@ -359,6 +369,7 @@ impl Services {
             PlatformRequest::SetBorders(update) => borders::configure(*update),
             // The binary owns the AeroSpace connection (it is platform independent).
             PlatformRequest::StartAerospace => {}
+            PlatformRequest::StartPrivacyIndicator => privacy::start(self.sink.clone()),
         }
     }
 
@@ -392,6 +403,7 @@ impl Services {
         borders::shutdown();
         menus::restore_menubar_autohide();
         media::stop();
+        privacy::stop();
         self.mach_tx = None;
     }
 }

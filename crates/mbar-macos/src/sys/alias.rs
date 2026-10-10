@@ -64,7 +64,7 @@ pub fn sort_menu_extras(items: &mut [MenuExtraWindow]) {
     }
 }
 
-fn rect_from_bounds(d: &CFDictionary) -> Option<CGRect> {
+pub(crate) fn rect_from_bounds(d: &CFDictionary) -> Option<CGRect> {
     let get = |k| {
         util::dict_get(d, k)
             .and_then(|v| util::cf_f64(&v).or_else(|| util::cf_i64(&v).map(|i| i as f64)))

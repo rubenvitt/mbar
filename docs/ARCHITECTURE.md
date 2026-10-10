@@ -68,6 +68,7 @@ Pure logic. No Apple types, no threads, no I/O except what is injected.
 | `provider` | native providers (clock, cpu, memory, battery, ...) formatting |
 | `borders` | window-border configuration (`--borders`, `--query borders`): JankyBorders' argument parser, settings, `apply-to` overrides, update masks |
 | `aerospace` | AeroSpace events (`AerospaceEvent`: JSON parsing, mbar event names, script variables, `INFO`) and the connection status (`AerospaceStatus`) for `--query aerospace` |
+| `privacy` | privacy indicator: Control Center log-line parser, state, `privacy_indicator_change` payload, `--query privacy_indicator`, and the `Tracker` (window-check timing, history order, format check, backoff) |
 | `platform` | the traits/enums the core uses to talk to a platform |
 | `runtime` | `Runtime`: owns all state, consumes `Input`, emits `Effect`s |
 
@@ -172,6 +173,35 @@ The core owns the events, the stored state and the lazy start. The connection li
   as a synthetic event, delivered to that subscriber only.
 * The connection and the stored state survive `--reload`.
 
+#### Privacy indicator
+
+The core owns the stored state, the lazy start and the inset; the detection lives in
+`mbar-macos`. Nothing runs before the first request:
+
+```
+ first --subscribe privacy_indicator_change / privacy_indicator_inset=on (not --query)
+                                   │
+        Runtime ──► Effect::Platform(PlatformRequest::StartPrivacyIndicator)   (once)
+                                   │
+        Services::execute ──► sys::privacy::start(sink)
+                                   │ worker thread: Tracker; `log stream` child + reader;
+                                   │ `log show` once per spawn; CGWindowList checks
+                                   ▼
+        SysEvent::PrivacyIndicator(sample) ──► Input::PrivacyIndicator
+                                   │
+        Runtime: store (survives --reload), fire privacy_indicator_change on change,
+                 bar_needs_update when the dot moved and the inset is on;
+                 layout::horizontal_pass ends right items at the dot
+```
+
+* The `Tracker` is pure (explicit `Instant`s) and tested on Linux; the worker only
+  feeds it and does what it asks.
+* The runtime also supports item-less in-process handlers (`LuaRequest::On`, a host
+  concern): one for the event starts the detection and gets the stored state once, like
+  a late subscriber. The Lua API has no way to register one for this event; Lua configs
+  use `item:subscribe`.
+* The headless platform logs `StartPrivacyIndicator` and ignores it.
+
 ### mbar-ipc
 
 * Unix domain socket `<dir>/mbar_<user>_<bar_name>.socket` (mode 0600), where `<dir>` is
@@ -210,6 +240,7 @@ The core owns the events, the stored state and the lazy start. The connection li
 | `alias` | menu-extra discovery (CGWindowList) and capture |
 | `menus` | Accessibility: front app menu titles, open a menu (AXPress), hide native menu bar |
 | `providers` | native samples: cpu, memory, battery, network, disk, volume, wifi |
+| `privacy` | privacy indicator worker: `log stream`/`log show` children, `CGWindowList` indicator filter, drives `mbar_core::privacy::Tracker` |
 | `mach` | mach server `dev.rubeen.<bar_name>` |
 
 ### mbar (binary)

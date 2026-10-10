@@ -321,6 +321,7 @@ pub fn power_source(s: &str) -> Option<PowerSource> {
 /// | `CaptureGating` | `Event(CaptureDisabled)` |
 /// | `Mouse` | `Mouse` via [`monitor_mouse_input`] |
 /// | `ConfigChanged` | `Event(ConfigChanged)` |
+/// | `PrivacyIndicator` | `PrivacyIndicator` |
 /// | `ScriptFinished` | `ScriptFinished{pid, item: None, output}` |
 /// | `MediaArtwork`, `AliasUpdate`, `MachMessage` | `None` (stateful, see `Bridge`) |
 pub fn sys_event_to_input(ev: SysEvent) -> Option<Input> {
@@ -344,6 +345,7 @@ pub fn sys_event_to_input(ev: SysEvent) -> Option<Input> {
         SysEvent::MediaChange(s) => Input::Event(OsEvent::MediaChanged(s)),
         SysEvent::SystemWillSleep => Input::Event(OsEvent::SystemWillSleep),
         SysEvent::SystemWoke { .. } => Input::Event(OsEvent::SystemWoke),
+        SysEvent::PrivacyIndicator(s) => Input::PrivacyIndicator(s),
         SysEvent::DistributedNotification {
             name,
             user_info_json,
@@ -827,6 +829,11 @@ mod tests {
                 screen_unlocked: true
             }),
             Some(Input::Event(OsEvent::SystemWoke))
+        );
+        let s = mbar_core::privacy::PrivacySample::default();
+        assert_eq!(
+            map(SysEvent::PrivacyIndicator(s.clone())),
+            Some(Input::PrivacyIndicator(s))
         );
         assert_eq!(
             map(SysEvent::DistributedNotification {

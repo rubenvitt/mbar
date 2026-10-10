@@ -11,6 +11,7 @@ use crate::borders::BordersState;
 use crate::event::CustomEvents;
 use crate::item::{BarItem, ItemId, ItemType, Position};
 use crate::platform::{ImageInfo, Resources};
+use crate::privacy::PrivacyState;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -44,6 +45,9 @@ pub struct Model {
     /// `Input::AerospaceStatus`, `--query aerospace`, `provider=aerospace`). Survives
     /// `--reload` / hotload like `borders` (the connection does too).
     pub aerospace: AerospaceState,
+    /// Privacy indicator state (`Input::PrivacyIndicator`, `--query privacy_indicator`,
+    /// the bar inset). Survives `--reload`.
+    pub privacy: PrivacyState,
     next_id: u64,
     /// `ItemId` → index into `items` (PERF-8). `items` is a public `Vec` that the runtime
     /// reorders, inserts into and removes from directly, so the map is never trusted: every
@@ -85,6 +89,7 @@ impl Model {
             needs_ordering: false,
             borders: BordersState::default(),
             aerospace: AerospaceState::default(),
+            privacy: PrivacyState::default(),
             next_id: 1,
             index: RefCell::new(ItemIndex::default()),
         }

@@ -168,6 +168,8 @@ pub enum PropRequest {
     ResetBars,
     /// `--bar hide_menubar=<bool>` (extension).
     MenuBarHidden(bool),
+    /// `--bar privacy_indicator_inset=on` (extension): start the detection.
+    StartPrivacyIndicator,
 }
 
 /// An error response of a setter. `Display` yields SketchyBar's exact message text

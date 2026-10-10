@@ -420,3 +420,42 @@ fn aerospace_windows_example() {
         ]]
     );
 }
+
+/// The privacy indicator example of `docs/LUA.md`: inset on, the clock subscribes
+/// and turns orange while an app uses the microphone.
+#[test]
+fn privacy_indicator_example() {
+    let mut engine = LuaEngine::new().unwrap();
+    let mut host = Mock::default();
+    engine
+        .load_string(example("privacy-indicator"), "=init.lua", &mut host)
+        .unwrap();
+    let msg = host.messages.concat();
+    assert!(
+        has_seq(&msg, &["--bar", "privacy_indicator_inset=on"]),
+        "{msg:?}"
+    );
+    assert!(
+        has_seq(&msg, &["--subscribe", "clock", "privacy_indicator_change"]),
+        "{msg:?}"
+    );
+    let handler = script_id(&msg, "clock");
+    host.messages.clear();
+    engine
+        .run_handler(
+            handler,
+            &env(&[
+                ("NAME", "clock"),
+                ("SENDER", "privacy_indicator_change"),
+                ("MIC", "com.goodsnooze.MacWhisper"),
+                (
+                    "INFO",
+                    r#"{"visible":"on","mic":["com.goodsnooze.MacWhisper"],"camera":[],"screen":[],"audio":[],"location":[],"attribution":"on"}"#,
+                ),
+            ]),
+            &mut host,
+        )
+        .unwrap();
+    let set = host.messages.concat();
+    assert!(set.iter().any(|a| a.starts_with("label.color=")), "{set:?}");
+}

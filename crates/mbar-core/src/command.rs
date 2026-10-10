@@ -82,6 +82,8 @@ pub enum QueryTarget {
     /// Extension `--query aerospace`: AeroSpace connection status and state (an existing
     /// item named `aerospace` still wins).
     Aerospace,
+    /// `--query privacy_indicator` (extension).
+    PrivacyIndicator,
 }
 
 /// `--monitor [events|stats|all]` (extension).
@@ -436,6 +438,7 @@ fn batch_command(command: &str, line: &[&str]) -> Command {
             "menus" => QueryTarget::Menus,
             "borders" => QueryTarget::Borders,
             "aerospace" => QueryTarget::Aerospace,
+            "privacy_indicator" => QueryTarget::PrivacyIndicator,
             other => QueryTarget::Name(other.to_string()),
         }),
         "--reorder" => Command::Reorder(rest(0)),

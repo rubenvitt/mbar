@@ -39,6 +39,7 @@ use crate::platform::{
     PlatformRequest, ReplyToken, Resources, SpaceMove, SystemQuery, SystemValue, TextKey,
     WindowKey, WindowUpdate,
 };
+use crate::privacy::{self, PrivacySample};
 use crate::props::{
     AnimSpec, AnimTarget, HiddenRequest, PropCx, PropEffects, PropRequest, PropResult,
 };
@@ -248,16 +249,16 @@ pub struct Runtime {
     /// The last `aerospace` sample applied to each `provider=aerospace` item: an event that
     /// does not change an item's sample neither re-applies its label nor runs its script.
     aerospace_applied: HashMap<ItemId, Vec<(String, String)>>,
-    /// Late subscribers to `aerospace_*` events that get the stored state as a synthetic
-    /// event at the end of the current input (after layout, so `updates=when_shown`
-    /// gating sees the item's real visibility).
-    aerospace_initial: Vec<(Listener, &'static str)>,
+    /// Late subscribers to built-in events (`aerospace_*`, `privacy_indicator_change`) that
+    /// get the stored state as a synthetic event at the end of the current input (after
+    /// layout, so `updates=when_shown` gating sees the item's real visibility).
+    initial_events: Vec<(Listener, &'static str)>,
     /// Item-less in-process handlers (`LuaRequest::On`): `(event, handler)` in
     /// registration order. Cleared by `--reload`.
     global_handlers: Vec<(String, u64)>,
 }
 
-/// Who gets a synthetic AeroSpace event (`Runtime::aerospace_initial`).
+/// Who gets a synthetic built-in event (`Runtime::initial_events`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Listener {
     Item(ItemId),
@@ -370,7 +371,7 @@ impl Runtime {
             exiting: false,
             aerospace_pending: Vec::new(),
             aerospace_applied: HashMap::new(),
-            aerospace_initial: Vec::new(),
+            initial_events: Vec::new(),
             global_handlers: Vec::new(),
         }
     }
@@ -437,10 +438,11 @@ impl Runtime {
             Input::MenuTitles { app, titles } => self.menu_titles(app, titles, &mut effects),
             Input::Aerospace(ev) => self.aerospace_event(ev, &mut effects),
             Input::AerospaceStatus(status) => self.model.aerospace.status = status,
+            Input::PrivacyIndicator(sample) => self.privacy_sample(sample, &mut effects),
         }
         self.flush_aerospace_providers(&mut effects, res);
         self.refresh(false, res);
-        if self.flush_aerospace_initial(&mut effects) {
+        if self.flush_initial(&mut effects) {
             self.refresh(false, res);
         }
         effects
@@ -882,11 +884,14 @@ impl Runtime {
                 false
             }
             Command::AddEvent { name, notification } => {
-                // The AeroSpace events are built in (delivered by the core, aerospace
-                // design §Events): the SketchyBar recipe's `--add event
-                // aerospace_workspace_change [<notification>]` registers the name as before
-                // (same bit, `--trigger` keeps working) but never observes a notification.
-                let notification = notification.filter(|_| !aerospace::is_event_name(&name));
+                // The AeroSpace events and `privacy_indicator_change` are built in
+                // (delivered by the core, aerospace and privacy-indicator designs
+                // §Events): the SketchyBar recipe's
+                // `--add event aerospace_workspace_change [<notification>]` registers the
+                // name as before (same bit, `--trigger` keeps working) but never observes a
+                // notification.
+                let notification = notification
+                    .filter(|_| !aerospace::is_event_name(&name) && name != privacy::EVENT_NAME);
                 match self.model.events.append(&name, notification.as_deref()) {
                     AppendResult::Added(_) => {
                         if let Some(n) = notification {
@@ -1378,6 +1383,7 @@ impl Runtime {
                 PropRequest::MenuBarHidden(h) => {
                     effects.push(Effect::Platform(PlatformRequest::SetMenuBarHidden(h)));
                 }
+                PropRequest::StartPrivacyIndicator => self.start_privacy(effects),
             }
         }
         out
@@ -1852,12 +1858,14 @@ impl Runtime {
         self.animator.clear();
         let borders = std::mem::take(&mut self.model.borders);
         let aerospace = std::mem::take(&mut self.model.aerospace);
+        let privacy = std::mem::take(&mut self.model.privacy);
         self.model = Model::new();
         self.model.borders = borders;
         self.model.aerospace = aerospace;
+        self.model.privacy = privacy;
         self.aerospace_pending.clear();
         self.aerospace_applied.clear();
-        self.aerospace_initial.clear();
+        self.initial_events.clear();
         // The re-run (Lua) config registers its item-less handlers again.
         self.global_handlers.clear();
         self.anim = None;
@@ -2174,14 +2182,14 @@ impl Runtime {
             return;
         };
         for ev in events {
-            let aerospace_event = aerospace::EVENT_NAMES.iter().find(|n| **n == ev.as_str());
-            if aerospace_event.is_some() {
-                // Built-in AeroSpace events: registered on first use (same registry entry
-                // as `--add event`), and the connection is started.
+            let builtin = Self::builtin_event(ev);
+            if let Some(name) = builtin {
+                // Built-in events: registered on first use (same registry entry as
+                // `--add event`), and their source is started.
                 if self.model.events.flag(ev).is_none() {
                     self.model.events.append(ev, None);
                 }
-                self.start_aerospace(effects);
+                self.start_builtin(name, effects);
             }
             let Some(flag) = self.model.events.flag(ev) else {
                 let _ = write!(rsp, "[?] Event: '{ev}' not found\n");
@@ -2209,10 +2217,10 @@ impl Runtime {
             if let Some(it) = self.model.item_mut(id) {
                 let new = !it.update_mask.contains(flag);
                 it.update_mask.insert(flag);
-                if let Some(name) = aerospace_event.filter(|_| new) {
-                    // AeroSpace sent its state once per connection, maybe before this
-                    // item existed (shell loops, `--reload`): deliver what is known.
-                    self.queue_aerospace_initial(Listener::Item(id), name);
+                if let Some(name) = builtin.filter(|_| new) {
+                    // The state may have arrived before this item existed (shell loops,
+                    // `--reload`): deliver what is known.
+                    self.queue_initial(Listener::Item(id), name);
                 }
             }
         }
@@ -3551,27 +3559,53 @@ impl Runtime {
         self.anim = anim;
     }
 
-    /// Queues the synthetic event `name` for `who` (a late subscriber), if the state for it
-    /// is known (delivered by [`Runtime::flush_aerospace_initial`]).
-    fn queue_aerospace_initial(&mut self, who: Listener, name: &'static str) {
-        if self.model.aerospace.synthetic_event(name).is_some()
-            && !self.aerospace_initial.contains(&(who, name))
-        {
-            self.aerospace_initial.push((who, name));
+    /// The `'static` name of a built-in event (`aerospace_*`, `privacy_indicator_change`).
+    fn builtin_event(name: &str) -> Option<&'static str> {
+        aerospace::EVENT_NAMES
+            .iter()
+            .copied()
+            .find(|n| *n == name)
+            .or_else(|| (name == privacy::EVENT_NAME).then_some(privacy::EVENT_NAME))
+    }
+
+    /// Starts the source of the built-in event `name` on first use.
+    fn start_builtin(&mut self, name: &str, effects: &mut Vec<Effect>) {
+        if name == privacy::EVENT_NAME {
+            self.start_privacy(effects);
+        } else {
+            self.start_aerospace(effects);
         }
     }
 
-    /// Delivers the queued synthetic AeroSpace events, each to its subscriber only (item
+    /// The env of the synthetic event `name` for a late subscriber, if its state is known.
+    fn initial_env(&self, name: &str) -> Option<EnvVars> {
+        if name == privacy::EVENT_NAME {
+            return self.model.privacy.known.then(|| self.privacy_env());
+        }
+        self.model
+            .aerospace
+            .synthetic_event(name)
+            .map(|ev| Self::aerospace_env(&ev))
+    }
+
+    /// Queues the synthetic event `name` for `who` (a late subscriber), if the state for it
+    /// is known (delivered by [`Runtime::flush_initial`]).
+    fn queue_initial(&mut self, who: Listener, name: &'static str) {
+        if self.initial_env(name).is_some() && !self.initial_events.contains(&(who, name)) {
+            self.initial_events.push((who, name));
+        }
+    }
+
+    /// Delivers the queued synthetic built-in events, each to its subscriber only (item
     /// gating as for a real event). Returns whether anything was queued.
-    fn flush_aerospace_initial(&mut self, effects: &mut Vec<Effect>) -> bool {
-        if self.aerospace_initial.is_empty() {
+    fn flush_initial(&mut self, effects: &mut Vec<Effect>) -> bool {
+        if self.initial_events.is_empty() {
             return false;
         }
-        for (who, name) in std::mem::take(&mut self.aerospace_initial) {
-            let Some(ev) = self.model.aerospace.synthetic_event(name) else {
+        for (who, name) in std::mem::take(&mut self.initial_events) {
+            let Some(env) = self.initial_env(name) else {
                 continue;
             };
-            let env = Self::aerospace_env(&ev);
             match who {
                 Listener::Item(id) => {
                     let subscribed = self
@@ -3648,12 +3682,48 @@ impl Runtime {
             {
                 continue;
             }
-            let aerospace_event = aerospace::EVENT_NAMES.iter().find(|n| **n == ev.as_str());
+            let builtin = Self::builtin_event(&ev);
             self.global_handlers.push((ev, handler));
-            if let Some(name) = aerospace_event {
-                self.start_aerospace(effects);
-                self.queue_aerospace_initial(Listener::Global(handler), name);
+            if let Some(name) = builtin {
+                self.start_builtin(name, effects);
+                self.queue_initial(Listener::Global(handler), name);
             }
+        }
+    }
+
+    // ------------------------------------------------------------------------------
+    // Privacy indicator (extension, `docs/superpowers/specs/2026-10-10-privacy-indicator-design.md`).
+    // ------------------------------------------------------------------------------
+
+    /// Emits `PlatformRequest::StartPrivacyIndicator` the first time it is needed.
+    fn start_privacy(&mut self, effects: &mut Vec<Effect>) {
+        if !self.model.privacy.active {
+            self.model.privacy.active = true;
+            effects.push(Effect::Platform(PlatformRequest::StartPrivacyIndicator));
+        }
+    }
+
+    /// `INFO` + the event's variables.
+    fn privacy_env(&self) -> EnvVars {
+        let mut env = EnvVars::new();
+        env.set("INFO", self.model.privacy.info_json());
+        for (k, v) in self.model.privacy.env() {
+            env.set(k, v);
+        }
+        env
+    }
+
+    /// `Input::PrivacyIndicator`: stores the sample; on a change fires
+    /// `privacy_indicator_change` and, when the dot moved and the inset is on, lays the
+    /// bars out again.
+    fn privacy_sample(&mut self, s: PrivacySample, effects: &mut Vec<Effect>) {
+        let change = self.model.privacy.apply(s);
+        if change.geometry && self.model.bar.privacy_indicator_inset {
+            self.model.bar_needs_update = true;
+        }
+        if change.any {
+            let env = self.privacy_env();
+            self.trigger_event(EventInfo::new(privacy::EVENT_NAME, Some(env)), effects);
         }
     }
 

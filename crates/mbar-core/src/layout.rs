@@ -586,6 +586,23 @@ fn bar_window_frame(bar: &BarState) -> Rect {
     }
 }
 
+/// Privacy indicator extension (`privacy_indicator_inset`): the left edge of the
+/// leftmost indicator window that overlaps `bar`, relative to the bar, clamped to
+/// `0..=width`. `None` when the inset is off, the dot is hidden or does not overlap.
+fn privacy_right_edge(model: &Model, bar: &BarState) -> Option<f64> {
+    if !model.bar.privacy_indicator_inset || !model.privacy.visible {
+        return None;
+    }
+    model
+        .privacy
+        .frames
+        .iter()
+        .filter(|f| f.intersection(&bar.frame).is_some())
+        .map(|f| (f.x - bar.frame.x) as f64)
+        .reduce(f64::min)
+        .map(|x| x.clamp(0.0, bar.frame.width as f64))
+}
+
 fn is_builtin(bar: &BarState, res: &dyn Resources) -> bool {
     let displays = res.displays();
     displays
@@ -661,7 +678,8 @@ fn horizontal_pass(model: &mut Model, bar_index: usize, res: &mut dyn Resources)
     let bbg = &model.bar.background;
     let bbw = bbg.border_width;
     let mut cur_l = bbg.padding_left.max(0) as u32;
-    let mut cur_r = to_u32(w - bbg.padding_right.max(0) as f64);
+    let right_edge = privacy_right_edge(model, &bar).unwrap_or(w);
+    let mut cur_r = to_u32(right_edge - bbg.padding_right.max(0) as f64);
     let mut cur_c = to_u32((w - center_len) / 2.0);
     let mut cur_e = to_u32((w + notch) / 2.0);
     let mut cur_q = to_u32((w - notch) / 2.0);

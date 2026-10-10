@@ -18,6 +18,7 @@ pub mod layout;
 pub mod model;
 pub mod platform;
 pub mod popup;
+pub mod privacy;
 pub mod props;
 pub mod provider;
 pub mod query;

@@ -47,6 +47,10 @@ pub struct BarProps {
     pub background: Background,
     /// Extension `hide_menubar=on|off`.
     pub hide_menubar: bool,
+    /// Extension `privacy_indicator_inset=on|off`: right items avoid the privacy dot.
+    /// Not part of `--query bar` (SketchyBar's exact output); shown by
+    /// `--query privacy_indicator`.
+    pub privacy_indicator_inset: bool,
 }
 
 impl Default for BarProps {
@@ -77,6 +81,7 @@ impl Default for BarProps {
             window_level: level::BACKSTOP_MENU,
             background,
             hide_menubar: false,
+            privacy_indicator_inset: false,
         }
     }
 }
@@ -296,6 +301,17 @@ impl BarProps {
                 let changed = set_bool(&mut self.hide_menubar, on);
                 if changed {
                     cx.request(PropRequest::MenuBarHidden(on));
+                }
+                changed
+            }
+            "privacy_indicator_inset" => {
+                let on = value::parse_bool(v, self.privacy_indicator_inset);
+                let changed = set_bool(&mut self.privacy_indicator_inset, on);
+                if changed {
+                    cx.fx.bar_needs_update = true;
+                    if on {
+                        cx.request(PropRequest::StartPrivacyIndicator);
+                    }
                 }
                 changed
             }

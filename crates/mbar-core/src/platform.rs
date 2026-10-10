@@ -340,6 +340,8 @@ pub enum Input {
     Aerospace(crate::aerospace::AerospaceEvent),
     /// The AeroSpace connection was established, lost or failed.
     AerospaceStatus(crate::aerospace::AerospaceStatus),
+    /// The privacy indicator changed (`crate::privacy`; macOS `sys::privacy`).
+    PrivacyIndicator(crate::privacy::PrivacySample),
 }
 
 /// Things the platform must do on the core's behalf.
@@ -404,6 +406,9 @@ pub enum PlatformRequest {
     /// `mbar.aerospace`; never `--query aerospace`): connect and keep the event stream open.
     /// Handled by the binary, not the macOS layer.
     StartAerospace,
+    /// First use of the privacy indicator (a `privacy_indicator_change` subscription or
+    /// `privacy_indicator_inset=on`; never `--query privacy_indicator`): start detecting.
+    StartPrivacyIndicator,
 }
 
 /// Actions requested by `Runtime::handle`.
