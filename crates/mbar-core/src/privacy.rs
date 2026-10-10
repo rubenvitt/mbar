@@ -279,7 +279,9 @@ pub enum TrackerInput {
     /// A line with a known prefix that did not parse.
     Unparsed,
     /// The newest parsed line of the `log show` run after a spawn (`None`: none found).
-    History(Option<Attributions>),
+    /// The `u64` is the spawn number the platform read from [`Tracker::spawns`] right
+    /// after handling that spawn's `StreamStarted`; a history of another spawn is ignored.
+    History(u64, Option<Attributions>),
     /// The indicator windows found by a window check.
     Windows(Vec<Rect>),
     /// Display reconfiguration or wake: check the windows now.
@@ -309,6 +311,10 @@ pub struct Tracker {
     checks: Vec<Instant>,
     /// Hidden→visible seen: `(earliest acceptable line, evaluate at)`.
     pending_format_check: Option<(Instant, Instant)>,
+    /// Number of `StreamStarted` inputs so far.
+    spawns: u64,
+    /// When the current stream was started (`None` while it is not running).
+    stream_started_at: Option<Instant>,
 }
 
 impl Tracker {
@@ -327,6 +333,8 @@ impl Tracker {
             frames: Vec::new(),
             checks: vec![now],
             pending_format_check: None,
+            spawns: 0,
+            stream_started_at: None,
         }
     }
 
@@ -336,10 +344,19 @@ impl Tracker {
                 self.stream_running = true;
                 self.restart_at = None;
                 self.line_parsed = false;
-                self.drift = false;
+                self.spawns += 1;
+                self.stream_started_at = Some(now);
             }
             TrackerInput::StreamExited => {
+                // A stream that ran long enough counts as healthy: its next restart is quick.
+                if self
+                    .stream_started_at
+                    .is_some_and(|s| now.saturating_duration_since(s) >= BACKOFF_MAX)
+                {
+                    self.backoff = BACKOFF_MIN;
+                }
                 self.stream_running = false;
+                self.stream_started_at = None;
                 self.pending_format_check = None;
                 self.restart_at = Some(now + self.backoff);
                 self.backoff = (self.backoff * 2).min(BACKOFF_MAX);
@@ -360,11 +377,15 @@ impl Tracker {
                 }
                 self.schedule(now);
             }
-            TrackerInput::History(Some(a)) if !self.line_parsed => {
+            TrackerInput::History(spawn, Some(a)) if spawn == self.spawns && !self.line_parsed => {
                 self.attributions = a;
                 self.line_parsed = true;
+                // Counts as a parsed line for the format check (the window may have
+                // turned on before `log stream` subscribed).
+                self.last_line_at = Some(now);
+                self.drift = false;
             }
-            TrackerInput::History(_) => {}
+            TrackerInput::History(_, _) => {}
             TrackerInput::Windows(frames) => self.windows(normalize(frames), now),
             TrackerInput::Nudge => self.schedule(now),
         }
@@ -408,6 +429,11 @@ impl Tracker {
     /// When to spawn `log stream` (again).
     pub fn restart_at(&self) -> Option<Instant> {
         self.restart_at
+    }
+
+    /// The spawn number of the current stream (`StreamStarted` inputs so far).
+    pub fn spawns(&self) -> u64 {
+        self.spawns
     }
 
     /// When to look at the windows next.
@@ -669,12 +695,12 @@ mod tests {
         let old = a(&["old"], &[], &[], &[], &[]);
         let mut tr = started(t);
         tr.handle(TrackerInput::Line(new.clone()), t);
-        tr.handle(TrackerInput::History(Some(old.clone())), ms(t, 500));
+        tr.handle(TrackerInput::History(1, Some(old.clone())), ms(t, 500));
         tr.handle(TrackerInput::Windows(vec![]), ms(t, 600));
         assert_eq!(tr.sample().attributions, Some(new));
         // Before any live line the history applies.
         let mut tr = started(t);
-        tr.handle(TrackerInput::History(Some(old.clone())), t);
+        tr.handle(TrackerInput::History(1, Some(old.clone())), t);
         tr.handle(TrackerInput::Windows(vec![]), t);
         assert_eq!(tr.sample().attributions, Some(old));
     }
@@ -830,5 +856,83 @@ mod tests {
         assert!(tr.ready() && tr.sample().visible);
         tr.handle(TrackerInput::Nudge, ms(t, 4_000));
         assert_eq!(tr.next_check(), Some(ms(t, 4_000)));
+    }
+
+    #[test]
+    fn restart_keeps_drift() {
+        let t = Instant::now();
+        let mut tr = started(t);
+        tr.handle(TrackerInput::Windows(vec![]), t);
+        tr.handle(TrackerInput::Unparsed, ms(t, 1_000));
+        tr.handle(TrackerInput::StreamExited, ms(t, 2_000));
+        tr.handle(TrackerInput::StreamStarted, ms(t, 3_000));
+        tr.handle(TrackerInput::Windows(vec![]), ms(t, 3_000));
+        assert_eq!(tr.sample().attributions, None, "drift survives the restart");
+        tr.handle(
+            TrackerInput::Line(a(&["m"], &[], &[], &[], &[])),
+            ms(t, 4_000),
+        );
+        assert_eq!(
+            tr.sample().attributions,
+            Some(a(&["m"], &[], &[], &[], &[]))
+        );
+    }
+
+    #[test]
+    fn history_line_satisfies_format_check() {
+        let t = Instant::now();
+        let cam = a(&[], &["cam"], &[], &[], &[]);
+        let mut tr = started(t);
+        tr.handle(TrackerInput::Windows(vec![]), t);
+        // The camera turned on before `log stream` subscribed: the line comes as history.
+        tr.handle(TrackerInput::History(1, Some(cam.clone())), ms(t, 500));
+        tr.handle(TrackerInput::Windows(vec![f(2025.0)]), ms(t, 1_000));
+        tr.handle(TrackerInput::Windows(vec![f(2025.0)]), ms(t, 4_000));
+        assert_eq!(tr.sample().attributions, Some(cam));
+    }
+
+    #[test]
+    fn history_from_an_earlier_spawn_is_ignored() {
+        let t = Instant::now();
+        let l1 = a(&["l1"], &[], &[], &[], &[]);
+        let h2 = a(&["h2"], &[], &[], &[], &[]);
+        let old = a(&["old"], &[], &[], &[], &[]);
+        let mut tr = started(t);
+        assert_eq!(tr.spawns(), 1);
+        tr.handle(TrackerInput::Line(l1.clone()), ms(t, 1_000));
+        tr.handle(TrackerInput::StreamExited, ms(t, 2_000));
+        tr.handle(TrackerInput::StreamStarted, ms(t, 3_000));
+        assert_eq!(tr.spawns(), 2);
+        // The `log show` of spawn 1 arrives late.
+        tr.handle(TrackerInput::History(1, Some(old)), ms(t, 3_000));
+        tr.handle(TrackerInput::Windows(vec![]), ms(t, 3_000));
+        assert_eq!(tr.sample().attributions, Some(l1));
+        // The history of spawn 2 applies: no live line has come yet.
+        tr.handle(TrackerInput::History(2, Some(h2.clone())), ms(t, 3_500));
+        assert_eq!(tr.sample().attributions, Some(h2));
+    }
+
+    #[test]
+    fn long_running_stream_resets_backoff() {
+        let t = Instant::now();
+        let mut tr = Tracker::new(t);
+        // Quick exits drive the backoff up to its maximum.
+        for _ in 0..6 {
+            tr.handle(TrackerInput::StreamStarted, t);
+            tr.handle(TrackerInput::StreamExited, t);
+        }
+        tr.handle(TrackerInput::StreamStarted, t);
+        tr.handle(TrackerInput::StreamExited, t);
+        assert_eq!(
+            tr.restart_at(),
+            Some(ms(t, 30_000)),
+            "backoff is at its maximum"
+        );
+        // A stream that runs for 31 s is healthy: its restart is quick again.
+        let start = ms(t, 10_000);
+        tr.handle(TrackerInput::StreamStarted, start);
+        let exit = ms(start, 31_000);
+        tr.handle(TrackerInput::StreamExited, exit);
+        assert_eq!(tr.restart_at(), Some(ms(exit, 1_000)));
     }
 }

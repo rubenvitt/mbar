@@ -186,12 +186,16 @@ The detection's timing and merging rules, pure and driven with explicit
 does what it asks (spawn the stream, look at the windows).
 
 - **Inputs:** `StreamStarted`, `StreamExited`, `Line(Attributions)`, `Unparsed`,
-  `History(Option<Attributions>)`, `Windows(Vec<Rect>)`, `Nudge`.
+  `History(u64, Option<Attributions>)`, `Windows(Vec<Rect>)`, `Nudge`. The `u64` of
+  `History` is the spawn number the platform read from `Tracker::spawns()` after
+  handling that spawn's `StreamStarted`.
 - **Outputs:** `restart_at()` (when to spawn `log stream`), `next_check()` (when
   to look at the windows), `ready()` and `sample()` (the `PrivacySample` to post).
 - **History vs. stream.** The stream is started first; the `log show` result
-  (`History`) is applied only if no stream line has parsed since the stream
-  (re)started, so an older historical line never overwrites a newer live one.
+  (`History`) is applied only if it belongs to the current spawn and no stream
+  line has parsed since the stream (re)started, so an older historical line never
+  overwrites a newer live one, and a late result of an earlier spawn is ignored.
+  An applied history line counts as a parsed line for the format check.
 - **When the window is checked.** At start; after every parsed line at 0, 0.3, 1
   and 2 s (fade-in and fade-out); again 2 s after any check whose frames differ
   from the previous one, until two consecutive checks agree; on `Nudge` (display
@@ -209,7 +213,9 @@ does what it asks (spawn the stream, look at the windows).
   a dot that is already visible at launch never trips it. The next parsed line
   turns `attribution` back `on`.
 - **Restart.** `StreamExited` schedules a restart with a backoff (1 s, doubling,
-  at most 30 s); the next parsed line resets it to 1 s.
+  at most 30 s); the next parsed line resets it to 1 s, or the stream having run
+  for at least 30 s. A restart does not clear a format-check failure: only a
+  parsed line does.
 
 ### mbar-core: runtime and layout
 
@@ -246,7 +252,7 @@ main thread.
   and forwards `Line`/`Unparsed` to the worker; end of output is `StreamExited`.
 - **Initial state.** After every successful spawn, one `log show --last 1h --style
   ndjson` with the same predicate on its own thread; the newest parsed line is
-  sent as `History`. If nothing is found the lists stay empty and fill with the
+  sent as `History` with the spawn number. If nothing is found the lists stay empty and fill with the
   next line (the sorted line repeats while a source is active).
 - **Window check.** `CGWindowListCopyWindowInfo(optionOnScreenOnly)`, keeping
   windows with owner `Window Server`, layer `2147483630` and at most 64×64 pt.
@@ -286,7 +292,9 @@ The headless platform logs `StartPrivacyIndicator` and ignores it; tests inject
   the leading `Filtering the log data using …` line), unknown kinds, garbage;
   state merge and de-duplication; event variables and `INFO`; frame omitted
   while hidden; query JSON with `active` and `inset`.
-- `Tracker` tests: history after a live line is ignored; a frame that moves and
+- `Tracker` tests: history after a live line is ignored; a history line from an
+  earlier spawn is ignored; a history line satisfies the format check; a restart
+  keeps a format-check failure; a long-running stream resets the backoff; a frame that moves and
   returns ends at the returned frame; a dot visible at startup does not trip the
   format check; a renamed message (no lines) does; `Unparsed` does at once; a
   stream that keeps exiting backs off to 30 s and reports no attributions while

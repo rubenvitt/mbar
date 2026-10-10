@@ -493,7 +493,8 @@ git commit -m "feat(core): privacy indicator log parser, state and payloads"
 **Interfaces:**
 - Consumes: `Attributions`, `PrivacySample` (Task 1), `Rect`.
 - Produces:
-  - `pub enum TrackerInput { StreamStarted, StreamExited, Line(Attributions), Unparsed, History(Option<Attributions>), Windows(Vec<Rect>), Nudge }`
+  - `pub enum TrackerInput { StreamStarted, StreamExited, Line(Attributions), Unparsed, History(u64, Option<Attributions>), Windows(Vec<Rect>), Nudge }` (fix round 1: `History` carries the spawn number, see `task-2-findings-r1.md`; fix round 1 adds the tests `restart_keeps_drift`, `history_line_satisfies_format_check`, `history_from_an_earlier_spawn_is_ignored` and `long_running_stream_resets_backoff`, whose code is in `privacy.rs`)
+  - `pub fn spawns(&self) -> u64` (fix round 1)
   - `pub struct Tracker` with `pub fn new(now: Instant) -> Tracker`, `pub fn handle(&mut self, input: TrackerInput, now: Instant)`, `pub fn restart_at(&self) -> Option<Instant>`, `pub fn next_check(&self) -> Option<Instant>`, `pub fn ready(&self) -> bool`, `pub fn sample(&self) -> PrivacySample`
   - constants `BURST`, `POLL`, `POLL_SLOW`, `LINE_WINDOW`, `BACKOFF_MIN`, `BACKOFF_MAX`
 
@@ -530,12 +531,12 @@ git commit -m "feat(core): privacy indicator log parser, state and payloads"
         let old = a(&["old"], &[], &[], &[], &[]);
         let mut tr = started(t);
         tr.handle(TrackerInput::Line(new.clone()), t);
-        tr.handle(TrackerInput::History(Some(old.clone())), ms(t, 500));
+        tr.handle(TrackerInput::History(1, Some(old.clone())), ms(t, 500));
         tr.handle(TrackerInput::Windows(vec![]), ms(t, 600));
         assert_eq!(tr.sample().attributions, Some(new));
         // Before any live line the history applies.
         let mut tr = started(t);
-        tr.handle(TrackerInput::History(Some(old.clone())), t);
+        tr.handle(TrackerInput::History(1, Some(old.clone())), t);
         tr.handle(TrackerInput::Windows(vec![]), t);
         assert_eq!(tr.sample().attributions, Some(old));
     }
@@ -708,7 +709,8 @@ pub enum TrackerInput {
     /// A line with a known prefix that did not parse.
     Unparsed,
     /// The newest parsed line of the `log show` run after a spawn (`None`: none found).
-    History(Option<Attributions>),
+    /// The `u64` is the spawn number from [`Tracker::spawns`]; other spawns are ignored.
+    History(u64, Option<Attributions>),
     /// The indicator windows found by a window check.
     Windows(Vec<Rect>),
     /// Display reconfiguration or wake: check the windows now.
@@ -738,6 +740,10 @@ pub struct Tracker {
     checks: Vec<Instant>,
     /// Hidden→visible seen: `(earliest acceptable line, evaluate at)`.
     pending_format_check: Option<(Instant, Instant)>,
+    /// Number of `StreamStarted` inputs so far.
+    spawns: u64,
+    /// When the current stream was started (`None` while it is not running).
+    stream_started_at: Option<Instant>,
 }
 
 impl Tracker {
@@ -756,6 +762,8 @@ impl Tracker {
             frames: Vec::new(),
             checks: vec![now],
             pending_format_check: None,
+            spawns: 0,
+            stream_started_at: None,
         }
     }
 
@@ -765,10 +773,19 @@ impl Tracker {
                 self.stream_running = true;
                 self.restart_at = None;
                 self.line_parsed = false;
-                self.drift = false;
+                self.spawns += 1;
+                self.stream_started_at = Some(now);
             }
             TrackerInput::StreamExited => {
+                // A stream that ran long enough counts as healthy: its next restart is quick.
+                if self
+                    .stream_started_at
+                    .is_some_and(|s| now.saturating_duration_since(s) >= BACKOFF_MAX)
+                {
+                    self.backoff = BACKOFF_MIN;
+                }
                 self.stream_running = false;
+                self.stream_started_at = None;
                 self.pending_format_check = None;
                 self.restart_at = Some(now + self.backoff);
                 self.backoff = (self.backoff * 2).min(BACKOFF_MAX);
@@ -789,11 +806,13 @@ impl Tracker {
                 }
                 self.schedule(now);
             }
-            TrackerInput::History(Some(a)) if !self.line_parsed => {
+            TrackerInput::History(spawn, Some(a)) if spawn == self.spawns && !self.line_parsed => {
                 self.attributions = a;
                 self.line_parsed = true;
+                self.last_line_at = Some(now);
+                self.drift = false;
             }
-            TrackerInput::History(_) => {}
+            TrackerInput::History(_, _) => {}
             TrackerInput::Windows(frames) => self.windows(normalize(frames), now),
             TrackerInput::Nudge => self.schedule(now),
         }
@@ -837,6 +856,11 @@ impl Tracker {
     /// When to spawn `log stream` (again).
     pub fn restart_at(&self) -> Option<Instant> {
         self.restart_at
+    }
+
+    /// The spawn number of the current stream (`StreamStarted` inputs so far).
+    pub fn spawns(&self) -> u64 {
+        self.spawns
     }
 
     /// When to look at the windows next.
@@ -1624,13 +1648,13 @@ fn worker(sink: Sink, rx: mpsc::Receiver<Msg>) {
     loop {
         let now = Instant::now();
         if tracker.restart_at().is_some_and(|t| t <= now) {
-            let input = if spawn_stream() {
-                spawn_history();
-                TrackerInput::StreamStarted
+            if spawn_stream() {
+                // Handle the start first, then read the spawn number for the history.
+                tracker.handle(TrackerInput::StreamStarted, now);
+                spawn_history(tracker.spawns());
             } else {
-                TrackerInput::StreamExited
-            };
-            tracker.handle(input, now);
+                tracker.handle(TrackerInput::StreamExited, now);
+            }
         }
         if tracker.next_check().is_some_and(|t| t <= now) {
             let frames = indicator_frames(&list_windows());
@@ -1718,8 +1742,9 @@ fn spawn_stream() -> bool {
 }
 
 /// One `log show --last 1h` with the same predicate; the newest parsed line becomes
-/// `History` (the tracker ignores it if a live line came first).
-fn spawn_history() {
+/// `History(spawn, …)` (the tracker ignores it if a live line came first or it is
+/// from another spawn).
+fn spawn_history(spawn: u64) {
     let _ = std::thread::Builder::new()
         .name("mbar-privacy-history".into())
         .spawn(|| {
@@ -1737,7 +1762,7 @@ fn spawn_history() {
                     })
                     .last()
             });
-            send(Msg::Input(TrackerInput::History(newest)));
+            send(Msg::Input(TrackerInput::History(spawn, newest)));
         });
 }
 ```
