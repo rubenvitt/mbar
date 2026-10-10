@@ -14,7 +14,7 @@ use mbar_core::privacy::{
 use objc2_core_foundation::{CFArray, CFDictionary, CFRetained};
 use objc2_core_graphics::{CGWindowListCopyWindowInfo, CGWindowListOption};
 use std::io::{BufRead, BufReader};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -88,7 +88,12 @@ enum Msg {
 
 struct Shared {
     tx: Sender<Msg>,
+    /// The running `log stream`.
     child: Option<Child>,
+    /// The running `log show` and the spawn number it belongs to.
+    history: Option<(u64, Child)>,
+    /// Set by [`stop`]; nothing is spawned afterwards.
+    stopped: bool,
 }
 
 static SHARED: Mutex<Option<Shared>> = Mutex::new(None);
@@ -113,7 +118,12 @@ pub fn start(sink: Sink) {
         if s.is_some() {
             return false;
         }
-        *s = Some(Shared { tx, child: None });
+        *s = Some(Shared {
+            tx,
+            child: None,
+            history: None,
+            stopped: false,
+        });
         true
     });
     if !first {
@@ -121,13 +131,11 @@ pub fn start(sink: Sink) {
     }
     let spawned = std::thread::Builder::new()
         .name("mbar-privacy".into())
-        .spawn(move || {
-            worker(sink, rx);
-            // A `stop()` that raced with a spawn may have missed the new child.
-            kill_child();
-        });
+        .spawn(move || worker(sink, rx));
     if let Err(e) = spawned {
         log::warn!("privacy indicator: worker thread not started: {e}");
+        // Let a later `start()` retry.
+        with_shared(|s| *s = None);
     }
 }
 
@@ -136,14 +144,63 @@ pub fn nudge() {
     send(Msg::Input(TrackerInput::Nudge));
 }
 
-/// Stops the worker and kills `log stream` (call on exit).
+/// Stops the worker and kills `log stream` / `log show` (call on exit).
+///
+/// Children are spawned and stored under the lock and only while `stopped` is false
+/// ([`spawn_tracked`]), so after this returns either a child was seen here (and is killed
+/// and reaped) or none will ever be spawned.
 pub fn stop() {
-    with_shared(|s| {
-        if let Some(s) = s {
-            let _ = s.tx.send(Msg::Stop);
-        }
+    let (a, b) = with_shared(|s| {
+        let Some(s) = s else { return (None, None) };
+        s.stopped = true;
+        let _ = s.tx.send(Msg::Stop);
+        (s.child.take(), s.history.take().map(|(_, c)| c))
     });
-    kill_child();
+    for mut c in [a, b].into_iter().flatten() {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Slot {
+    Stream,
+    History(u64),
+}
+
+/// Spawns `cmd` (stdout piped) and stores the child in `slot` under the lock; refuses once
+/// stopped. A previous child in the slot is killed and reaped (outside the lock).
+fn spawn_tracked(cmd: &mut Command, slot: Slot) -> Option<ChildStdout> {
+    let (stdout, old) = with_shared(|s| {
+        let s = s.as_mut().filter(|s| !s.stopped)?;
+        let mut child = match cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("privacy indicator: `log` not started: {e}");
+                return None;
+            }
+        };
+        let Some(stdout) = child.stdout.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        };
+        let old = match slot {
+            Slot::Stream => s.child.replace(child),
+            Slot::History(n) => s.history.replace((n, child)).map(|(_, c)| c),
+        };
+        Some((stdout, old))
+    })?;
+    if let Some(mut c) = old {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+    Some(stdout)
 }
 
 /// Kills and reaps the current `log stream` (the lock is not held while waiting).
@@ -210,29 +267,11 @@ fn worker(sink: Sink, rx: mpsc::Receiver<Msg>) {
 
 /// Spawns `log stream` and its reader thread. `false` if it could not be started.
 fn spawn_stream() -> bool {
-    let mut child = match Command::new(LOG_BIN)
-        .args(["stream", "--style", "ndjson", "--predicate", LOG_PREDICATE])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            log::warn!("privacy indicator: `log stream` not started: {e}");
-            return false;
-        }
-    };
-    let Some(stdout) = child.stdout.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
+    let mut cmd = Command::new(LOG_BIN);
+    cmd.args(["stream", "--style", "ndjson", "--predicate", LOG_PREDICATE]);
+    let Some(stdout) = spawn_tracked(&mut cmd, Slot::Stream) else {
         return false;
     };
-    with_shared(|s| {
-        if let Some(s) = s {
-            s.child = Some(child);
-        }
-    });
     let reader = std::thread::Builder::new()
         .name("mbar-privacy-log".into())
         .spawn(move || {
@@ -247,7 +286,11 @@ fn spawn_stream() -> bool {
             kill_child();
             send(Msg::Input(TrackerInput::StreamExited));
         });
-    reader.is_ok()
+    if reader.is_err() {
+        kill_child();
+        return false;
+    }
+    true
 }
 
 /// One `log show --last 1h` with the same predicate; the newest parsed line becomes
@@ -257,28 +300,41 @@ fn spawn_history(spawn: u64) {
     let _ = std::thread::Builder::new()
         .name("mbar-privacy-history".into())
         .spawn(move || {
-            let out = Command::new(LOG_BIN)
-                .args([
-                    "show",
-                    "--last",
-                    "1h",
-                    "--style",
-                    "ndjson",
-                    "--predicate",
-                    LOG_PREDICATE,
-                ])
-                .stdin(Stdio::null())
-                .stderr(Stdio::null())
-                .output();
-            let newest = out.ok().and_then(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .rev()
-                    .find_map(|l| match classify_stream_line(l) {
-                        StreamLine::Attributions(a) => Some(a),
-                        _ => None,
-                    })
+            let mut cmd = Command::new(LOG_BIN);
+            cmd.args([
+                "show",
+                "--last",
+                "1h",
+                "--style",
+                "ndjson",
+                "--predicate",
+                LOG_PREDICATE,
+            ]);
+            let Some(stdout) = spawn_tracked(&mut cmd, Slot::History(spawn)) else {
+                return;
+            };
+            let newest = BufReader::new(stdout)
+                .lines()
+                .map_while(Result::ok)
+                .filter_map(|l| match classify_stream_line(&l) {
+                    StreamLine::Attributions(a) => Some(a),
+                    _ => None,
+                })
+                .last();
+            // Reap our child unless a newer spawn replaced (and already reaped) it.
+            let child = with_shared(|s| {
+                let s = s.as_mut()?;
+                match s.history.take() {
+                    Some((n, c)) if n == spawn => Some(c),
+                    other => {
+                        s.history = other;
+                        None
+                    }
+                }
             });
+            if let Some(mut c) = child {
+                let _ = c.wait();
+            }
             send(Msg::Input(TrackerInput::History(spawn, newest)));
         });
 }
