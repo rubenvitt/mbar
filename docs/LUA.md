@@ -523,6 +523,27 @@ mbar.aerospace.query({ "list-windows", "--workspace", "focused", "--json" }, fun
 end)
 ```
 
+### Privacy indicator
+
+`privacy_indicator_change` fires when macOS shows or hides its privacy dot or the
+apps behind it change. `env.info` holds `visible`, `frame` and one list of bundle
+ids per sensor (`mic`, `camera`, `screen`, `audio`, `location`); the same lists are
+in `env.MIC`, `env.CAMERA`, … as comma-separated strings. With
+`privacy_indicator_inset = true` the right-hand items move out of the dot's way.
+Details in [`EXTENSIONS.md`](EXTENSIONS.md#privacy-indicator).
+
+<!-- example: privacy-indicator -->
+```lua
+mbar.bar({ privacy_indicator_inset = true })
+
+local clock = mbar.add("item", "clock", "right", { provider = "clock" })
+clock:subscribe("privacy_indicator_change", function(env)
+  local info = env.info or {}
+  local mic = info.mic and #info.mic > 0
+  clock:set({ label = { color = mic and 0xffff9f0a or 0xffffffff } })
+end)
+```
+
 ## Differences from SbarLua
 
 * `require("sketchybar")` works and returns `mbar`; `sbar.event_loop()` is a
@@ -577,7 +598,8 @@ per config load:
 * `on_events(events, handler)` (`mbar.aerospace.on`) registers an item-less
   handler: whenever one of `events` fires, call `run_handler(handler, env, host)`
   with the event's variables and `SENDER=<event>` (no `NAME`). Forget these
-  registrations on reload.
+  registrations on reload. A handler for `privacy_indicator_change` starts the
+  privacy detection and, like a late `--subscribe`, gets the stored state once.
 * `Host::command` runs while the engine is borrowed: events that target Lua
   handlers, and `--reload`, produced by those commands must be queued and run
   after the engine call returns.

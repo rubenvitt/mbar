@@ -4,7 +4,8 @@ Everything here is new in mbar. A plain SketchyBar config never triggers any of 
 existing configs behave exactly as documented in `docs/spec/`. Window borders take over
 JankyBorders; its own command line (`borders …`) is covered in
 [Window borders](#window-borders). [AeroSpace](#aerospace) events are built in; mbar
-connects to AeroSpace only when a config uses them.
+connects to AeroSpace only when a config uses them. The
+[privacy indicator](#privacy-indicator) is detected only when a config asks for it.
 
 ## Command line
 
@@ -17,6 +18,7 @@ connects to AeroSpace only when a config uses them.
 | `--borders <key>=<value> ...` | Window borders (JankyBorders options plus `drawing=`). See [Window borders](#window-borders). |
 | `--query borders` | JSON of the borders configuration. See [Window borders](#window-borders). |
 | `--query aerospace` | JSON of the AeroSpace connection and state. See [AeroSpace](#aerospace). |
+| `--query privacy_indicator` | JSON of the privacy indicator state. See [Privacy indicator](#privacy-indicator). |
 | `--menubar hide\|show\|toggle` | Sets macOS "Automatically hide and show the menu bar" (`_HIHideMenuBar`) and notifies the system. |
 | `--reload` | Reloads the config (SketchyBar has this as `--hotload`-adjacent behaviour; mbar exposes it explicitly). |
 | `-h`, `--help` (as `mbar`) | Invoked under any name other than `sketchybar`, the help lists mbar's config locations, `--headless` and the extensions above (and `--clone` in the order the code reads it). Invoked as `sketchybar` (e.g. a `sketchybar -> mbar` symlink), it prints SketchyBar's `misc/help.h` verbatim (`cli.md` §1.3), just as `-v` prints `sketchybar-v2.24.0`. |
@@ -122,6 +124,7 @@ array of titles.
 | Property | Description |
 |---|---|
 | `hide_menubar=on\|off` | Same as `--menubar hide/show`, persisted while mbar runs and restored on exit. |
+| `privacy_indicator_inset=on\|off` | Right-hand items avoid macOS's privacy dot. See [Privacy indicator](#privacy-indicator). |
 
 ## Window borders
 
@@ -414,6 +417,133 @@ closes it again does not cause a reconnect every second. Every change shows in
 
 **Overrides.** `MBAR_AEROSPACE_SOCKET` replaces the socket path and
 `MBAR_AEROSPACE_CLI` the `aerospace` binary. Both are meant for tests.
+
+## Privacy indicator
+
+While an app uses the microphone, the camera, screen recording or system audio
+capture, macOS shows a coloured dot in the top-right corner of the display. With the
+native menu bar hidden (`hide_menubar=on` or the system setting) WindowServer draws
+that dot on top of mbar's bar, where it covers the right-most item (usually the
+clock). mbar detects the dot, its position and the apps behind it. A config can then
+move the right-hand items out of the way and react to the event. The design and the
+measurements are in
+[`superpowers/specs/2026-10-10-privacy-indicator-design.md`](superpowers/specs/2026-10-10-privacy-indicator-design.md).
+
+### Event `privacy_indicator_change`
+
+Built in, like the `aerospace_*` events: `--subscribe` works without `--add event`.
+It fires whenever the stored state changes; identical samples are dropped.
+
+| Variable | Content |
+|---|---|
+| `VISIBLE` | `on` while the dot is on screen, else `off` |
+| `MIC`, `CAMERA`, `SCREEN`, `AUDIO`, `LOCATION` | comma-separated bundle ids of the apps using that sensor, sorted; empty when none |
+
+`INFO` (Lua: decoded in `env.info`):
+
+```json
+{
+	"visible": "on",
+	"frame": { "x": 2025, "y": 3, "w": 28, "h": 28 },
+	"mic": ["com.goodsnooze.MacWhisper"],
+	"camera": [],
+	"screen": [],
+	"audio": ["com.rogueamoeba.arkaudiod"],
+	"location": [],
+	"attribution": "on"
+}
+```
+
+* `frame` is the bounding box of all indicator windows, in global points with a
+  top-left origin (the space of `--query displays` and the bar frames). It is omitted
+  while `visible` is `off`.
+* `attribution` is `on` while the log stream runs and its lines parse. It is `off`
+  while the stream is not running (not available, restarting) and after a format
+  change was detected (see [Caveat](#caveat)). The five lists are then empty;
+  `visible` and `frame` are still correct.
+* `location` is reported because Control Center reports it; whether it makes the dot
+  visible is up to macOS (`visible` comes from the window, not from the lists).
+* An item that subscribes after the state is known gets the current state once, as
+  an event of this name delivered to that subscriber only (as for AeroSpace). The
+  state rarely changes (an always-on source keeps the dot for hours), so without
+  this a subscriber added at startup would wait for the next change. A manual
+  `--trigger privacy_indicator_change` reaches subscribers but does not change the
+  stored state.
+* `--add event privacy_indicator_change` is accepted; a notification name given with
+  it is ignored.
+
+```sh
+mbar --add item mic right \
+     --subscribe mic privacy_indicator_change \
+     --set mic script='[ -n "$MIC" ] && mbar --set $NAME drawing=on || mbar --set $NAME drawing=off'
+```
+
+### Bar property `privacy_indicator_inset`
+
+`privacy_indicator_inset=on|off`, default `off`. While `on`, a horizontal bar whose
+window frame intersects the indicator treats the indicator's left edge as its own
+right edge:
+
+```
+cur_r = min(w, indicator.x - bar.x) - padding_right
+```
+
+instead of `w - padding_right`. The bar's `padding_right` stays the gap. Only
+`right` items move; `left`, `center`, `q` and `e` items and the bar background do
+not. Bars on other displays, bottom bars and vertical bars are not affected (they
+do not intersect the dot). The change is applied on the next frame, without
+animation. `--query bar` keeps SketchyBar's exact output; the setting shows as
+`inset` in `--query privacy_indicator`.
+
+### `--query privacy_indicator`
+
+The `INFO` object plus `"active": "on"|"off"` (whether the detection was started)
+and `"inset": "on"|"off"` (the bar property). The query never starts the detection.
+An item named `privacy_indicator` wins over this query, as with `--query borders`.
+
+### Lazy start
+
+Nothing runs until the first of:
+
+* a `--subscribe` to `privacy_indicator_change`,
+* `privacy_indicator_inset=on`,
+* an in-process handler for the event registered through `Host::on_events` (see
+  [`LUA.md`](LUA.md#for-daemon-integrators)); it also gets the stored state once.
+
+Without any of these mbar never looks, so nothing changes for users who do not need
+it. The detection and the stored state survive `--reload`; the inset property comes
+back with the re-run config.
+
+### How it works
+
+* **Log lines.** Control Center logs every change of the active sources, publicly.
+  mbar runs one long-lived `/usr/bin/log stream` child with a predicate on
+  subsystem `com.apple.controlcenter`, category `sensor-indicators`, the two
+  message forms `Active activity attributions changed to …` and
+  `Sorted active attributions from SystemStatus update: …`, and Control Center's own
+  binary (`processImagePath == "/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter"`).
+  The last clause matters: log subsystem and category strings are not
+  authenticated, so without it any local process could log fake attribution lines.
+  The kinds `mic`, `cam`, `scr`, `aud` and `loc` map to `mic`, `camera`, `screen`,
+  `audio` and `location`; other kinds are ignored. After each start of the stream
+  one `log show --last 1h` reads the state from before.
+* **The window.** The dot is a `Window Server` window at layer `2147483630`, at most
+  64 x 64 pt, found with `CGWindowListCopyWindowInfo`. Owner, layer and bounds are
+  readable without the Screen Recording permission, so mbar asks for none. The
+  window is checked after each log line (several times, to follow the fade-in and
+  fade-out), after display changes and wake, and by a safety poll: every 10 s while
+  the log stream runs, every 2 s while it does not.
+* **Restart.** If `log stream` exits, mbar restarts it with a backoff of 1 s,
+  doubling up to 30 s. A parsed line, or a stream that ran for at least 30 s, resets
+  it to 1 s.
+
+### Caveat
+
+The log line is not an API: Apple can change or drop it with any macOS update. When
+a line starts with a known prefix but no longer parses, or the dot appears without
+any matching line, `attribution` turns `off` and the five lists are empty. The next
+line that parses turns it back `on`. `visible`, `frame` and the inset keep working,
+as they come from the window.
 
 ## Lua
 

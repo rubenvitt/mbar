@@ -58,6 +58,7 @@
 ---| "aerospace_mode_change"
 ---| "aerospace_window_detected"
 ---| "aerospace_binding_triggered"
+---| "privacy_indicator_change"
 ---| "routine"  # update_freq tick (handler-side only, never sent to --subscribe)
 ---| "forced"   # --update (handler-side only)
 ---| "*"        # catch-all
@@ -208,6 +209,12 @@
 ---@field APP_BUNDLE_ID? string aerospace_window_detected
 ---@field APP_NAME? string aerospace_window_detected
 ---@field BINDING? string aerospace_binding_triggered
+---@field VISIBLE? "on"|"off" privacy_indicator_change
+---@field MIC? string privacy_indicator_change: comma-separated bundle ids
+---@field CAMERA? string privacy_indicator_change
+---@field SCREEN? string privacy_indicator_change
+---@field AUDIO? string privacy_indicator_change (system audio capture)
+---@field LOCATION? string privacy_indicator_change
 ---@field [string] string Custom `mbar.trigger` variables
 
 ---@alias mbar.Handler fun(env: mbar.Env)
@@ -260,6 +267,7 @@
 ---@field display? "main"|"all"|integer|integer[]
 ---@field show_in_fullscreen? mbar.Bool
 ---@field hide_menubar? mbar.Bool
+---@field privacy_indicator_inset? mbar.Bool
 ---@field color? mbar.Color|mbar.ColorProps
 ---@field border_color? mbar.Color|mbar.ColorProps
 ---@field border_width? integer
@@ -486,6 +494,19 @@ function mbar.json.encode(v) end
 ---| "aerospace_mode_change"
 ---| "aerospace_window_detected"
 ---| "aerospace_binding_triggered"
+
+---`env.info` of `privacy_indicator_change` and `mbar.query("privacy_indicator")`.
+---@class mbar.PrivacyIndicatorInfo
+---@field visible "on"|"off"
+---@field frame? { x: integer, y: integer, w: integer, h: integer } Global points, top-left origin; absent while hidden
+---@field mic string[] Bundle ids
+---@field camera string[]
+---@field screen string[]
+---@field audio string[] System audio capture
+---@field location string[]
+---@field attribution "on"|"off" "off": the lists are unknown (log stream not running or its format changed)
+---@field active? "on"|"off" Query only: detection started
+---@field inset? "on"|"off" Query only: privacy_indicator_inset
 
 ---Result of `mbar.aerospace.run`.
 ---@class mbar.AerospaceResult
