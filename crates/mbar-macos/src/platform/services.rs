@@ -359,6 +359,8 @@ impl Services {
             PlatformRequest::SetBorders(update) => borders::configure(*update),
             // The binary owns the AeroSpace connection (it is platform independent).
             PlatformRequest::StartAerospace => {}
+            // Wired to `sys::privacy` in the next step of the privacy plan (Task 5).
+            PlatformRequest::StartPrivacyIndicator => {}
         }
     }
 
