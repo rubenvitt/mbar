@@ -27,8 +27,8 @@
 //! Window borders also follow `DisplaysReconfigured` / `SystemWoke` (recreate),
 //! `SpaceChange` (consistency pass) and `FrontAppSwitched` (focus re-check) in
 //! [`Services::translate`]; [`Services::shutdown`] destroys every border window.
-//! The privacy worker is nudged on `DisplaysReconfigured` / `SystemWoke`; `shutdown` kills
-//! its `log stream`.
+//! The privacy worker is nudged on `DisplaysReconfigured` / `SystemWoke` /
+//! `MenuBarHidingChanged`; `shutdown` kills its `log stream`.
 
 use super::convert::{self, monitored_kind, sys_event_to_input, window_mouse_input};
 use super::resources::{core_rect, MacResources};
@@ -194,7 +194,11 @@ impl Services {
                 res.refresh_displays();
                 borders::on_space_changed();
             }
-            SysEvent::MenuBarHidingChanged => res.refresh_menu_bar(),
+            SysEvent::MenuBarHidingChanged => {
+                res.refresh_menu_bar();
+                // The dot window may move or appear with the native menu bar.
+                privacy::nudge();
+            }
             SysEvent::WifiChange(ref s) => res.last_ssid = Some(s.clone()),
             SysEvent::FrontAppSwitched { .. } => {
                 self.ensure_menu_observer();

@@ -15,6 +15,7 @@ use objc2_core_foundation::{CFArray, CFDictionary, CFRetained};
 use objc2_core_graphics::{CGWindowListCopyWindowInfo, CGWindowListOption};
 use std::io::{BufRead, BufReader};
 use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -97,6 +98,18 @@ struct Shared {
 }
 
 static SHARED: Mutex<Option<Shared>> = Mutex::new(None);
+/// The last `log` spawn failed: the warning is logged once per failure streak.
+static SPAWN_FAILING: AtomicBool = AtomicBool::new(false);
+
+/// How far back `log show` looks after a (re)spawn: an hour at the start, afterwards only
+/// the time since the previous stream exited (plus slack), capped at an hour.
+fn history_window(last_exit: Option<Instant>, now: Instant) -> String {
+    let secs = match last_exit {
+        None => 3600,
+        Some(t) => (now.saturating_duration_since(t).as_secs() + 5).min(3600),
+    };
+    format!("{secs}s")
+}
 
 fn with_shared<R>(f: impl FnOnce(&mut Option<Shared>) -> R) -> R {
     let mut guard = SHARED.lock().unwrap_or_else(|e| e.into_inner());
@@ -181,10 +194,13 @@ fn spawn_tracked(cmd: &mut Command, slot: Slot) -> Option<ChildStdout> {
         {
             Ok(c) => c,
             Err(e) => {
-                log::warn!("privacy indicator: `log` not started: {e}");
+                if !SPAWN_FAILING.swap(true, Ordering::Relaxed) {
+                    log::warn!("privacy indicator: `log` not started: {e}");
+                }
                 return None;
             }
         };
+        SPAWN_FAILING.store(false, Ordering::Relaxed);
         let Some(stdout) = child.stdout.take() else {
             let _ = child.kill();
             let _ = child.wait();
@@ -215,13 +231,15 @@ fn kill_child() {
 fn worker(sink: Sink, rx: mpsc::Receiver<Msg>) {
     let mut tracker = Tracker::new(Instant::now());
     let mut last: Option<PrivacySample> = None;
+    // When the last started stream exited (sizes the next `log show`).
+    let mut last_exit: Option<Instant> = None;
     loop {
         let now = Instant::now();
         if tracker.restart_at().is_some_and(|t| t <= now) {
             if spawn_stream() {
                 // Handle the start first, then read the spawn number for the history.
                 tracker.handle(TrackerInput::StreamStarted, now);
-                spawn_history(tracker.spawns());
+                spawn_history(tracker.spawns(), history_window(last_exit, now));
             } else {
                 tracker.handle(TrackerInput::StreamExited, now);
             }
@@ -259,7 +277,13 @@ fn worker(sink: Sink, rx: mpsc::Receiver<Msg>) {
         };
         match msg {
             Some(Msg::Stop) => return,
-            Some(Msg::Input(input)) => tracker.handle(input, Instant::now()),
+            Some(Msg::Input(input)) => {
+                let now = Instant::now();
+                if input == TrackerInput::StreamExited {
+                    last_exit = Some(now);
+                }
+                tracker.handle(input, now);
+            }
             None => {}
         }
     }
@@ -293,24 +317,28 @@ fn spawn_stream() -> bool {
     true
 }
 
-/// One `log show --last 1h` with the same predicate; the newest parsed line becomes
+/// One `log show --last <window>` with the same predicate; the newest parsed line becomes
 /// `History(spawn, …)` (the tracker ignores it if a live line came first or it is
-/// from another spawn).
-fn spawn_history(spawn: u64) {
-    let _ = std::thread::Builder::new()
+/// from another spawn). `History(spawn, None)` is sent in every case where no line was
+/// read, also when `log show` could not be started, so the attribution does not wait for
+/// the next live line.
+fn spawn_history(spawn: u64, window: String) {
+    let started = std::thread::Builder::new()
         .name("mbar-privacy-history".into())
         .spawn(move || {
             let mut cmd = Command::new(LOG_BIN);
             cmd.args([
                 "show",
                 "--last",
-                "1h",
+                window.as_str(),
                 "--style",
                 "ndjson",
                 "--predicate",
                 LOG_PREDICATE,
             ]);
             let Some(stdout) = spawn_tracked(&mut cmd, Slot::History(spawn)) else {
+                // Not spawned (or stopped: then the message goes nowhere).
+                send(Msg::Input(TrackerInput::History(spawn, None)));
                 return;
             };
             let newest = BufReader::new(stdout)
@@ -337,11 +365,15 @@ fn spawn_history(spawn: u64) {
             }
             send(Msg::Input(TrackerInput::History(spawn, newest)));
         });
+    if started.is_err() {
+        send(Msg::Input(TrackerInput::History(spawn, None)));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn w(owner: &str, layer: i64, x: f32, size: f32) -> WindowRecord {
         WindowRecord {
@@ -349,6 +381,21 @@ mod tests {
             layer,
             frame: Rect::new(x, 3.0, size, size),
         }
+    }
+
+    #[test]
+    fn history_window_covers_the_gap() {
+        let now = Instant::now();
+        assert_eq!(history_window(None, now), "3600s");
+        assert_eq!(history_window(Some(now), now), "5s");
+        assert_eq!(
+            history_window(Some(now - Duration::from_secs(40)), now),
+            "45s"
+        );
+        assert_eq!(
+            history_window(Some(now - Duration::from_secs(7200)), now),
+            "3600s"
+        );
     }
 
     #[test]
