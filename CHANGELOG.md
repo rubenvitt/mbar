@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/rubenvitt/mbar/compare/v0.4.0...v0.5.0) (2026-10-10)
+
+
+### Features
+
+* AeroSpace integration (native events, provider, Lua API) ([#22](https://github.com/rubenvitt/mbar/issues/22)) ([5ea6405](https://github.com/rubenvitt/mbar/commit/5ea6405ccb8d209bd1caa0a44987f42b4bae1215))
+
 ## [0.4.0](https://github.com/rubenvitt/mbar/compare/v0.3.3...v0.4.0) (2026-10-09)
 
 
