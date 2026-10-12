@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/rubenvitt/mbar/compare/v0.6.0...v0.7.0) (2026-10-12)
+
+
+### Features
+
+* **ui:** show the optional Full Disk Access permission ([#26](https://github.com/rubenvitt/mbar/issues/26)) ([9872d0a](https://github.com/rubenvitt/mbar/commit/9872d0a7da19dcb8f360047cabbbbb167ed785d9))
+
 ## [0.6.0](https://github.com/rubenvitt/mbar/compare/v0.5.0...v0.6.0) (2026-10-10)
 
 
