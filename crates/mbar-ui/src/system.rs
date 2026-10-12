@@ -14,6 +14,11 @@ pub const ACCESSIBILITY_SETTINGS_URL: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
 pub const SCREEN_RECORDING_SETTINGS_URL: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
+pub const FULL_DISK_ACCESS_SETTINGS_URL: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
+
+/// Readable only with Full Disk Access, present on every macOS install.
+const FULL_DISK_ACCESS_PROBE: &str = "/Library/Application Support/com.apple.TCC/TCC.db";
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
@@ -184,6 +189,18 @@ pub fn open_url(url: &str) -> io::Result<()> {
         .map(|_| ())
 }
 
+/// Selects `path` in a Finder window (`open -R`).
+pub fn reveal_in_finder(path: &Path) -> io::Result<()> {
+    Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Permission {
     Granted,
@@ -215,10 +232,33 @@ pub fn classify_screen_recording(rsp: &Result<String, IpcError>) -> Permission {
     }
 }
 
+/// Full Disk Access has no query and no request API: macOS only lets the user add the
+/// app in System Settings. It is checked by opening a file only that grant can read.
+/// The TCC client is the `dev.rubeen.mbar` bundle, so this process sees the same answer
+/// as the daemon and the scripts it starts (macOS charges them to the bundle).
+pub fn classify_full_disk_access<T>(open: &io::Result<T>) -> Permission {
+    match open {
+        Ok(_) => Permission::Granted,
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => Permission::Missing,
+        Err(e) => Permission::Unknown(e.to_string()),
+    }
+}
+
+/// Outside mbar.app (e.g. `cargo run` from a terminal) the probe would report the
+/// terminal's grant, not mbar's.
+pub fn probe_full_disk_access() -> Permission {
+    if current_bundle().is_none() {
+        return Permission::Unknown("not running from mbar.app".into());
+    }
+    classify_full_disk_access(&std::fs::File::open(FULL_DISK_ACCESS_PROBE))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Permissions {
     pub accessibility: Permission,
     pub screen_recording: Permission,
+    /// Optional: only configs whose scripts read protected data (e.g. Messages) need it.
+    pub full_disk_access: Permission,
 }
 
 pub fn probe_permissions(client: &Client) -> Permissions {
@@ -227,6 +267,7 @@ pub fn probe_permissions(client: &Client) -> Permissions {
         screen_recording: classify_screen_recording(
             &client.send_strs(&["--query", "default_menu_items"]),
         ),
+        full_disk_access: probe_full_disk_access(),
     }
 }
 
@@ -295,6 +336,16 @@ mod tests {
             classify_screen_recording(&Ok(String::new())),
             Permission::Granted
         );
+        assert_eq!(classify_full_disk_access(&Ok(())), Permission::Granted);
+        // TCC denies with EPERM, which Rust maps to PermissionDenied.
+        assert_eq!(
+            classify_full_disk_access::<()>(&Err(io::Error::from_raw_os_error(1))),
+            Permission::Missing
+        );
+        assert!(matches!(
+            classify_full_disk_access::<()>(&Err(io::ErrorKind::NotFound.into())),
+            Permission::Unknown(_)
+        ));
     }
 
     #[test]
