@@ -164,6 +164,13 @@ fn open_settings(url: &'static str, window: &mut Window, cx: &mut App) {
             cx,
         );
     }
+    // Full Disk Access has no prompt and lists no app on its own: show mbar.app in
+    // Finder so it can be dragged into the list.
+    if url == sys::FULL_DISK_ACCESS_SETTINGS_URL {
+        if let Some(bundle) = sys::current_bundle() {
+            let _ = sys::reveal_in_finder(&bundle.root);
+        }
+    }
 }
 
 /// One permission: title and purpose, its state and a button to the settings pane.

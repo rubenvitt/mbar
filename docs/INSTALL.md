@@ -297,7 +297,8 @@ they would conflict with the `sketchybar` formula and with
 ## Permissions
 
 With the app, the setup page and the System page show the live state of
-Accessibility and Screen Recording and open the right Settings pane. The setup
+Accessibility, Screen Recording and the optional Full Disk Access, and open the
+right Settings pane. The setup
 page restarts the daemon after a grant. The released app is signed with a
 Developer ID, so the grants survive updates. The rest of this section matters
 mostly for source builds.
@@ -313,6 +314,7 @@ Open the settings with:
 ```sh
 open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
 open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
 ```
 
 or go to System Settings → Privacy & Security. To add the binary, click **+**,
@@ -324,13 +326,14 @@ A source build has only an ad-hoc code signature. After you rebuild or reinstall
 macOS may treat it as a different program and keep showing the permission as
 missing. If that happens, remove the entry with **−** and add it again.
 
-The management UI's System page shows the current state of both permissions and
-links to these panes.
+The management UI's System page shows the current state of these permissions and
+links to their panes.
 
 | Permission | Needed for | Without it |
 |---|---|---|
 | **Accessibility** | `app_menu` items, `--menu`, `--query menus`, the `menus_change` event, finding the focused window for borders (`ax_focus`) | `app_menu` draws nothing and `--query menus` answers with an error. Borders find the focused window through SkyLight instead (`ax_focus=on` logs a warning). mbar does not show a prompt, so add it by hand. mbar picks up the grant at the next front-app switch. |
 | **Screen Recording** | `alias` items (capturing menu extras) and `--query default_menu_items` | Aliases stay empty, and the query prints SketchyBar's "Screen Recording Permissions not given" error. mbar asks once per process when the first alias is added. Restart mbar after you grant it. |
+| **Full Disk Access** (optional) | Scripts and `exec` commands that read protected data, such as `~/Library/Messages/chat.db` (macOS charges their access to mbar) | They fail with "Operation not permitted" or, for `sqlite3`, "authorization denied". macOS has no prompt for this permission and does not list mbar on its own: in the pane, click **+** and add `mbar.app`. The grant takes effect for the next command; no restart needed. The UI checks it only inside `mbar.app`. |
 | **Location Services** | The Wi-Fi SSID (`wifi_change` `INFO`, the `wifi` provider's `{ssid}`) on macOS 14 and later | See below. |
 
 ### Wi-Fi SSID

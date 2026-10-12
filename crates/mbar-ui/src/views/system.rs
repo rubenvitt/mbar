@@ -19,7 +19,8 @@ use mbar_ui_model::ipc::DaemonStatus;
 use mbar_ui_model::model::{AerospaceInfo, BordersInfo};
 use mbar_ui_model::onboarding as ob;
 use mbar_ui_model::system::{
-    self as sys, Permissions, ACCESSIBILITY_SETTINGS_URL, SCREEN_RECORDING_SETTINGS_URL,
+    self as sys, Permissions, ACCESSIBILITY_SETTINGS_URL, FULL_DISK_ACCESS_SETTINGS_URL,
+    SCREEN_RECORDING_SETTINGS_URL,
 };
 
 use super::{interval, page_header, permission_row, section, status_color, status_text, Shared};
@@ -696,6 +697,14 @@ impl Render for SystemView {
                 "Needed by alias items to capture menu bar extras.",
                 perms.map(|p| &p.screen_recording),
                 SCREEN_RECORDING_SETTINGS_URL,
+                cx,
+            ))
+            .child(permission_row(
+                "open-full-disk-access",
+                "Full Disk Access (optional)",
+                "Needed only by scripts that read protected data, e.g. ~/Library/Messages.",
+                perms.map(|p| &p.full_disk_access),
+                FULL_DISK_ACCESS_SETTINGS_URL,
                 cx,
             ))
             .child(
