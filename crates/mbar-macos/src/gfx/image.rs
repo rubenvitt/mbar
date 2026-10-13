@@ -1,7 +1,9 @@
 //! Image loading and GPU textures (`image.c:image_load`, spec §6.2).
 //!
 //! Sources:
-//! * files via ImageIO (`CGImageSource`), cached by path and modification time;
+//! * files via ImageIO (`CGImageSource`), cached by path and modification time; what
+//!   ImageIO cannot decode (SVG) falls back to `NSImage` and is rasterized at `s` pixels
+//!   per point (mbar extension);
 //! * application icons `app.<bundle id>` / `app.<localized app name>` via NSWorkspace,
 //!   rendered at `32·s` pixels (s = largest backing scale of all screens) and reported as
 //!   32×32 pt (spec Q3);
@@ -19,9 +21,10 @@ use std::hash::Hasher;
 use std::time::SystemTime;
 
 use objc2::runtime::ProtocolObject;
+use objc2::AnyThread;
 use objc2::MainThreadMarker;
 use objc2::Message;
-use objc2_app_kit::{NSScreen, NSWorkspace};
+use objc2_app_kit::{NSImage, NSScreen, NSWorkspace};
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize, CFURL};
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo,
@@ -130,22 +133,56 @@ impl ImageStore {
                 return self.info(id);
             }
         }
-        let url = CFURL::from_file_path(&resolved)?;
-        // SAFETY: valid file URL, no options.
-        let source = unsafe { CGImageSource::with_url(&url, None) }?;
-        // SAFETY: valid image source; index 0 exists if decoding succeeds (else None).
-        let image = unsafe { source.image_at_index(0, None) }?;
-        let (w, h) = (CGImage::width(Some(&image)), CGImage::height(Some(&image)));
+        let (image, lw, lh) = match Self::decode_imageio(&resolved) {
+            Some(image) => {
+                let (w, h) = (CGImage::width(Some(&image)), CGImage::height(Some(&image)));
+                (image, w as f32, h as f32)
+            }
+            None => self.decode_vector(&resolved)?,
+        };
+        let (pw, ph) = (
+            CGImage::width(Some(&image)) as u32,
+            CGImage::height(Some(&image)) as u32,
+        );
         let existing = self.files.get(&resolved).map(|&(id, _)| id);
         let info = match existing {
             Some(id) if self.images.contains_key(&id) => {
-                self.replace_cgimage(id, &image, w as f32, h as f32, w as u32, h as u32)?;
+                self.replace_cgimage(id, &image, lw, lh, pw, ph)?;
                 self.info(id)?
             }
-            _ => self.insert_scaled(&image, w as f32, h as f32, w as u32, h as u32)?,
+            _ => self.insert_scaled(&image, lw, lh, pw, ph)?,
         };
         self.files.insert(resolved, (info.id, mtime));
         Some(info)
+    }
+
+    fn decode_imageio(path: &str) -> Option<CFRetained<CGImage>> {
+        let url = CFURL::from_file_path(path)?;
+        // SAFETY: valid file URL, no options.
+        let source = unsafe { CGImageSource::with_url(&url, None) }?;
+        // SAFETY: valid image source; index 0 exists if decoding succeeds (else None).
+        unsafe { source.image_at_index(0, None) }
+    }
+
+    /// Formats only AppKit reads (SVG): the logical size is the document's size in points,
+    /// the pixels are rendered at the largest backing scale, so the image is sharp at
+    /// `scale=1`.
+    // shortcut: `scale` stretches this raster (nearest-neighbour) instead of re-rendering;
+    // size the SVG itself (width/height) if it needs to be sharp at another size.
+    fn decode_vector(&self, path: &str) -> Option<(CFRetained<CGImage>, f32, f32)> {
+        let image = NSImage::initWithContentsOfFile(NSImage::alloc(), &NSString::from_str(path))?;
+        let size = image.size();
+        if size.width <= 0.0 || size.height <= 0.0 {
+            return None;
+        }
+        let s = self.max_backing_scale();
+        let mut rect = NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new((size.width * s).round(), (size.height * s).round()),
+        );
+        // SAFETY: `rect` is a valid, writable NSRect; nil context and hints are allowed.
+        let cg = unsafe { image.CGImageForProposedRect_context_hints(&mut rect, None, None) }?;
+        Some((cg.into(), size.width as f32, size.height as f32))
     }
 
     /// Application icon for a bundle identifier or the localized name of a running app

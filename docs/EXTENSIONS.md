@@ -119,6 +119,30 @@ the real menu (Accessibility API). Requires the Accessibility permission.
 Event `menus_change` fires when the front app's menu titles change; `INFO` is the JSON
 array of titles.
 
+## Background images
+
+Two additions to `<…>.background.image` (`docs/spec/components.md` §6). A config that uses
+neither renders and serializes exactly as in SketchyBar.
+
+| Property | Description |
+|---|---|
+| `background.image.color=<argb>` | Paints the colour through the picture's alpha, so a monochrome icon takes the colour of the item's state. Animates like any colour; `color.alpha`, `color.red`, … work as for other colours. Corner radius and border stay. Once set, `--query` shows it as `"color"` next to `"scale"`. |
+| SVG files | `background.image=<file>.svg` loads through AppKit when ImageIO cannot decode the file (SketchyBar answers `Could not open image file at: …`). The logical size is the document's `width`/`height` in points; it is rendered at the screen's backing scale and therefore sharp at `scale=1`. `scale` stretches that raster, so give the SVG the size it is shown at instead. |
+
+The tint is drawn source-over through the alpha (the same as `alias.color`): fully opaque
+pixels become the colour, antialiased edges keep a trace of the original. Black or white
+monochrome icons give the cleanest result.
+
+```lua
+sbar.add("item", "tasks", {
+  icon = { drawing = false },
+  background = {
+    drawing = true,
+    image = { string = "~/.config/mbar/icons/flame.svg", color = 0xfffc5d7c },
+  },
+})
+```
+
 ## Bar properties
 
 | Property | Description |
