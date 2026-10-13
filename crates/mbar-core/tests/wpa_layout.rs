@@ -1581,3 +1581,52 @@ fn item_calculate_bounds_returns_slot_length() {
     // Background spans the slot from the unaligned x; auto height 30 - 1.
     assert_eq!(it.background.bounds, r(2.0, 1.0, 40.0, 29.0));
 }
+
+#[test]
+fn tinted_background_image_adds_mask_on_the_same_rect() {
+    let mut fx = Fx::new();
+    let id = fx.item("tint", "left", "");
+    {
+        let it = fx.it(id);
+        it.label.drawing = false;
+        it.background.enabled = true;
+        it.background.image.set_image(
+            Some(ImageInfo {
+                key: ImageKey(7),
+                size: Size::new(16.0, 16.0),
+                hash: 1,
+            }),
+            true,
+        );
+    }
+    fx.run();
+    let images = |fx: &Fx| {
+        let item = fx.m.item(id).unwrap().clone();
+        let mut scene = mbar_core::scene::Scene::default();
+        layout::item_scene(&item, Point::new(0.0, 0.0), 25.0, None, &mut scene);
+        scene
+            .primitives
+            .into_iter()
+            .filter(|p| matches!(p, Primitive::Image { .. } | Primitive::ImageMask { .. }))
+            .collect::<Vec<_>>()
+    };
+    // Untinted: exactly the SketchyBar primitive.
+    let plain = images(&fx);
+    assert_eq!(plain.len(), 1);
+    let Primitive::Image { rect, .. } = plain[0] else {
+        panic!("expected an image, got {:?}", plain[0]);
+    };
+
+    fx.it(id).background.image.color_override = true;
+    fx.it(id).background.image.color.set_hex(0xffff0000);
+    let tinted = images(&fx);
+    assert_eq!(tinted[0], plain[0]);
+    assert_eq!(
+        tinted[1],
+        Primitive::ImageMask {
+            rect,
+            key: ImageKey(7),
+            color: mbar_core::color::Color::from_hex(0xffff0000),
+        }
+    );
+}

@@ -1644,7 +1644,15 @@ fn draw_image(image: &Image, cv: &Conv, art: Option<ImageInfo>, scene: &mut Scen
         rounded,
         border_width: image.border_width,
         border_color: image.border_color,
-    });
+    }); // mbar extension: the platform folds a mask on the same rect into the image's tint,
+        // so corner clip and border stay.
+    if image.color_override {
+        scene.push(Primitive::ImageMask {
+            rect: cv.rect(r),
+            key,
+            color: image.color,
+        });
+    }
 }
 
 /// `text_draw` (`components.md` §4.9).

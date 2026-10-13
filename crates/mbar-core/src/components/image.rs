@@ -4,7 +4,7 @@
 //! job through [`Resources::load_image`](crate::platform::Resources::load_image), which
 //! returns an [`ImageInfo`] (opaque key, logical size, content hash) or an [`ImageError`].
 
-use super::{color_anim_set, color_set_prop, Shadow};
+use super::{color_anim_set, color_set_prop, hex, Shadow};
 use crate::color::Color;
 use crate::geometry::{Rect, Size};
 use crate::platform::{ImageError, ImageInfo, ImageKey};
@@ -103,6 +103,9 @@ pub struct Image {
     pub key: Option<ImageKey>,
     /// Content hash of the picture (`data_ref` byte comparison).
     pub hash: u64,
+    /// mbar extension: `color` / `color.*` was set, paint `color` through the picture's alpha.
+    pub color_override: bool,
+    pub color: Color,
 }
 
 impl Default for Image {
@@ -123,6 +126,8 @@ impl Default for Image {
             link: false,
             key: None,
             hash: 0,
+            color_override: false,
+            color: Color::from_hex(0xffffffff),
         }
     }
 }
@@ -303,7 +308,25 @@ impl Image {
                 AnimValue::Color(value::parse_int(v) as u32),
                 |a, _| self.set_border_color(a.as_u32()),
             ),
+            "color" => {
+                let changed = !self.color_override;
+                self.color_override = true;
+                let r = cx.animate(
+                    "color",
+                    AnimValue::Color(self.color.hex),
+                    AnimValue::Color(value::parse_int(v) as u32),
+                    |a, _| self.color.set_hex(a.as_u32()),
+                );
+                r || changed
+            }
             _ => match split_key(key) {
+                KeySplit::Sub("color", rest) => {
+                    let changed = !self.color_override;
+                    self.color_override = true;
+                    let r =
+                        cx.scoped("color", |cx| color_set_prop(&mut self.color, rest, v, cx))?;
+                    return Ok(r || changed);
+                }
                 KeySplit::Sub("border_color", rest) => {
                     return cx.scoped("border_color", |cx| {
                         color_set_prop(&mut self.border_color, rest, v, cx)
@@ -334,10 +357,12 @@ impl Image {
             "y_offset" => set_i32(&mut self.y_offset, v.as_i32()),
             "border_width" => set_f32(&mut self.border_width, v.as_f32()),
             "border_color" => self.set_border_color(v.as_u32()),
+            "color" => self.color.set_hex(v.as_u32()),
             _ => match split_key(path) {
                 KeySplit::Sub("border_color", rest) => {
                     color_anim_set(&mut self.border_color, rest, v, fx)
                 }
+                KeySplit::Sub("color", rest) => color_anim_set(&mut self.color, rest, v, fx),
                 KeySplit::Sub("shadow", rest) => self.shadow.anim_set(rest, v, fx),
                 _ => false,
             },
@@ -367,6 +392,10 @@ impl Image {
             value::format_bool(self.enabled),
             value::fmt_f(self.scale as f64)
         );
+        // Only when used, so a plain SketchyBar config serializes exactly as before.
+        if self.color_override {
+            let _ = write!(out, ",\n{i}\"color\": \"{}\"", hex(self.color.hex));
+        }
     }
 }
 
@@ -406,6 +435,37 @@ mod tests {
             ImageSource::parse("app.", "/h"),
             ImageSource::File("app.".into())
         );
+    }
+
+    #[test]
+    fn color_is_an_opt_in_tint() {
+        let mut res = HeadlessResources::default();
+        let mut an = Animator::new();
+        let mut cx = PropCx::new(&mut res, &mut an, "/h");
+        let mut img = Image::default();
+        let mut json = String::new();
+        img.write_json(&mut json, "");
+        assert!(
+            !json.contains("color"),
+            "untouched images serialize as in SketchyBar"
+        );
+
+        assert!(img.set_prop("color", "0xffff0000", &mut cx).unwrap());
+        assert!(img.color_override);
+        assert_eq!(img.color.hex, 0xffff0000);
+        assert!(img.set_prop("color.alpha", "0.5", &mut cx).unwrap());
+        assert_eq!(img.color.hex >> 24, 0x7f);
+
+        let mut fresh = Image::default();
+        assert!(
+            fresh.set_prop("color.alpha", "1.0", &mut cx).unwrap(),
+            "first use enables the tint"
+        );
+        assert!(fresh.color_override);
+
+        json.clear();
+        img.write_json(&mut json, "");
+        assert!(json.ends_with(",\n\"color\": \"0x7fff0000\""), "{json}");
     }
 
     #[test]
