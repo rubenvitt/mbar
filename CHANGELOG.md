@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/rubenvitt/mbar/compare/v0.7.0...v0.8.0) (2026-10-13)
+
+
+### Features
+
+* **image:** tint background images and load SVG files ([#28](https://github.com/rubenvitt/mbar/issues/28)) ([c073369](https://github.com/rubenvitt/mbar/commit/c073369abaaba93ad4693821acf92f57d63590f9))
+
 ## [0.7.0](https://github.com/rubenvitt/mbar/compare/v0.6.0...v0.7.0) (2026-10-12)
 
 
