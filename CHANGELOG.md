@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/rubenvitt/mbar/compare/v0.8.0...v0.8.1) (2026-10-15)
+
+
+### Bug Fixes
+
+* **layout:** ignore the neighbouring display's privacy dot ([#30](https://github.com/rubenvitt/mbar/issues/30)) ([0195cf6](https://github.com/rubenvitt/mbar/commit/0195cf6b090d8bf884335a186feff4785e7d9d4c))
+
 ## [0.8.0](https://github.com/rubenvitt/mbar/compare/v0.7.0...v0.8.0) (2026-10-13)
 
 
