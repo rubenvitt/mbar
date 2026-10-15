@@ -587,7 +587,8 @@ fn bar_window_frame(bar: &BarState) -> Rect {
 }
 
 /// Privacy indicator extension (`privacy_indicator_inset`): the left edge of the
-/// leftmost indicator window that overlaps `bar`, relative to the bar, clamped to
+/// leftmost indicator window that overlaps `bar` and is centred on its display, relative to
+/// the bar, clamped to
 /// `0..=width`. `None` when the inset is off, the dot is hidden or does not overlap.
 fn privacy_right_edge(model: &Model, bar: &BarState) -> Option<f64> {
     if !model.bar.privacy_indicator_inset || !model.privacy.visible {
@@ -597,7 +598,12 @@ fn privacy_right_edge(model: &Model, bar: &BarState) -> Option<f64> {
         .privacy
         .frames
         .iter()
-        .filter(|f| f.intersection(&bar.frame).is_some())
+        // The indicator window sticks out past its display edge: on side-by-side displays
+        // the left display's window reaches a few points into the right display's bar.
+        .filter(|f| {
+            f.intersection(&bar.frame).is_some()
+                && (bar.frame.min_x()..bar.frame.max_x()).contains(&f.mid_x())
+        })
         .map(|f| (f.x - bar.frame.x) as f64)
         .reduce(f64::min)
         .map(|x| x.clamp(0.0, bar.frame.width as f64))
