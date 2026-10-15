@@ -312,3 +312,39 @@ fn inset_smaller_than_padding_does_not_panic() {
     // padding. No panic, no negative position.
     assert_eq!(x_of(&mut h, "clock"), 1876.0);
 }
+
+#[test]
+fn dot_reaching_into_the_next_display_does_not_inset_its_bar() {
+    let mut res = mbar_core::platform::HeadlessResources::default();
+    let mut d2 = res.displays[0].clone();
+    d2.id = 2;
+    d2.adid = 2;
+    d2.uuid = Some("00000000-0000-0000-0000-000000000002".into());
+    d2.frame = Rect::new(1920.0, 0.0, 1920.0, 1080.0);
+    res.displays.push(d2);
+    let mut h = H::with_res(res);
+    clock_bar(&mut h);
+    h.msg(&["--bar", "topmost=on"]);
+    let x_on = |h: &mut H, d: &str| {
+        h.query(&["item", "clock"])["bounding_rects"][d]["origin"][0]
+            .as_f64()
+            .unwrap()
+    };
+    let (x1, x2) = (x_on(&mut h, "display-1"), x_on(&mut h, "display-2"));
+    h.msg(&["--bar", "privacy_indicator_inset=on"]);
+    // Indicator windows are wider than the dot: display 1's starts at 1898 and ends 6 pt
+    // inside display 2 (seen on two 4K displays side by side).
+    feed(
+        &mut h,
+        Input::PrivacyIndicator(PrivacySample {
+            visible: true,
+            frames: vec![
+                Rect::new(1898.0, -6.0, 28.0, 28.0),
+                Rect::new(3818.0, -6.0, 28.0, 28.0),
+            ],
+            attributions: None,
+        }),
+    );
+    assert_eq!(x_on(&mut h, "display-1"), x1 - 22.0);
+    assert_eq!(x_on(&mut h, "display-2"), x2 - 22.0, "own dot only");
+}
