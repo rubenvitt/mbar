@@ -149,6 +149,13 @@ sbar.add("item", "tasks", {
 |---|---|
 | `hide_menubar=on\|off` | Same as `--menubar hide/show`, persisted while mbar runs and restored on exit. |
 | `privacy_indicator_inset=on\|off` | Right-hand items avoid macOS's privacy dot. See [Privacy indicator](#privacy-indicator). |
+| `popup_exclusive=on\|off` | Default `off`. While `on`, a popup turning on (`popup.drawing` off → on, also via `toggle`) closes every other open popup, except the popups the item itself sits in. Setting an already open popup `on` again closes nothing. Not part of `--query bar`. |
+
+## Popup properties
+
+| Property | Description |
+|---|---|
+| `popup.glass=on\|off` | Default `off`. Puts the native glass material behind the popup content: `NSGlassEffectView` on macOS 26 and later, the vibrant menu material before. It takes the corner radius of `popup.background.corner_radius`, gets the system window shadow and a dark appearance (configs draw light text). `popup.background` is still drawn on top, so its `color` works as a tint: keep it mostly transparent. Combine with `popup.blur_radius=0`; the SkyLight blur under the material only muddies it. Not part of `--query`. |
 
 ## Window borders
 

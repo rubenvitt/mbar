@@ -170,6 +170,9 @@ pub enum PropRequest {
     MenuBarHidden(bool),
     /// `--bar privacy_indicator_inset=on` (extension): start the detection.
     StartPrivacyIndicator,
+    /// `popup.drawing` turned on: with `--bar popup_exclusive=on` (extension) every other
+    /// open popup closes.
+    PopupOpened,
 }
 
 /// An error response of a setter. `Display` yields SketchyBar's exact message text

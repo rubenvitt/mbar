@@ -207,6 +207,7 @@ const KEYS: &[&str] = &[
     "popup.y_offset",
     "popup.background.drawing",
     "popup.blur_radius",
+    "popup.glass",
     "graph.color",
     "graph.fill_color",
     "graph.line_width",
@@ -268,6 +269,7 @@ const BAR_KEYS: &[&str] = &[
     "image.scale",
     "show_in_fullscreen",
     "hide_menubar",
+    "popup_exclusive",
     "bogus",
 ];
 const CURVES: &[&str] = &[

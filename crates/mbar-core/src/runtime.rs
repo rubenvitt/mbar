@@ -119,6 +119,7 @@ struct EmittedBar {
 struct EmittedPopup {
     layout: PopupLayout,
     blur: u32,
+    glass: Option<f32>,
     props: WinProps,
 }
 
@@ -526,6 +527,7 @@ impl Runtime {
                 level: props.level,
                 scene,
                 blur_radius: props.blur,
+                glass: None,
                 shadow: props.shadow,
                 sticky: props.sticky,
                 font_smoothing: props.font_smoothing,
@@ -562,14 +564,16 @@ impl Runtime {
         // Popups.
         for pl in &layout.popups {
             let key = WindowKey::Popup(pl.host);
-            let blur = self
-                .model
-                .item(pl.host)
-                .map(|h| h.popup.blur_radius)
-                .unwrap_or(0);
+            let host = self.model.item(pl.host);
+            let blur = host.map(|h| h.popup.blur_radius).unwrap_or(0);
+            let glass = host
+                .filter(|h| h.popup.glass)
+                .map(|h| h.popup.background.corner_radius as f32);
             let changed = self.dirty.contains(&key)
                 || match self.emitted_popups.get(&pl.host) {
-                    Some(e) => e.blur != blur || e.props != props || e.layout != *pl,
+                    Some(e) => {
+                        e.blur != blur || e.glass != glass || e.props != props || e.layout != *pl
+                    }
                     None => true,
                 };
             if !changed {
@@ -582,6 +586,7 @@ impl Runtime {
                 level: pl.level,
                 scene,
                 blur_radius: blur,
+                glass,
                 shadow: false,
                 sticky: props.sticky,
                 font_smoothing: props.font_smoothing,
@@ -593,6 +598,7 @@ impl Runtime {
                 EmittedPopup {
                     layout: pl.clone(),
                     blur,
+                    glass,
                     props,
                 },
             );
@@ -1384,6 +1390,11 @@ impl Runtime {
                     effects.push(Effect::Platform(PlatformRequest::SetMenuBarHidden(h)));
                 }
                 PropRequest::StartPrivacyIndicator => self.start_privacy(effects),
+                PropRequest::PopupOpened => {
+                    if let (Some(id), true) = (id, self.model.bar.popup_exclusive) {
+                        self.close_other_popups(id);
+                    }
+                }
             }
         }
         out
@@ -3057,6 +3068,26 @@ impl Runtime {
             }
         }
         self.model.bar_needs_update = true;
+    }
+
+    /// `popup_exclusive` (extension): close every open popup except `id`'s and those of
+    /// the popup hosts `id` sits in (nested popups keep their parents open).
+    fn close_other_popups(&mut self, id: ItemId) {
+        let mut keep = vec![id];
+        let mut cur = self.model.item(id).and_then(|i| i.parent);
+        while let Some(p) = cur.filter(|p| !keep.contains(p)) {
+            keep.push(p);
+            cur = self.model.item(p).and_then(|i| i.parent);
+        }
+        let mut closed = false;
+        for it in &mut self.model.items {
+            if !keep.contains(&it.id) {
+                closed |= it.popup.set_drawing(false);
+            }
+        }
+        if closed {
+            self.model.bar_needs_update = true;
+        }
     }
 
     /// `bar_manager_bar_needs_redraw` (`bar.md` §5.2) for one bar. `Redraw::PopupMembers`
