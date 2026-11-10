@@ -431,3 +431,73 @@ fn alias_and_providers_and_app_menu() {
     assert!(platform(&fx).contains(&PlatformRequest::OpenMenu { index: 2 }));
     assert!(fx.iter().any(|e| matches!(e, Effect::Reply { .. })));
 }
+
+/// `popup_exclusive` and `popup.glass` (extensions, `docs/EXTENSIONS.md`).
+#[test]
+fn popup_exclusive_and_glass() {
+    let mut h = H::new();
+    for host in ["a", "b"] {
+        let row = format!("{host}.row");
+        let pos = format!("popup.{host}");
+        h.msg(&[
+            "--add", "item", host, "left", "--add", "item", &row, &pos, "--set", &row, "label=x",
+        ]);
+    }
+    h.msg(&["--add", "item", "nested", "popup.a.row"]);
+    h.msg(&["--add", "item", "n.row", "popup.nested"]);
+    let drawing = |h: &mut H, n: &str| h.query(&[n])["popup"]["drawing"].clone();
+
+    // Off (default): popups stay open side by side.
+    h.msg(&[
+        "--set",
+        "a",
+        "popup.drawing=on",
+        "--set",
+        "b",
+        "popup.drawing=on",
+    ]);
+    assert_eq!(drawing(&mut h, "a"), "on");
+    let b = h.rt.model.find("b").unwrap();
+
+    h.msg(&["--bar", "popup_exclusive=on"]);
+    // Re-setting an open popup does not close the others.
+    h.msg(&["--set", "a", "popup.drawing=on"]);
+    assert_eq!(drawing(&mut h, "b"), "on");
+    // Opening one closes the rest.
+    h.msg(&[
+        "--set",
+        "a",
+        "popup.drawing=off",
+        "--set",
+        "a",
+        "popup.drawing=toggle",
+    ]);
+    assert!(h.last_frame.closed.contains(&WindowKey::Popup(b)));
+    assert_eq!(drawing(&mut h, "b"), "off");
+    // A nested popup keeps its parents open.
+    h.msg(&["--set", "nested", "popup.drawing=on"]);
+    assert_eq!(drawing(&mut h, "a"), "on");
+    assert_eq!(drawing(&mut h, "nested"), "on");
+
+    // Glass travels to the platform with the popup's corner radius.
+    let a = h.rt.model.find("a").unwrap();
+    h.msg(&[
+        "--set",
+        "a",
+        "popup.glass=on",
+        "popup.background.corner_radius=14",
+    ]);
+    let w = h
+        .last_frame
+        .windows
+        .iter()
+        .find(|w| w.key == WindowKey::Popup(a));
+    assert_eq!(w.unwrap().glass, Some(14.0));
+    h.msg(&["--set", "a", "popup.glass=off"]);
+    let w = h
+        .last_frame
+        .windows
+        .iter()
+        .find(|w| w.key == WindowKey::Popup(a));
+    assert_eq!(w.unwrap().glass, None);
+}

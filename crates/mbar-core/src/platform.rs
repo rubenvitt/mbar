@@ -477,6 +477,9 @@ pub struct WindowUpdate {
     pub scene: Scene,
     /// Window background blur (`--bar blur_radius`, `popup.blur_radius`).
     pub blur_radius: u32,
+    /// Native glass material behind the scene (`popup.glass`, extension) with this corner
+    /// radius; `None` without.
+    pub glass: Option<f32>,
     /// System window shadow (`--bar shadow`).
     pub shadow: bool,
     /// Visible on all spaces (`--bar sticky`).

@@ -19,9 +19,12 @@ use objc2::{
     define_class, msg_send, AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly,
 };
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSEvent, NSEventModifierFlags, NSPanel, NSResponder, NSScreen,
-    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowAnimationBehavior,
-    NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
+    NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSAutoresizingMaskOptions,
+    NSBackingStoreType, NSColor, NSEvent, NSEventModifierFlags, NSGlassEffectView, NSPanel,
+    NSResponder, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
+    NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior, NSWindowOrderingMode,
+    NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize};
@@ -358,6 +361,8 @@ pub struct BarWindow {
     shadow: bool,
     blur_radius: u32,
     corner_radius: f32,
+    /// Glass container hosting `view` (`popup.glass`) and its corner radius.
+    glass: Option<(Retained<NSView>, f32)>,
     /// `(drawable w, drawable h, scale bits)` applied to the layer.
     layer_state: (u32, u32, u32),
     rendered_scale: f32,
@@ -417,6 +422,7 @@ impl BarWindow {
             shadow: false,
             blur_radius: 0,
             corner_radius: 0.0,
+            glass: None,
             layer_state: (0, 0, 0),
             rendered_scale: 0.0,
         };
@@ -529,6 +535,63 @@ impl BarWindow {
         self.layer.setCornerRadius(radius as f64);
         self.layer.setMasksToBounds(radius > 0.0);
         CATransaction::commit();
+    }
+
+    /// Native glass behind the content (`popup.glass`) with corner radius `radius`, or
+    /// `None` for the plain window. `NSGlassEffectView` (macOS 26+), else the vibrant
+    /// menu material. The appearance is forced dark: configs draw light text.
+    pub fn set_glass(&mut self, radius: Option<f32>) {
+        let radius = radius.map(|r| r.max(0.0));
+        if self.glass.as_ref().map(|g| g.1) == radius {
+            return;
+        }
+        let Some(radius) = radius else {
+            self.glass = None;
+            self.window.setContentView(Some(&self.view));
+            self.window.setAppearance(None);
+            self.set_corner_radius(0.0);
+            return;
+        };
+        if self.glass.is_none() {
+            let mtm = self.mtm;
+            let bounds = self.view.frame();
+            let container: Retained<NSView> = if objc2::runtime::AnyClass::get(c"NSGlassEffectView")
+                .is_some()
+            {
+                let g = NSGlassEffectView::initWithFrame(NSGlassEffectView::alloc(mtm), bounds);
+                g.setContentView(Some(&self.view));
+                Retained::into_super(g)
+            } else {
+                let v = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), bounds);
+                v.setMaterial(NSVisualEffectMaterial::Menu);
+                v.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+                // A non-activating panel is never key; inactive vibrancy renders flat.
+                v.setState(NSVisualEffectState::Active);
+                v.setWantsLayer(true);
+                v.addSubview(&self.view);
+                Retained::into_super(v)
+            };
+            self.view.setAutoresizingMask(
+                NSAutoresizingMaskOptions::ViewWidthSizable
+                    | NSAutoresizingMaskOptions::ViewHeightSizable,
+            );
+            self.window.setContentView(Some(&container));
+            // SAFETY: `NSAppearanceNameDarkAqua` is a constant exported by AppKit.
+            let dark = NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua });
+            self.window.setAppearance(dark.as_deref());
+            self.glass = Some((container, radius));
+        }
+        let Some(g) = self.glass.as_mut() else { return };
+        g.1 = radius;
+        if let Some(glass) = g.0.downcast_ref::<NSGlassEffectView>() {
+            glass.setCornerRadius(radius as f64);
+        } else {
+            g.0.layer().inspect(|l| {
+                l.setCornerRadius(radius as f64);
+                l.setMasksToBounds(true);
+            });
+        }
+        self.set_corner_radius(radius);
     }
 
     /// System window shadow (`bar.shadow`).

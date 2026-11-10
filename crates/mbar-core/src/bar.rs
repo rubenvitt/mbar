@@ -51,6 +51,8 @@ pub struct BarProps {
     /// Not part of `--query bar` (SketchyBar's exact output); shown by
     /// `--query privacy_indicator`.
     pub privacy_indicator_inset: bool,
+    /// Extension `popup_exclusive=on|off`: opening a popup closes all others.
+    pub popup_exclusive: bool,
 }
 
 impl Default for BarProps {
@@ -82,6 +84,7 @@ impl Default for BarProps {
             background,
             hide_menubar: false,
             privacy_indicator_inset: false,
+            popup_exclusive: false,
         }
     }
 }
@@ -314,6 +317,10 @@ impl BarProps {
                     }
                 }
                 changed
+            }
+            "popup_exclusive" => {
+                let on = value::parse_bool(v, self.popup_exclusive);
+                set_bool(&mut self.popup_exclusive, on)
             }
             _ => return self.background.set_prop(key, v, cx),
         })

@@ -230,7 +230,9 @@ impl WindowManager {
         m.win.set_frame(grect(&u.frame));
         m.win.set_level(convert::window_level(u.level));
         m.win.set_sticky(u.sticky);
-        m.win.set_shadow(u.shadow);
+        // Glass popups get the system shadow, like native menus.
+        m.win.set_shadow(u.shadow || u.glass.is_some());
+        m.win.set_glass(u.glass);
         m.order = u.order;
         m.scene = u.scene;
         res.text.system.set_font_smoothing(u.font_smoothing);

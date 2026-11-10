@@ -146,6 +146,7 @@
 ---@field y_offset? integer
 ---@field blur_radius? integer
 ---@field topmost? mbar.Bool
+---@field glass? mbar.Bool Native glass material behind the popup (extension)
 ---@field background? mbar.BackgroundProps
 
 ---@class mbar.GraphProps
@@ -268,6 +269,7 @@
 ---@field show_in_fullscreen? mbar.Bool
 ---@field hide_menubar? mbar.Bool
 ---@field privacy_indicator_inset? mbar.Bool
+---@field popup_exclusive? mbar.Bool Opening a popup closes all others (extension)
 ---@field color? mbar.Color|mbar.ColorProps
 ---@field border_color? mbar.Color|mbar.ColorProps
 ---@field border_width? integer

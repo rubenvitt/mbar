@@ -7,7 +7,7 @@ use crate::components::{align_name, Background};
 use crate::geometry::{Point, Rect};
 use crate::item::ItemId;
 use crate::props::{
-    set_bool, set_i32, set_u32, AnimValue, PropCx, PropEffects, PropError, PropResult,
+    set_bool, set_i32, set_u32, AnimValue, PropCx, PropEffects, PropError, PropRequest, PropResult,
 };
 use crate::value::{self, split_key, KeySplit};
 use std::fmt::Write;
@@ -30,6 +30,8 @@ pub struct Popup {
     pub blur_radius: u32,
     /// Default **on**: popup-menu window level; off: backstop + 1.
     pub topmost: bool,
+    /// Extension `glass=on|off`: native glass material behind the popup content.
+    pub glass: bool,
     /// Drawing off; preset `color=0x44000000`, `border_color=0xffff0000`. Its shadow is never
     /// drawn.
     pub background: Background,
@@ -59,6 +61,7 @@ impl Default for Popup {
             y_offset: 0,
             blur_radius: 0,
             topmost: true,
+            glass: false,
             background: Background::popup_default(),
             items: Vec::new(),
             mouse_over: false,
@@ -115,7 +118,11 @@ impl Popup {
             ),
             "drawing" => {
                 let on = value::parse_bool(v, self.drawing);
-                self.set_drawing(on)
+                let changed = self.set_drawing(on);
+                if changed && on {
+                    cx.request(PropRequest::PopupOpened);
+                }
+                changed
             }
             "horizontal" => {
                 self.horizontal = value::parse_bool(v, self.horizontal);
@@ -146,6 +153,10 @@ impl Popup {
             "topmost" => {
                 let on = value::parse_bool(v, self.topmost);
                 self.set_topmost(on)
+            }
+            "glass" => {
+                let on = value::parse_bool(v, self.glass);
+                set_bool(&mut self.glass, on)
             }
             _ => match split_key(key) {
                 KeySplit::Sub("background", rest) => {
