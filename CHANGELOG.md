@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/rubenvitt/mbar/compare/v0.8.1...v0.9.0) (2026-11-10)
+
+
+### Features
+
+* **popup:** native glass material and exclusive popups ([#32](https://github.com/rubenvitt/mbar/issues/32)) ([8beba42](https://github.com/rubenvitt/mbar/commit/8beba420bf8d8c8c4bbdadb19344e237c475d9da))
+
 ## [0.8.1](https://github.com/rubenvitt/mbar/compare/v0.8.0...v0.8.1) (2026-10-15)
 
 
